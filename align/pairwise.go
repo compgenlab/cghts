@@ -162,10 +162,16 @@ func (sw *pairwise) Align(query string, target string) *PairwiseAlignment {
 				// the most sensible option for *all cases* I think it the first.
 				// remember the i,j coord is actually 1-based indexing
 
-				gio -= hpDiscount(qRun[i-1], sw.opts.hpOpenScale, sw.opts.hpOpenCap)
-				gie -= hpDiscount(qRun[i-1], sw.opts.hpExtendScale, sw.opts.hpExtendCap)
-				gdo -= hpDiscount(tRun[j-1], sw.opts.hpOpenScale, sw.opts.hpOpenCap)
-				gde -= hpDiscount(tRun[j-1], sw.opts.hpExtendScale, sw.opts.hpExtendCap)
+				if qRun[i-1] > 0 {
+					// only process HP discounts if HP run is positive (i.e. not an N or other non-standard base)
+					gio -= hpDiscount(qRun[i-1], sw.opts.hpOpenScale, sw.opts.hpOpenCap)
+					gie -= hpDiscount(qRun[i-1], sw.opts.hpExtendScale, sw.opts.hpExtendCap)
+				}
+				if tRun[j-1] > 0 {
+					// only process HP discounts if HP run is positive (i.e. not an N or other non-standard base)
+					gdo -= hpDiscount(tRun[j-1], sw.opts.hpOpenScale, sw.opts.hpOpenCap)
+					gde -= hpDiscount(tRun[j-1], sw.opts.hpExtendScale, sw.opts.hpExtendCap)
+				}
 			}
 
 			// query and target are zero-based. the matrix has an extra row/col at start

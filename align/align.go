@@ -299,3 +299,63 @@ CIGAR: %s
 Score: %s`, qStr, aStr, tStr, a.CIGAR, utils.TrimFloat(float64(a.Score), 2))
 	return ret
 }
+
+func (a *PairwiseAlignment) TargetAlignedStr() string {
+	tStr := ""
+	qPos := a.QueryStart
+	tPos := a.TargetStart
+	cigarExpanded, err := CigarExpand(a.CIGAR)
+	if err != nil {
+		return fmt.Sprintf("Error expanding CIGAR: %v", err)
+	}
+	for i := 0; i < len(cigarExpanded); i++ {
+		// fmt.Printf("qStr: %s\ntStr: %s\n-\n", qStr, tStr)
+		op := cigarExpanded[i]
+		switch op {
+		case 'M':
+			tStr += string(a.Target[tPos])
+			qPos++
+			tPos++
+		case 'D':
+			tStr += string(a.Target[tPos])
+			tPos++
+		case 'I':
+			tStr += "-"
+			qPos++
+		case 'S':
+			tStr += " "
+			qPos++
+		}
+	}
+	return tStr
+}
+
+func (a *PairwiseAlignment) QueryAlignedStr() string {
+	qStr := ""
+	qPos := a.QueryStart
+	tPos := a.TargetStart
+	cigarExpanded, err := CigarExpand(a.CIGAR)
+	if err != nil {
+		return fmt.Sprintf("Error expanding CIGAR: %v", err)
+	}
+	for i := 0; i < len(cigarExpanded); i++ {
+		// fmt.Printf("qStr: %s\ntStr: %s\n-\n", qStr, tStr)
+		op := cigarExpanded[i]
+		switch op {
+		case 'M':
+			qStr += string(a.Query[qPos])
+			qPos++
+			tPos++
+		case 'D':
+			qStr += "-"
+			tPos++
+		case 'I':
+			qStr += string(a.Query[qPos])
+			qPos++
+		case 'S':
+			qStr += string(a.Query[qPos])
+			qPos++
+		}
+	}
+	return qStr
+}
