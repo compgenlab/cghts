@@ -173,7 +173,9 @@ func (r *FastaSeqRecord) FullSeq() SeqQual {
 			r.reader.UnreadByte()
 			break
 		}
-		buf.WriteByte(b)
+		if b != '\n' && b != '\r' {
+			buf.WriteByte(b)
+		}
 		last = b
 	}
 	return SeqQual{seq: buf.String()}

@@ -84,6 +84,7 @@ func (r *FastqReader) NextSeq() (SeqRecord, error) {
 		if b, err := r.reader.ReadByte(); err != nil {
 			return nil, err
 		} else if b == '@' && r.lastByte == '\n' {
+			// fmt.Printf("Byte: %c\n", b)
 
 			// TODO: make this support multi-line FASTQ records.
 			//       Right now it only supports single-line sequences
@@ -92,14 +93,17 @@ func (r *FastqReader) NextSeq() (SeqRecord, error) {
 
 			// start of a FASTQ record, read each line
 			header, err := r.reader.ReadString('\n')
+			// fmt.Printf("header: %s\n", header)
 			if err != nil {
 				return nil, err
 			}
 			seq, err := r.reader.ReadString('\n')
+			// fmt.Printf("seq: %s\n", seq)
 			if err != nil {
 				return nil, err
 			}
 			plus, err := r.reader.ReadString('\n')
+			// fmt.Printf("plus: %s\n", plus)
 			if err != nil {
 				return nil, err
 			}
@@ -107,6 +111,7 @@ func (r *FastqReader) NextSeq() (SeqRecord, error) {
 				return nil, io.ErrUnexpectedEOF
 			}
 			qual, err := r.reader.ReadString('\n')
+			// fmt.Printf("qual: %s\n", qual)
 			if err != nil && qual == "" {
 				// it could be possible to have a quality string
 				// without a newline, so we'll allow that, but
