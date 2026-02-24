@@ -66,7 +66,7 @@ func rowColToIdx(row int, col int, colLen int) int {
 	return row*colLen + col
 }
 
-func (sw *pairwise) Align(query string, target string) *PairwiseAlignment {
+func (sw *pairwise) Align(query string, target string, queryName string, targetName string) *PairwiseAlignment {
 	if sw.opts.verbose {
 		fmt.Println("Query: " + query)
 		fmt.Println("Target: " + target)
@@ -378,8 +378,10 @@ func (sw *pairwise) Align(query string, target string) *PairwiseAlignment {
 	}
 
 	return &PairwiseAlignment{
-		Query:       query,
-		Target:      target,
+		QueryName:   queryName,
+		TargetName:  targetName,
+		QuerySeq:    query,
+		TargetSeq:   target,
 		Score:       bestScore,
 		CIGAR:       CigarCondense(cigar),
 		QueryStart:  queryStart,

@@ -87,10 +87,7 @@ func (s *stringSeq) FullSeq() SeqQual {
 func (s *stringSeq) Chunks(n int) iter.Seq[SeqQual] {
 	return func(yield func(SeqQual) bool) {
 		// Clamp to the shorter of seq/qual to avoid slicing panics.
-		total := len(s.seq)
-		if len(s.qual) < total {
-			total = len(s.qual)
-		}
+		total := min(len(s.qual), len(s.seq))
 		if total == 0 {
 			return
 		}
