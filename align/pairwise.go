@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/compgen-io/cgltk/sequtils"
+	"github.com/compgen-io/cgltk/seqio"
+	"github.com/compgen-io/cgltk/support/sequtils"
 )
 
 type pairwise struct {
@@ -66,18 +67,20 @@ func rowColToIdx(row int, col int, colLen int) int {
 	return row*colLen + col
 }
 
-func (sw *pairwise) Align(query string, target string, queryName string, targetName string) *PairwiseAlignment {
+func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAlignment {
+	queryStr := query.Seq()
+	targetStr := target.Seq()
 	if sw.opts.verbose {
-		fmt.Println("Query: " + query)
-		fmt.Println("Target: " + target)
+		fmt.Println("Query: " + queryStr)
+		fmt.Println("Target: " + targetStr)
 	}
-	qLen := len(query)
-	tLen := len(target)
+	qLen := len(queryStr)
+	tLen := len(targetStr)
 	var qRun []int
 	var tRun []int
 	if sw.opts.hpOpenScale > 0 || sw.opts.hpExtendScale > 0 {
-		qRun = sequtils.HomopolymerRunLen(query)
-		tRun = sequtils.HomopolymerRunLen(target)
+		qRun = sequtils.HomopolymerRunLen(queryStr)
+		tRun = sequtils.HomopolymerRunLen(targetStr)
 	}
 
 	rows := qLen + 1
@@ -175,7 +178,7 @@ func (sw *pairwise) Align(query string, target string, queryName string, targetN
 			}
 
 			// query and target are zero-based. the matrix has an extra row/col at start
-			s := sw.opts.scoringMatrix.ScorePair(query[i-1], target[j-1])
+			s := sw.opts.scoringMatrix.ScorePair(queryStr[i-1], targetStr[j-1])
 
 			Mm := data[diag].scoreM + s
 			Mi := data[diag].scoreI + s
@@ -231,10 +234,10 @@ func (sw *pairwise) Align(query string, target string, queryName string, targetN
 				if data[idx].scoreM-rightClipPenalty >= bestScore {
 					bestScore, bestRow, bestCol, bestTrace = data[idx].scoreM-rightClipPenalty, i, j, swTraceMatch
 				}
-				if data[idx].scoreI-rightClipPenalty >= bestScore {
+				if data[idx].scoreI-rightClipPenalty > bestScore {
 					bestScore, bestRow, bestCol, bestTrace = data[idx].scoreI-rightClipPenalty, i, j, swTraceIns
 				}
-				if data[idx].scoreD-rightClipPenalty >= bestScore {
+				if data[idx].scoreD-rightClipPenalty > bestScore {
 					bestScore, bestRow, bestCol, bestTrace = data[idx].scoreD-rightClipPenalty, i, j, swTraceDel
 				}
 			}
@@ -277,7 +280,7 @@ func (sw *pairwise) Align(query string, target string, queryName string, targetN
 	if sw.opts.verbose {
 		for j := range cols {
 			if j > 0 {
-				fmt.Printf("%6s ", target[j-1:j])
+				fmt.Printf("%6s ", targetStr[j-1:j])
 			} else {
 				fmt.Printf("      ")
 			}
@@ -285,7 +288,7 @@ func (sw *pairwise) Align(query string, target string, queryName string, targetN
 		fmt.Println()
 		for i := range rows {
 			if i > 0 {
-				fmt.Printf("%s ", query[i-1:i])
+				fmt.Printf("%s ", queryStr[i-1:i])
 			} else {
 				fmt.Printf("  ")
 			}
@@ -374,19 +377,17 @@ func (sw *pairwise) Align(query string, target string, queryName string, targetN
 			cigar += "S"
 		}
 		queryStart = 0
-		queryEnd = len(query)
+		queryEnd = len(queryStr)
 	}
 
 	return &PairwiseAlignment{
-		QueryName:   queryName,
-		TargetName:  targetName,
-		QuerySeq:    query,
-		TargetSeq:   target,
-		Score:       bestScore,
-		CIGAR:       CigarCondense(cigar),
+		Query:       query,
+		Target:      target,
 		QueryStart:  queryStart,
 		QueryEnd:    queryEnd,
 		TargetStart: targetStart,
 		TargetEnd:   bestCol,
+		Score:       bestScore,
+		CIGAR:       CigarCondense(cigar),
 	}
 }

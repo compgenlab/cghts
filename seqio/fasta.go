@@ -178,7 +178,11 @@ func (r *FastaSeqRecord) FullSeq() SeqQual {
 		}
 		last = b
 	}
-	return SeqQual{seq: buf.String()}
+	return SeqQual{
+		name: r.name,
+		seq:  buf.String(),
+		pos:  0,
+	}
 }
 
 // Chunks implements [SeqRecord].
@@ -198,15 +202,21 @@ func (r *FastaSeqRecord) Chunks(length int) iter.Seq[SeqQual] {
 			last = b
 		}
 		buf := make([]byte, blen)
+		curPos := 0
 		for {
 			n, err := r.reader.Read(buf)
 			if n > 0 {
 				chunk := string(buf[:n])
 				chunk = strings.ReplaceAll(chunk, "\n", "")
 				chunk = strings.ReplaceAll(chunk, "\r", "")
-				if !yield(SeqQual{seq: chunk}) {
+				if !yield(SeqQual{
+					seq:  chunk,
+					name: r.name,
+					pos:  curPos,
+				}) {
 					return
 				}
+				curPos += len(chunk)
 			}
 			if err != nil {
 				return
