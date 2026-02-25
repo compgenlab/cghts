@@ -184,25 +184,28 @@ type FastqSeqRecord struct {
 
 func (r *FastqSeqRecord) FullSeq() SeqQual {
 	return SeqQual{
+		name: r.name,
 		seq:  r.seq,
 		qual: r.qual,
+		pos:  0,
 	}
 }
 
 // GetChunk implements [SeqRecord].
 func (r *FastqSeqRecord) Chunks(length int) iter.Seq[SeqQual] {
 	return func(yield func(SeqQual) bool) {
+		curPos := 0
 		for i := 0; i < len(r.seq); i += length {
-			end := i + length
-			if end > len(r.seq) {
-				end = len(r.seq)
-			}
+			end := min(i+length, len(r.seq))
 			if !yield(SeqQual{
 				seq:  r.seq[i:end],
 				qual: r.qual[i:end],
+				name: r.name,
+				pos:  curPos,
 			}) {
 				return
 			}
+			curPos += (end - i)
 		}
 	}
 }

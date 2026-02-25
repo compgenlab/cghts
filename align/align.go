@@ -3,17 +3,17 @@ package align
 import (
 	"fmt"
 	"math"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/compgen-io/cgltk/sequtils"
-	"github.com/compgen-io/cgltk/utils"
+	"github.com/compgen-io/cgltk/seqio"
+	"github.com/compgen-io/cgltk/support/sequtils"
+	"github.com/compgen-io/cgltk/support/utils"
 )
 
 type PairwiseAligner interface {
-	Align(query string, target string, queryName string, targetName string) *PairwiseAlignment
+	Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAlignment
 }
 
 type ScoringMatrix interface {
@@ -21,17 +21,14 @@ type ScoringMatrix interface {
 }
 
 type PairwiseAlignment struct {
-	QueryName    string
-	TargetName   string
-	QuerySeq     string
-	TargetSeq    string
-	QueryStart   int
-	QueryEnd     int
-	TargetStart  int
-	TargetEnd    int
-	Score        float32
-	CIGAR        string
-	QueryRevComp bool
+	Query       seqio.SeqQual
+	Target      seqio.SeqQual
+	QueryStart  int
+	QueryEnd    int
+	TargetStart int
+	TargetEnd   int
+	Score       float32
+	CIGAR       string
 }
 
 type matchMismatch struct {
@@ -60,8 +57,8 @@ func DnaAlignmentDefaults() *alignmentOptions {
 		scoringMatrix:         MatchMismatchScoring(1, 2),
 		gapOpenPenaltyIns:     6,
 		gapExtendPenaltyIns:   1,
-		gapOpenPenaltyDel:     5,
-		gapExtendPenaltyDel:   2,
+		gapOpenPenaltyDel:     6,
+		gapExtendPenaltyDel:   1,
 		clippingOpenPenalty:   5,
 		clippingExtendPenalty: 1,
 
@@ -80,7 +77,7 @@ func OntAlignmentDefaults() *alignmentOptions {
 		scoringMatrix:         MatchMismatchScoring(1, 1),
 		gapOpenPenaltyIns:     2,
 		gapExtendPenaltyIns:   1,
-		gapOpenPenaltyDel:     2,
+		gapOpenPenaltyDel:     3,
 		gapExtendPenaltyDel:   1,
 		clippingOpenPenalty:   5,
 		clippingExtendPenalty: 1,
@@ -251,9 +248,9 @@ func (a *PairwiseAlignment) String() string {
 		op := cigarExpanded[i]
 		switch op {
 		case 'M':
-			qStr += string(a.QuerySeq[qPos])
-			tStr += string(a.TargetSeq[tPos])
-			if sequtils.DNAMatches(a.QuerySeq[qPos], a.TargetSeq[tPos]) {
+			qStr += string(a.Query.Seq()[qPos])
+			tStr += string(a.Target.Seq()[tPos])
+			if sequtils.DNAMatches(a.Query.Seq()[qPos], a.Target.Seq()[tPos]) {
 				alnStr += "|"
 			} else {
 				alnStr += "."
@@ -262,28 +259,32 @@ func (a *PairwiseAlignment) String() string {
 			tPos++
 		case 'D':
 			qStr += "-"
-			tStr += string(a.TargetSeq[tPos])
+			tStr += string(a.Target.Seq()[tPos])
 			alnStr += " "
 			tPos++
 		case 'I':
-			qStr += string(a.QuerySeq[qPos])
+			qStr += string(a.Query.Seq()[qPos])
 			alnStr += " "
 			tStr += "-"
 			qPos++
 		case 'S':
-			qStr += string(a.QuerySeq[qPos])
+			qStr += string(a.Query.Seq()[qPos])
 			tStr += " "
 			alnStr += "-"
 			qPos++
 		}
 	}
-	var qName string
-	if !a.QueryRevComp {
-		qName = fmt.Sprintf("%s (%d-%d)", a.QueryName, a.QueryStart+1, a.QueryEnd)
+	var qName, tName string
+	if !a.Query.IsRevComp() {
+		qName = fmt.Sprintf("%s (%d-%d)", a.Query.Name(), a.QueryStart+1, a.QueryEnd)
 	} else {
-		qName = fmt.Sprintf("%s (%d-%d)", a.QueryName, a.QueryEnd, a.QueryStart+1)
+		qName = fmt.Sprintf("%s (%d-%d)", a.Query.Name(), a.QueryEnd, a.QueryStart+1)
 	}
-	tName := fmt.Sprintf("%s (%d-%d)", a.TargetName, a.TargetStart+1, a.TargetEnd)
+	if !a.Target.IsRevComp() {
+		tName = fmt.Sprintf("%s (%d-%d)", a.Target.Name(), a.TargetStart+1, a.TargetEnd)
+	} else {
+		tName = fmt.Sprintf("%s (%d-%d)", a.Target.Name(), a.TargetEnd, a.TargetStart+1)
+	}
 
 	maxNameLen := max(len(qName), len(tName))
 
@@ -317,11 +318,11 @@ func (a *PairwiseAlignment) TargetAlignedStr() string {
 		op := cigarExpanded[i]
 		switch op {
 		case 'M':
-			tStr += string(a.TargetSeq[tPos])
+			tStr += string(a.Target.Seq()[tPos])
 			qPos++
 			tPos++
 		case 'D':
-			tStr += string(a.TargetSeq[tPos])
+			tStr += string(a.Target.Seq()[tPos])
 			tPos++
 		case 'I':
 			tStr += "-"
@@ -333,32 +334,22 @@ func (a *PairwiseAlignment) TargetAlignedStr() string {
 	}
 	return tStr
 }
+
+// Return the target string, relative to the plus strand
+func (a *PairwiseAlignment) TargetStrPlus() string {
+	if a.Target.IsRevComp() {
+		return sequtils.ReverseCompliment(a.Target.Seq()[a.TargetStart:a.TargetEnd])
+	}
+	return a.Target.Seq()[a.TargetStart:a.TargetEnd]
+}
+
+func (a *PairwiseAlignment) TargetSub() seqio.SeqQual {
+	return a.Target.Sub(a.TargetStart, a.TargetEnd)
+}
+
+// Return the target string
 func (a *PairwiseAlignment) TargetStr() string {
-	tStr := ""
-	qPos := a.QueryStart
-	tPos := a.TargetStart
-	cigarExpanded, err := CigarExpand(a.CIGAR)
-	if err != nil {
-		return fmt.Sprintf("Error expanding CIGAR: %v", err)
-	}
-	for i := 0; i < len(cigarExpanded); i++ {
-		// fmt.Printf("qStr: %s\ntStr: %s\n-\n", qStr, tStr)
-		op := cigarExpanded[i]
-		switch op {
-		case 'M':
-			tStr += string(a.TargetSeq[tPos])
-			qPos++
-			tPos++
-		case 'D':
-			tStr += string(a.TargetSeq[tPos])
-			tPos++
-		case 'I':
-			qPos++
-		case 'S':
-			qPos++
-		}
-	}
-	return tStr
+	return a.Target.Seq()[a.TargetStart:a.TargetEnd]
 }
 
 func (a *PairwiseAlignment) QueryAlignedStr() string {
@@ -374,92 +365,103 @@ func (a *PairwiseAlignment) QueryAlignedStr() string {
 		op := cigarExpanded[i]
 		switch op {
 		case 'M':
-			qStr += string(a.QuerySeq[qPos])
+			qStr += string(a.Query.Seq()[qPos])
 			qPos++
 			tPos++
 		case 'D':
 			qStr += "-"
 			tPos++
 		case 'I':
-			qStr += string(a.QuerySeq[qPos])
+			qStr += string(a.Query.Seq()[qPos])
 			qPos++
 		case 'S':
-			qStr += string(a.QuerySeq[qPos])
+			qStr += string(a.Query.Seq()[qPos])
 			qPos++
 		}
 	}
 	return qStr
+}
+
+// Return the query string, relative to the plus strand
+func (a *PairwiseAlignment) QueryStrPlus() string {
+	if a.Query.IsRevComp() {
+		return sequtils.ReverseCompliment(a.Query.Seq()[a.QueryStart:a.QueryEnd])
+	}
+	return a.Query.Seq()[a.QueryStart:a.QueryEnd]
+}
+
+func (a *PairwiseAlignment) QuerySub() seqio.SeqQual {
+	return a.Query.Sub(a.QueryStart, a.QueryEnd)
 }
 
 func (a *PairwiseAlignment) QueryStr() string {
-	qStr := ""
-	qPos := a.QueryStart
-	tPos := a.TargetStart
-	cigarExpanded, err := CigarExpand(a.CIGAR)
-	if err != nil {
-		return fmt.Sprintf("Error expanding CIGAR: %v", err)
-	}
-	for i := 0; i < len(cigarExpanded); i++ {
-		// fmt.Printf("qStr: %s\ntStr: %s\n-\n", qStr, tStr)
-		op := cigarExpanded[i]
-		switch op {
-		case 'M':
-			qStr += string(a.QuerySeq[qPos])
-			qPos++
-			tPos++
-		case 'D':
-			tPos++
-		case 'I':
-			qStr += string(a.QuerySeq[qPos])
-			qPos++
-		case 'S':
-			qStr += string(a.QuerySeq[qPos])
-			qPos++
-		}
-	}
-	return qStr
+	return a.Query.Seq()[a.QueryStart:a.QueryEnd]
 }
 
-func AlignBatch(aligner PairwiseAligner, query string, targets []string, queryName string, targetNames []string, maxWorkers int) *PairwiseAlignment {
-	var bestAln *PairwiseAlignment
+type PairwiseAlignmentPromise struct {
+	results []*PairwiseAlignment
+	wg      sync.WaitGroup
+}
 
+func newPairwiseAlignmentPromise(resultCount int) *PairwiseAlignmentPromise {
+	return &PairwiseAlignmentPromise{
+		results: make([]*PairwiseAlignment, resultCount),
+		wg:      sync.WaitGroup{},
+	}
+}
+
+func (pap *PairwiseAlignmentPromise) add(delta int) {
+	pap.wg.Add(delta)
+}
+
+func (pap *PairwiseAlignmentPromise) done() {
+	pap.wg.Done()
+}
+
+func (pap *PairwiseAlignmentPromise) result(idx int, aln *PairwiseAlignment) {
+	pap.results[idx] = aln
+}
+
+func (pap *PairwiseAlignmentPromise) Result() *PairwiseAlignment {
+	pap.wg.Wait()
+
+	bestAln := pap.results[0]
+	// Find the best alignment
+	for i, result := range pap.results {
+		if i > 0 {
+			if result.Score > bestAln.Score {
+				bestAln = result
+			}
+		}
+	}
+	// fmt.Println(bestAln.String())
+	return bestAln
+}
+
+func AlignBatch(aligner PairwiseAligner, sem utils.Semaphore, queries []seqio.SeqQual, targets []seqio.SeqQual) *PairwiseAlignmentPromise {
 	// We will be doing all of the calls in parallel.
 	// The semaphore will keep track of the number of concurrent jobs and
 	// will cap it at maxWorkers
 
-	if maxWorkers < 0 {
-		maxWorkers = runtime.GOMAXPROCS(0)
-	}
+	promise := newPairwiseAlignmentPromise(len(queries) * len(targets))
 
-	sem := make(chan struct{}, maxWorkers) // semaphore
-	var wg sync.WaitGroup
+	for i, query := range queries {
+		query := query // capture loop var
+		i := i         // capture loop var
+		for j, target := range targets {
+			target := target // capture loop var
+			j := j           // capture loop var
+			promise.add(1)
 
-	// write the results to one large slice/array -- we can write to this
-	// in parallel.
-	results := make([]*PairwiseAlignment, len(targets))
-
-	for i, target := range targets {
-		i := i           // capture loop var in this loop
-		target := target // capture loop var
-		wg.Add(1)
-
-		sem <- struct{}{} // acquire
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }() // release
-			// run the alignment
-			results[i] = aligner.Align(query, target, queryName, targetNames[i])
-		}()
-	}
-
-	wg.Wait()
-
-	// Find the best alignment
-	for _, result := range results {
-		if bestAln == nil || bestAln.Score < result.Score {
-			bestAln = result
+			sem.Acquire() // acquire
+			go func() {
+				defer promise.done()
+				defer sem.Release() // release
+				// run the alignment
+				promise.result(i*len(targets)+j, aligner.Align(query, target))
+			}()
 		}
 	}
 
-	return bestAln
+	return promise
 }
