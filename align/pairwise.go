@@ -300,9 +300,15 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 
 		fmt.Println("Backtracking")
 	}
-	limit := max(qLen * tLen)
-	// for the backtrack, if we hit a cell that drops below zero,
+
+	// for the backtrack, if we are a local alignment and we hit a cell that drops below zero,
 	// we know we are in a left-clipping region
+	//
+	// for global alignments, stop when we hit the upper left corner
+
+	// failsafe to make sure we don't get stuck.
+	limit := max(qLen * tLen)
+
 	for ((sw.isLocal && curScore > 0) || (!sw.isLocal && (i > 0 || j > 0))) && limit > 0 {
 		limit--
 		if sw.opts.verbose {
@@ -362,7 +368,7 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 		}
 	}
 
-	queryStart := i // we've alreday decremented i, but i is also offset by 1, so it's a wash
+	queryStart := i // we've already decremented i, but i is also offset by 1, so it's a wash
 	targetStart := j
 	queryEnd := bestRow
 

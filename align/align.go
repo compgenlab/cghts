@@ -305,6 +305,35 @@ Score: %s`, qStr, aStr, tStr, a.CIGAR, utils.TrimFloat(float64(a.Score), 2))
 	return ret
 }
 
+func (a *PairwiseAlignment) Matches() int {
+	qPos := a.QueryStart
+	tPos := a.TargetStart
+	cigarExpanded, err := CigarExpand(a.CIGAR)
+	if err != nil {
+		return -1
+	}
+	matches := 0
+	for i := 0; i < len(cigarExpanded); i++ {
+		// fmt.Printf("qStr: %s\ntStr: %s\n-\n", qStr, tStr)
+		op := cigarExpanded[i]
+		switch op {
+		case 'M':
+			if sequtils.DNAMatches(a.Query.Seq()[qPos], a.Target.Seq()[tPos]) {
+				matches++
+			}
+			qPos++
+			tPos++
+		case 'D':
+			tPos++
+		case 'I':
+			qPos++
+		case 'S':
+			qPos++
+		}
+	}
+	return matches
+}
+
 func (a *PairwiseAlignment) TargetAlignedStr() string {
 	tStr := ""
 	qPos := a.QueryStart
@@ -418,7 +447,7 @@ func (pap *PairwiseAlignmentPromise) done() {
 	pap.wg.Done()
 }
 
-func (pap *PairwiseAlignmentPromise) result(idx int, aln *PairwiseAlignment) {
+func (pap *PairwiseAlignmentPromise) setResult(idx int, aln *PairwiseAlignment) {
 	pap.results[idx] = aln
 }
 
@@ -458,7 +487,7 @@ func AlignBatch(aligner PairwiseAligner, sem utils.Semaphore, queries []seqio.Se
 				defer promise.done()
 				defer sem.Release() // release
 				// run the alignment
-				promise.result(i*len(targets)+j, aligner.Align(query, target))
+				promise.setResult(i*len(targets)+j, aligner.Align(query, target))
 			}()
 		}
 	}
