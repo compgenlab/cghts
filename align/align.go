@@ -21,14 +21,15 @@ type ScoringMatrix interface {
 }
 
 type PairwiseAlignment struct {
-	Query       seqio.SeqQual
-	Target      seqio.SeqQual
-	QueryStart  int
-	QueryEnd    int
-	TargetStart int
-	TargetEnd   int
-	Score       float32
-	CIGAR       string
+	Query        seqio.SeqQual
+	Target       seqio.SeqQual
+	QueryStart   int
+	QueryEnd     int
+	TargetStart  int
+	TargetEnd    int
+	Score        float32
+	CIGAR        string
+	cigarExpanded string
 }
 
 type matchMismatch struct {
@@ -186,20 +187,22 @@ func hpDiscount(hpLen int, scale, cap float32) float32 {
 //
 // IIMMMMMDMM => 2I5M1D2M
 func CigarCondense(s string) string {
-	last := ""
+	if len(s) == 0 {
+		return ""
+	}
 	var ret strings.Builder
-	for i := 0; i < len(s); i++ {
-		cur := string(s[i])
-		if len(last) == 0 || cur[0] == last[0] {
-			last += cur
+	lastChar := s[0]
+	count := 1
+	for i := 1; i < len(s); i++ {
+		if s[i] == lastChar {
+			count++
 		} else {
-			fmt.Fprintf(&ret, "%d%s", len(last), string(last[0]))
-			last = cur
+			fmt.Fprintf(&ret, "%d%c", count, lastChar)
+			lastChar = s[i]
+			count = 1
 		}
 	}
-	if len(last) > 0 {
-		fmt.Fprintf(&ret, "%d%s", len(last), string(last[0]))
-	}
+	fmt.Fprintf(&ret, "%d%c", count, lastChar)
 	return ret.String()
 }
 
@@ -234,43 +237,37 @@ func CigarExpand(s string) (string, error) {
 func (a *PairwiseAlignment) String() string {
 	// fmt.Printf("qPos: %d-%d, tPos: %d-%d\n", a.QueryStart, a.QueryEnd, a.TargetStart, a.TargetEnd)
 	// fmt.Printf("CIGAR: %s\n", a.CIGAR)
-	qStr := ""
-	tStr := ""
-	alnStr := ""
+	var qBuf, tBuf, alnBuf strings.Builder
 	qPos := a.QueryStart
 	tPos := a.TargetStart
-	cigarExpanded, err := CigarExpand(a.CIGAR)
-	if err != nil {
-		return fmt.Sprintf("Error expanding CIGAR: %v", err)
-	}
-	for i := 0; i < len(cigarExpanded); i++ {
-		// fmt.Printf("qStr: %s\ntStr: %s\n-\n", qStr, tStr)
-		op := cigarExpanded[i]
+	for i := 0; i < len(a.cigarExpanded); i++ {
+		// fmt.Printf("qStr: %s\ntStr: %s\n-\n", qBuf.String(), tBuf.String())
+		op := a.cigarExpanded[i]
 		switch op {
 		case 'M':
-			qStr += string(a.Query.Seq()[qPos])
-			tStr += string(a.Target.Seq()[tPos])
+			qBuf.WriteByte(a.Query.Seq()[qPos])
+			tBuf.WriteByte(a.Target.Seq()[tPos])
 			if sequtils.DNAMatches(a.Query.Seq()[qPos], a.Target.Seq()[tPos]) {
-				alnStr += "|"
+				alnBuf.WriteByte('|')
 			} else {
-				alnStr += "."
+				alnBuf.WriteByte('.')
 			}
 			qPos++
 			tPos++
 		case 'D':
-			qStr += "-"
-			tStr += string(a.Target.Seq()[tPos])
-			alnStr += " "
+			qBuf.WriteByte('-')
+			tBuf.WriteByte(a.Target.Seq()[tPos])
+			alnBuf.WriteByte(' ')
 			tPos++
 		case 'I':
-			qStr += string(a.Query.Seq()[qPos])
-			alnStr += " "
-			tStr += "-"
+			qBuf.WriteByte(a.Query.Seq()[qPos])
+			alnBuf.WriteByte(' ')
+			tBuf.WriteByte('-')
 			qPos++
 		case 'S':
-			qStr += string(a.Query.Seq()[qPos])
-			tStr += " "
-			alnStr += "-"
+			qBuf.WriteByte(a.Query.Seq()[qPos])
+			tBuf.WriteByte(' ')
+			alnBuf.WriteByte('-')
 			qPos++
 		}
 	}
@@ -291,11 +288,11 @@ func (a *PairwiseAlignment) String() string {
 	qName = fmt.Sprintf("%-*s", maxNameLen, qName)
 	tName = fmt.Sprintf("%-*s", maxNameLen, tName)
 
-	qStr = fmt.Sprintf("%s: %s", qName, qStr)
-	tStr = fmt.Sprintf("%s: %s", tName, tStr)
+	qStr := fmt.Sprintf("%s: %s", qName, qBuf.String())
+	tStr := fmt.Sprintf("%s: %s", tName, tBuf.String())
 
 	aName := fmt.Sprintf("%-*s", maxNameLen, " ")
-	aStr := fmt.Sprintf("%s: %s", aName, alnStr)
+	aStr := fmt.Sprintf("%s: %s", aName, alnBuf.String())
 
 	ret := fmt.Sprintf(`%s
 %s
@@ -308,14 +305,9 @@ Score: %s`, qStr, aStr, tStr, a.CIGAR, utils.TrimFloat(float64(a.Score), 2))
 func (a *PairwiseAlignment) Matches() int {
 	qPos := a.QueryStart
 	tPos := a.TargetStart
-	cigarExpanded, err := CigarExpand(a.CIGAR)
-	if err != nil {
-		return -1
-	}
 	matches := 0
-	for i := 0; i < len(cigarExpanded); i++ {
-		// fmt.Printf("qStr: %s\ntStr: %s\n-\n", qStr, tStr)
-		op := cigarExpanded[i]
+	for i := 0; i < len(a.cigarExpanded); i++ {
+		op := a.cigarExpanded[i]
 		switch op {
 		case 'M':
 			if sequtils.DNAMatches(a.Query.Seq()[qPos], a.Target.Seq()[tPos]) {
@@ -335,33 +327,28 @@ func (a *PairwiseAlignment) Matches() int {
 }
 
 func (a *PairwiseAlignment) TargetAlignedStr() string {
-	tStr := ""
+	var tBuf strings.Builder
 	qPos := a.QueryStart
 	tPos := a.TargetStart
-	cigarExpanded, err := CigarExpand(a.CIGAR)
-	if err != nil {
-		return fmt.Sprintf("Error expanding CIGAR: %v", err)
-	}
-	for i := 0; i < len(cigarExpanded); i++ {
-		// fmt.Printf("qStr: %s\ntStr: %s\n-\n", qStr, tStr)
-		op := cigarExpanded[i]
+	for i := 0; i < len(a.cigarExpanded); i++ {
+		op := a.cigarExpanded[i]
 		switch op {
 		case 'M':
-			tStr += string(a.Target.Seq()[tPos])
+			tBuf.WriteByte(a.Target.Seq()[tPos])
 			qPos++
 			tPos++
 		case 'D':
-			tStr += string(a.Target.Seq()[tPos])
+			tBuf.WriteByte(a.Target.Seq()[tPos])
 			tPos++
 		case 'I':
-			tStr += "-"
+			tBuf.WriteByte('-')
 			qPos++
 		case 'S':
-			tStr += " "
+			tBuf.WriteByte(' ')
 			qPos++
 		}
 	}
-	return tStr
+	return tBuf.String()
 }
 
 // Return the target string, relative to the plus strand
@@ -382,33 +369,28 @@ func (a *PairwiseAlignment) TargetStr() string {
 }
 
 func (a *PairwiseAlignment) QueryAlignedStr() string {
-	qStr := ""
+	var qBuf strings.Builder
 	qPos := a.QueryStart
 	tPos := a.TargetStart
-	cigarExpanded, err := CigarExpand(a.CIGAR)
-	if err != nil {
-		return fmt.Sprintf("Error expanding CIGAR: %v", err)
-	}
-	for i := 0; i < len(cigarExpanded); i++ {
-		// fmt.Printf("qStr: %s\ntStr: %s\n-\n", qStr, tStr)
-		op := cigarExpanded[i]
+	for i := 0; i < len(a.cigarExpanded); i++ {
+		op := a.cigarExpanded[i]
 		switch op {
 		case 'M':
-			qStr += string(a.Query.Seq()[qPos])
+			qBuf.WriteByte(a.Query.Seq()[qPos])
 			qPos++
 			tPos++
 		case 'D':
-			qStr += "-"
+			qBuf.WriteByte('-')
 			tPos++
 		case 'I':
-			qStr += string(a.Query.Seq()[qPos])
+			qBuf.WriteByte(a.Query.Seq()[qPos])
 			qPos++
 		case 'S':
-			qStr += string(a.Query.Seq()[qPos])
+			qBuf.WriteByte(a.Query.Seq()[qPos])
 			qPos++
 		}
 	}
-	return qStr
+	return qBuf.String()
 }
 
 // Return the query string, relative to the plus strand

@@ -11,6 +11,8 @@ import (
 type pairwise struct {
 	opts              *alignmentOptions
 	isLocal           bool
+	useHPDiscount     bool
+	scoreTable        [256][256]float32
 	hpDiscountOpen    []float32
 	hpDiscountExt     []float32
 	hpDiscountOpenMax int
@@ -95,6 +97,12 @@ func (sw *pairwise) precalc() {
 		i++
 	}
 	sw.hpDiscountExtMax = i
+	sw.useHPDiscount = sw.opts.hpOpenScale > 0 || sw.opts.hpExtendScale > 0
+	for i := range 256 {
+		for j := range 256 {
+			sw.scoreTable[i][j] = sw.opts.scoringMatrix.ScorePair(byte(i), byte(j))
+		}
+	}
 }
 func rowColToIdx(row int, col int, colLen int) int {
 	return row*colLen + col
@@ -171,13 +179,12 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 			rightClipPenalty = gapPenalty(rows-i-1, sw.opts.clippingOpenPenalty, sw.opts.clippingExtendPenalty)
 		}
 
+		rowStart := i * cols
 		for j := 1; j < cols; j++ {
-			idx := rowColToIdx(i, j, cols)
-			diag := rowColToIdx(i-1, j-1, cols)
-			up := rowColToIdx(i-1, j, cols)
-			left := rowColToIdx(i, j-1, cols)
-
-			data[idx] = swCell{}
+			idx := rowStart + j
+			up := idx - cols
+			diag := up - 1
+			left := idx - 1
 
 			// calculate gap penalties and hp discounts
 			gio := sw.opts.gapOpenPenaltyIns
@@ -185,7 +192,7 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 			gdo := sw.opts.gapOpenPenaltyDel
 			gde := sw.opts.gapExtendPenaltyDel
 
-			if sw.opts.hpOpenScale > 0 || sw.opts.hpExtendScale > 0 {
+			if sw.useHPDiscount {
 				// choices here
 				// * we could do the qRun for insertions, tRun for dels
 				// * we could take the max
@@ -235,7 +242,7 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 			}
 
 			// query and target are zero-based. the matrix has an extra row/col at start
-			s := sw.opts.scoringMatrix.ScorePair(queryStr[i-1], targetStr[j-1])
+			s := sw.scoreTable[queryStr[i-1]][targetStr[j-1]]
 
 			Mm := data[diag].scoreM + s
 			Mi := data[diag].scoreI + s
@@ -323,15 +330,16 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 	// Now we can backtrack to get the alignment
 	i, j := bestRow, bestCol
 	curTrace := bestTrace
-	cigar := ""
+	cigarBuf := make([]byte, 0, qLen+tLen)
 	var curScore float32
+	idx := i*cols + j
 	switch curTrace {
 	case swTraceMatch:
-		curScore = data[rowColToIdx(i, j, cols)].scoreM
+		curScore = data[idx].scoreM
 	case swTraceIns:
-		curScore = data[rowColToIdx(i, j, cols)].scoreI
+		curScore = data[idx].scoreI
 	case swTraceDel:
-		curScore = data[rowColToIdx(i, j, cols)].scoreD
+		curScore = data[idx].scoreD
 	}
 
 	if sw.opts.verbose {
@@ -369,51 +377,54 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 	for ((sw.isLocal && curScore > 0) || (!sw.isLocal && (i > 0 || j > 0))) && limit > 0 {
 		limit--
 		if sw.opts.verbose {
-			fmt.Printf("(%d,%d) %v, %f %s\n", i, j, curTrace, curScore, cigar)
+			fmt.Printf("(%d,%d) %v, %f %s\n", i, j, curTrace, curScore, string(cigarBuf))
 		}
 
-		idx := rowColToIdx(i, j, cols)
 		var nextTrace swCellTrace
 
 		switch curTrace {
 		case swTraceMatch:
-			cigar = "M" + cigar
+			cigarBuf = append(cigarBuf, 'M')
 			nextTrace = data[idx].traceM
 			i--
 			j--
+			idx -= cols + 1
 		case swTraceIns:
-			cigar = "I" + cigar
+			cigarBuf = append(cigarBuf, 'I')
 			nextTrace = data[idx].traceI
 			i--
+			idx -= cols
 		case swTraceDel:
-			cigar = "D" + cigar
+			cigarBuf = append(cigarBuf, 'D')
 			nextTrace = data[idx].traceD
 			j--
+			idx--
 		}
 
 		// This only happens when in global mode, but we'll add an if gate anyway.
 		if !sw.isLocal {
 			if i < 0 {
 				i = 0
-				cigar = "D" + cigar[1:]
+				idx += cols
+				cigarBuf[len(cigarBuf)-1] = 'D'
 			}
 			if j < 0 {
 				j = 0
-				cigar = "I" + cigar[1:]
+				idx++
+				cigarBuf[len(cigarBuf)-1] = 'I'
 			}
 		}
 
 		curTrace = nextTrace
-		idx2 := rowColToIdx(i, j, cols)
 
 		// get the score for the next (now current) cell
 		switch curTrace {
 		case swTraceMatch:
-			curScore = data[idx2].scoreM
+			curScore = data[idx].scoreM
 		case swTraceIns:
-			curScore = data[idx2].scoreI
+			curScore = data[idx].scoreI
 		case swTraceDel:
-			curScore = data[idx2].scoreD
+			curScore = data[idx].scoreD
 		case swTraceStop:
 			if sw.opts.verbose {
 				fmt.Println("Hit stop trace, ending backtrack")
@@ -430,27 +441,37 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 	queryEnd := bestRow
 
 	if sw.opts.clippingOpenPenalty > 0 || sw.opts.clippingExtendPenalty > 0 {
-		// left clipping
+		// left clipping: append before reversing so they end up at the front
 		for ; i > 0; i-- {
-			cigar = "S" + cigar
+			cigarBuf = append(cigarBuf, 'S')
 		}
+	}
 
-		// right clipping
+	// reverse the buffer to get forward-order CIGAR
+	for l, r := 0, len(cigarBuf)-1; l < r; l, r = l+1, r-1 {
+		cigarBuf[l], cigarBuf[r] = cigarBuf[r], cigarBuf[l]
+	}
+
+	if sw.opts.clippingOpenPenalty > 0 || sw.opts.clippingExtendPenalty > 0 {
+		// right clipping: append after reversing so they end up at the back
 		for i := bestRow; i < rows-1; i++ {
-			cigar += "S"
+			cigarBuf = append(cigarBuf, 'S')
 		}
 		queryStart = 0
 		queryEnd = len(queryStr)
 	}
 
+	cigar := string(cigarBuf)
+
 	return &PairwiseAlignment{
-		Query:       query,
-		Target:      target,
-		QueryStart:  queryStart,
-		QueryEnd:    queryEnd,
-		TargetStart: targetStart,
-		TargetEnd:   bestCol,
-		Score:       bestScore,
-		CIGAR:       CigarCondense(cigar),
+		Query:         query,
+		Target:        target,
+		QueryStart:    queryStart,
+		QueryEnd:      queryEnd,
+		TargetStart:   targetStart,
+		TargetEnd:     bestCol,
+		Score:         bestScore,
+		CIGAR:         CigarCondense(cigar),
+		cigarExpanded: cigar,
 	}
 }
