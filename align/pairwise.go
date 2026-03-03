@@ -9,8 +9,12 @@ import (
 )
 
 type pairwise struct {
-	opts    *alignmentOptions
-	isLocal bool
+	opts              *alignmentOptions
+	isLocal           bool
+	hpDiscountOpen    []float32
+	hpDiscountExt     []float32
+	hpDiscountOpenMax int
+	hpDiscountExtMax  int
 }
 
 type swCellTrace uint8
@@ -50,7 +54,9 @@ in a homopolymer (HP) region, we will (optionally) discount the penalty based
 upon how long the HP is.
 */
 func NewLocalAligner(opts *alignmentOptions) *pairwise {
-	return &pairwise{opts: opts, isLocal: true}
+	ret := &pairwise{opts: opts, isLocal: true}
+	ret.precalc()
+	return ret
 }
 
 /*
@@ -60,9 +66,36 @@ initialization and backtracking conditions.
 */
 func NewGlobalAligner(opts *alignmentOptions) *pairwise {
 	opts.ClippingDisable() // global alignment doesn't make sense with clipping
-	return &pairwise{opts: opts, isLocal: false}
+	ret := &pairwise{opts: opts, isLocal: false}
+	ret.precalc()
+	return ret
 }
 
+func (sw *pairwise) precalc() {
+	sw.hpDiscountOpen = make([]float32, 0)
+	sw.hpDiscountExt = make([]float32, 0)
+
+	i := 1
+	for {
+		tmp := hpDiscount(i, sw.opts.hpOpenScale, sw.opts.hpOpenCap)
+		sw.hpDiscountOpen = append(sw.hpDiscountOpen, tmp)
+		if tmp >= sw.opts.hpOpenCap {
+			break
+		}
+		i++
+	}
+	sw.hpDiscountOpenMax = i
+	i = 1
+	for {
+		tmp := hpDiscount(i, sw.opts.hpExtendScale, sw.opts.hpExtendCap)
+		sw.hpDiscountExt = append(sw.hpDiscountExt, tmp)
+		if tmp >= sw.opts.hpExtendCap {
+			break
+		}
+		i++
+	}
+	sw.hpDiscountExtMax = i
+}
 func rowColToIdx(row int, col int, colLen int) int {
 	return row*colLen + col
 }
@@ -167,13 +200,37 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 
 				if qRun[i-1] > 0 {
 					// only process HP discounts if HP run is positive (i.e. not an N or other non-standard base)
-					gio -= hpDiscount(qRun[i-1], sw.opts.hpOpenScale, sw.opts.hpOpenCap)
-					gie -= hpDiscount(qRun[i-1], sw.opts.hpExtendScale, sw.opts.hpExtendCap)
+					if qRun[i-1] <= sw.hpDiscountOpenMax {
+						gio -= sw.hpDiscountOpen[qRun[i-1]-1]
+					} else {
+						gio -= sw.opts.hpOpenCap
+					}
+
+					if qRun[i-1] <= sw.hpDiscountExtMax {
+						gie -= sw.hpDiscountExt[qRun[i-1]-1]
+					} else {
+						gie -= sw.opts.hpExtendCap
+					}
+
+					// gio -= hpDiscount(qRun[i-1], sw.opts.hpOpenScale, sw.opts.hpOpenCap)
+					// gie -= hpDiscount(qRun[i-1], sw.opts.hpExtendScale, sw.opts.hpExtendCap)
 				}
 				if tRun[j-1] > 0 {
+					if tRun[j-1] <= sw.hpDiscountOpenMax {
+						gdo -= sw.hpDiscountOpen[tRun[j-1]-1]
+					} else {
+						gdo -= sw.opts.hpOpenCap
+					}
+
+					if tRun[j-1] <= sw.hpDiscountExtMax {
+						gde -= sw.hpDiscountExt[tRun[j-1]-1]
+					} else {
+						gde -= sw.opts.hpExtendCap
+					}
+
 					// only process HP discounts if HP run is positive (i.e. not an N or other non-standard base)
-					gdo -= hpDiscount(tRun[j-1], sw.opts.hpOpenScale, sw.opts.hpOpenCap)
-					gde -= hpDiscount(tRun[j-1], sw.opts.hpExtendScale, sw.opts.hpExtendCap)
+					// gdo -= hpDiscount(tRun[j-1], sw.opts.hpOpenScale, sw.opts.hpOpenCap)
+					// gde -= hpDiscount(tRun[j-1], sw.opts.hpExtendScale, sw.opts.hpExtendCap)
 				}
 			}
 
