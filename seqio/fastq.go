@@ -3,6 +3,7 @@ package seqio
 import (
 	"bufio"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"iter"
 	"os"
@@ -76,7 +77,7 @@ func NewFastqReader(rd io.Reader) (*FastqReader, error) {
 	}, nil
 }
 
-func (r *FastqReader) NextSeq() (SeqRecord, error) {
+func (r *FastqReader) NextFastqSeq() (*FastqSeqRecord, error) {
 	if r.closed {
 		return nil, ClosedSeqReaderError
 	}
@@ -142,6 +143,10 @@ func (r *FastqReader) NextSeq() (SeqRecord, error) {
 			r.lastByte = b
 		}
 	}
+}
+
+func (r *FastqReader) NextSeq() (SeqRecord, error) {
+	return r.NextFastqSeq()
 }
 
 func (r *FastqReader) Names() (iter.Seq[string], error) {
@@ -216,4 +221,71 @@ func (r *FastqSeqRecord) Name() string {
 
 func (r *FastqSeqRecord) Comment() string {
 	return r.comment
+}
+
+// AddCommentTSV appends value to the record's comment, tab-separated.
+func (r *FastqSeqRecord) AddCommentTSV(value string) {
+	if r.comment == "" {
+		r.comment = value
+	} else {
+		r.comment = r.comment + "\t" + value
+	}
+}
+
+// FastqWriter writes FASTQ records to a file, optionally gzip-compressed.
+type FastqWriter struct {
+	writer *bufio.Writer
+	gz     *gzip.Writer
+	file   *os.File
+}
+
+// OpenFastqWriter creates a FastqWriter for the given filename.
+// If the filename ends in ".gz", the output will be gzip-compressed.
+func OpenFastqWriter(filename string) (*FastqWriter, error) {
+	f, err := os.Create(filename)
+	if err != nil {
+		return nil, err
+	}
+	w := &FastqWriter{file: f}
+	if strings.HasSuffix(filename, ".gz") {
+		gz := gzip.NewWriter(f)
+		w.gz = gz
+		w.writer = bufio.NewWriter(gz)
+	} else {
+		w.writer = bufio.NewWriter(f)
+	}
+	return w, nil
+}
+
+// WriteRecord writes a single FASTQ record to the writer.
+func (w *FastqWriter) WriteRecord(name, comment, seq, qual string) error {
+	var err error
+	if comment != "" {
+		_, err = fmt.Fprintf(w.writer, "@%s %s\n%s\n+\n%s\n", name, comment, seq, qual)
+	} else {
+		_, err = fmt.Fprintf(w.writer, "@%s\n%s\n+\n%s\n", name, seq, qual)
+	}
+	return err
+}
+
+// Write writes a SeqRecord to the file using its Name, Comment, and FullSeq.
+func (w *FastqWriter) Write(rec SeqRecord) error {
+	sq := rec.FullSeq()
+	return w.WriteRecord(rec.Name(), rec.Comment(), sq.Seq(), sq.Qual())
+}
+
+// Close flushes and closes the writer.
+func (w *FastqWriter) Close() error {
+	if err := w.writer.Flush(); err != nil {
+		return err
+	}
+	if w.gz != nil {
+		if err := w.gz.Close(); err != nil {
+			return err
+		}
+	}
+	if w.file != nil {
+		return w.file.Close()
+	}
+	return nil
 }
