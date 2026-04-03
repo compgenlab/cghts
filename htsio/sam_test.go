@@ -209,6 +209,31 @@ func TestStdoutSamWriterInterface(t *testing.T) {
 	var _ SamWriter = NewStdoutSamWriter(nil)
 }
 
+func TestCigarRefLen(t *testing.T) {
+	tests := []struct {
+		cigar string
+		want  int
+	}{
+		{"50M", 50},
+		{"*", 0},
+		{"10M2I10M", 20},
+		{"10M3D10M", 23},
+		{"5S10M5S", 10},
+		{"10M1I5M2D3M", 20},
+		{"100M", 100},
+		{"10H20M10H", 20},
+		{"5S10M2I3M1D5M5S", 19},
+		{"10=5X", 15},
+		{"10M100N10M", 120},
+	}
+	for _, tt := range tests {
+		got := CigarRefLen(tt.cigar)
+		if got != tt.want {
+			t.Errorf("CigarRefLen(%q) = %d, want %d", tt.cigar, got, tt.want)
+		}
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
 }

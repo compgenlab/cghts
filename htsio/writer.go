@@ -7,13 +7,13 @@ import (
 	"os/exec"
 )
 
-// OutputFormat specifies the output file format for SamWriter.
-type OutputFormat int
+// SamOutputFormat specifies the output file format for SamWriter.
+type SamOutputFormat int
 
 const (
-	FormatSAM  OutputFormat = iota // plain text SAM
-	FormatBAM                      // compressed BAM
-	FormatCRAM                     // CRAM (requires reference)
+	FormatSAM  SamOutputFormat = iota // plain text SAM
+	FormatBAM                         // compressed BAM
+	FormatCRAM                        // CRAM (requires reference)
 )
 
 // SamWriter is the interface for writing SAM/BAM/CRAM records.
@@ -27,7 +27,7 @@ type SamWriter interface {
 // SamtoolsSamWriter writes SAM/BAM/CRAM files by piping SAM text to samtools view.
 type SamtoolsSamWriter struct {
 	filename string
-	format   OutputFormat
+	format   SamOutputFormat
 	header   *SamHeader
 	refFile  string // CRAM reference FASTA
 	cmd      *exec.Cmd
@@ -47,7 +47,7 @@ func NewSamWriter(filename string, header *SamHeader) *SamtoolsSamWriter {
 }
 
 // Format sets the output format (FormatSAM, FormatBAM, or FormatCRAM).
-func (w *SamtoolsSamWriter) Format(f OutputFormat) *SamtoolsSamWriter {
+func (w *SamtoolsSamWriter) Format(f SamOutputFormat) *SamtoolsSamWriter {
 	w.format = f
 	return w
 }
