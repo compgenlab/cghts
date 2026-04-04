@@ -126,11 +126,15 @@ type SamtoolsSamReader struct {
 }
 
 // NewSamReader creates a SamtoolsSamReader for the given file.
+// Returns an error if samtools is not found in PATH.
 // Use the builder methods to set options before calling Next().
-func NewSamReader(filename string) *SamtoolsSamReader {
+func NewSamReader(filename string) (*SamtoolsSamReader, error) {
+	if err := checkSamtools(); err != nil {
+		return nil, err
+	}
 	return &SamtoolsSamReader{
 		filename: filename,
-	}
+	}, nil
 }
 
 // Region sets the genomic region to query (e.g. "chr1:1000-2000").
@@ -155,6 +159,14 @@ func (r *SamtoolsSamReader) FlagFilter(flag int) *SamtoolsSamReader {
 func (r *SamtoolsSamReader) MinMapQ(mapq int) *SamtoolsSamReader {
 	r.minMapQ = mapq
 	return r
+}
+
+func checkSamtools() error {
+	_, err := exec.LookPath("samtools")
+	if err != nil {
+		return fmt.Errorf("samtools not found in PATH: %w", err)
+	}
+	return nil
 }
 
 func (r *SamtoolsSamReader) start() error {

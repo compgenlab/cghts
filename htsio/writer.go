@@ -37,13 +37,17 @@ type SamtoolsSamWriter struct {
 }
 
 // NewSamWriter creates a SamtoolsSamWriter for the given output file.
+// Returns an error if samtools is not found in PATH.
 // Default format is BAM. Use the builder methods to set options before calling Write().
-func NewSamWriter(filename string, header *SamHeader) *SamtoolsSamWriter {
+func NewSamWriter(filename string, header *SamHeader) (*SamtoolsSamWriter, error) {
+	if err := checkSamtools(); err != nil {
+		return nil, err
+	}
 	return &SamtoolsSamWriter{
 		filename: filename,
 		header:   header,
 		format:   FormatBAM,
-	}
+	}, nil
 }
 
 // Format sets the output format (FormatSAM, FormatBAM, or FormatCRAM).

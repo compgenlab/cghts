@@ -108,8 +108,11 @@ func TestSamRecordFlags(t *testing.T) {
 }
 
 func TestSamReaderBuilder(t *testing.T) {
-	r := NewSamReader("test.bam").
-		Region("chr1:100-200").
+	r, err := NewSamReader("test.bam")
+	if err != nil {
+		t.Fatalf("NewSamReader: %v", err)
+	}
+	r.Region("chr1:100-200").
 		FlagRequired(0x2).
 		FlagFilter(0x4 | 0x100).
 		MinMapQ(20)
@@ -187,8 +190,11 @@ func TestSamRecordString(t *testing.T) {
 
 func TestSamWriterBuilder(t *testing.T) {
 	h := NewSamHeader()
-	w := NewSamWriter("out.bam", h).
-		Format(FormatCRAM).
+	w, err := NewSamWriter("out.bam", h)
+	if err != nil {
+		t.Fatalf("NewSamWriter: %v", err)
+	}
+	w.Format(FormatCRAM).
 		Reference("ref.fa")
 
 	if w.filename != "out.bam" {
