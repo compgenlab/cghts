@@ -117,6 +117,7 @@ type SamtoolsSamReader struct {
 	flagReq    int
 	flagFilter int
 	minMapQ    int
+	threads    int
 	header     *SamHeader
 	cmd        *exec.Cmd
 	stdout     io.ReadCloser
@@ -161,6 +162,12 @@ func (r *SamtoolsSamReader) MinMapQ(mapq int) *SamtoolsSamReader {
 	return r
 }
 
+// Threads sets the number of samtools decompression threads (--threads).
+func (r *SamtoolsSamReader) Threads(n int) *SamtoolsSamReader {
+	r.threads = n
+	return r
+}
+
 func checkSamtools() error {
 	_, err := exec.LookPath("samtools")
 	if err != nil {
@@ -175,6 +182,9 @@ func (r *SamtoolsSamReader) start() error {
 	}
 
 	args := []string{"view", "-h"}
+	if r.threads > 0 {
+		args = append(args, "--threads", strconv.Itoa(r.threads))
+	}
 	if r.flagReq != 0 {
 		args = append(args, "-f", strconv.Itoa(r.flagReq))
 	}
