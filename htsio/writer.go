@@ -30,6 +30,7 @@ type SamtoolsSamWriter struct {
 	format   SamOutputFormat
 	header   *SamHeader
 	refFile  string // CRAM reference FASTA
+	threads  int
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
 	stderr   io.ReadCloser
@@ -56,6 +57,12 @@ func (w *SamtoolsSamWriter) Format(f SamOutputFormat) *SamtoolsSamWriter {
 	return w
 }
 
+// Threads sets the number of samtools compression threads (--threads).
+func (w *SamtoolsSamWriter) Threads(n int) *SamtoolsSamWriter {
+	w.threads = n
+	return w
+}
+
 // Reference sets the reference FASTA file, required for CRAM output.
 func (w *SamtoolsSamWriter) Reference(ref string) *SamtoolsSamWriter {
 	w.refFile = ref
@@ -68,6 +75,9 @@ func (w *SamtoolsSamWriter) start() error {
 	}
 
 	args := []string{"view", "-S"}
+	if w.threads > 0 {
+		args = append(args, "--threads", fmt.Sprintf("%d", w.threads))
+	}
 
 	switch w.format {
 	case FormatSAM:
