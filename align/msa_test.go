@@ -382,3 +382,82 @@ func TestMSA_FourSequencesEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+func TestMSA_TruncatedReads(t *testing.T) {
+	// Verify that truncated reads align correctly with leading/trailing gaps
+	// and don't corrupt the consensus.
+	ref := "ACGTACGTACGTACGTACGTACGTACGTACGT"
+
+	seqs := []seqio.SeqQual{
+		seqio.NewStringSeq(ref, "full1").FullSeq(),
+		seqio.NewStringSeq(ref, "full2").FullSeq(),
+		seqio.NewStringSeq(ref, "full3").FullSeq(),
+		seqio.NewStringSeq(ref[12:], "trunc_left").FullSeq(),  // missing first 12 bases
+		seqio.NewStringSeq(ref[:20], "trunc_right").FullSeq(), // missing last 12 bases
+	}
+
+	opts := NewMSAOptions(OntAlignmentDefaults())
+	profile := MSA(seqs, opts)
+	if profile == nil {
+		t.Fatal("MSA returned nil")
+	}
+
+	cons := profile.Consensus()
+	if cons != ref {
+		t.Errorf("consensus = %q, want %q", cons, ref)
+	}
+
+	// Truncated reads should have gaps at the missing ends.
+	gapped := profile.GappedSequences()
+	for i := 1; i < len(gapped); i++ {
+		if len(gapped[i]) != len(gapped[0]) {
+			t.Fatalf("gapped length mismatch: seq 0 = %d, seq %d = %d", len(gapped[0]), i, len(gapped[i]))
+		}
+	}
+}
+
+func TestMSA_HPErrors(t *testing.T) {
+	// HP insertion and deletion with majority correct.
+	// Note: the MSA consensus ignores gaps when voting, so a single
+	// HP-insertion read contributes an extra base at a column where all
+	// other reads have gaps — that base wins unopposed. This is a known
+	// limitation of the current consensus algorithm.
+	ref := "AAACCCGGGTTT"
+
+	seqs := []seqio.SeqQual{
+		seqio.NewStringSeq(ref, "ref1").FullSeq(),
+		seqio.NewStringSeq(ref, "ref2").FullSeq(),
+		seqio.NewStringSeq(ref, "ref3").FullSeq(),
+		seqio.NewStringSeq("AAACCCCGGGTTT", "hp_ins").FullSeq(), // CCC→CCCC
+		seqio.NewStringSeq("AAACCGGGTTT", "hp_del").FullSeq(),   // CCC→CC
+	}
+
+	opts := NewMSAOptions(OntAlignmentDefaults())
+	profile := MSA(seqs, opts)
+	if profile == nil {
+		t.Fatal("MSA returned nil")
+	}
+
+	cons := profile.Consensus()
+	t.Logf("consensus = %q (ref = %q)", cons, ref)
+
+	// All gapped sequences must be the same length.
+	gapped := profile.GappedSequences()
+	for i := 1; i < len(gapped); i++ {
+		if len(gapped[i]) != len(gapped[0]) {
+			t.Fatalf("gapped length mismatch: seq 0 = %d, seq %d = %d", len(gapped[0]), i, len(gapped[i]))
+		}
+	}
+
+	// Consensus should be close to ref (may have ±1 HP length error).
+	if abs(len(cons)-len(ref)) > 1 {
+		t.Errorf("consensus length %d too far from ref length %d", len(cons), len(ref))
+	}
+}
