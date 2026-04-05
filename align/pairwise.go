@@ -8,9 +8,17 @@ import (
 	"github.com/compgen-io/cgltk/support/sequtils"
 )
 
+type alignMode int
+
+const (
+	modeLocal      alignMode = iota
+	modeGlobal               // both sequences fully aligned
+	modeSemiGlobal           // query fully aligned, target free end gaps
+)
+
 type pairwise struct {
 	opts              *alignmentOptions
-	isLocal           bool
+	mode              alignMode
 	useHPDiscount     bool
 	scoreTable        [256][256]float32
 	hpDiscountOpen    []float32
@@ -56,7 +64,7 @@ in a homopolymer (HP) region, we will (optionally) discount the penalty based
 upon how long the HP is.
 */
 func NewLocalAligner(opts *alignmentOptions) *pairwise {
-	ret := &pairwise{opts: opts, isLocal: true}
+	ret := &pairwise{opts: opts, mode: modeLocal}
 	ret.precalc()
 	return ret
 }
@@ -68,7 +76,19 @@ initialization and backtracking conditions.
 */
 func NewGlobalAligner(opts *alignmentOptions) *pairwise {
 	opts.ClippingDisable() // global alignment doesn't make sense with clipping
-	ret := &pairwise{opts: opts, isLocal: false}
+	ret := &pairwise{opts: opts, mode: modeGlobal}
+	ret.precalc()
+	return ret
+}
+
+/*
+Semi-global aligner: the query is fully aligned end-to-end, but the target
+can have free end gaps on both sides. This is useful for aligning a read
+(query) to a longer consensus (target) where the read may be truncated.
+*/
+func NewSemiGlobalAligner(opts *alignmentOptions) *pairwise {
+	opts.ClippingDisable()
+	ret := &pairwise{opts: opts, mode: modeSemiGlobal}
 	ret.precalc()
 	return ret
 }
@@ -283,7 +303,7 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 				data[idx].traceD = swTraceDel
 			}
 
-			if sw.isLocal {
+			if sw.mode == modeLocal {
 				// The baseline worst score is whatever the left clipping base is
 				if data[idx].scoreM < leftClipBaseline {
 					data[idx].scoreM = leftClipBaseline
@@ -308,7 +328,7 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 		}
 	}
 
-	if !sw.isLocal {
+	if sw.mode == modeGlobal {
 		// for global, we want to start backtracking from the end of both sequences
 		bestRow = rows - 1
 		bestCol = cols - 1
@@ -324,6 +344,29 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 		} else {
 			bestScore = data[idx].scoreD
 			bestTrace = swTraceDel
+		}
+	} else if sw.mode == modeSemiGlobal {
+		// for semi-global, query is fully aligned but target has free end gaps.
+		// Scan the last query row to find the best target end position.
+		bestRow = rows - 1
+		bestCol = 0
+		bestScore = float32(math.Inf(-1))
+		for jj := 0; jj < cols; jj++ {
+			idx := rowColToIdx(bestRow, jj, cols)
+			for _, state := range []struct {
+				score float32
+				trace swCellTrace
+			}{
+				{data[idx].scoreM, swTraceMatch},
+				{data[idx].scoreI, swTraceIns},
+				{data[idx].scoreD, swTraceDel},
+			} {
+				if state.score > bestScore {
+					bestScore = state.score
+					bestCol = jj
+					bestTrace = state.trace
+				}
+			}
 		}
 	}
 
@@ -374,7 +417,7 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 	// failsafe to make sure we don't get stuck.
 	limit := max(qLen * tLen)
 
-	for ((sw.isLocal && curScore > 0) || (!sw.isLocal && (i > 0 || j > 0))) && limit > 0 {
+	for ((sw.mode == modeLocal && curScore > 0) || (sw.mode == modeGlobal && (i > 0 || j > 0)) || (sw.mode == modeSemiGlobal && i > 0)) && limit > 0 {
 		limit--
 		if sw.opts.verbose {
 			fmt.Printf("(%d,%d) %v, %f %s\n", i, j, curTrace, curScore, string(cigarBuf))
@@ -401,8 +444,8 @@ func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAl
 			idx--
 		}
 
-		// This only happens when in global mode, but we'll add an if gate anyway.
-		if !sw.isLocal {
+		// Edge corrections for global and semi-global modes.
+		if sw.mode != modeLocal {
 			if i < 0 {
 				i = 0
 				idx += cols
