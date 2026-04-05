@@ -88,11 +88,11 @@ func consensusBase(col ProfileColumn) byte {
 			bestCount = counts[b]
 		}
 	}
-	// Fall back to any other base
+	// Fall back to any other non-gap character
 	if bestBase == 0 {
-		for b := byte('A'); b <= byte('Z'); b++ {
-			if counts[b] > bestCount {
-				bestBase = b
+		for b := 1; b < 256; b++ {
+			if byte(b) != '-' && counts[b] > bestCount {
+				bestBase = byte(b)
 				bestCount = counts[b]
 			}
 		}
