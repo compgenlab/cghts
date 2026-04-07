@@ -138,7 +138,7 @@ func NewSamReader(filename string, opts ...*SamtoolsSamReaderOpts) (SamReader, e
 	if err := checkSamtools(); err != nil {
 		return nil, err
 	}
-	if opts == nil || len(opts) == 0 {
+	if len(opts) == 0 {
 		opts = []*SamtoolsSamReaderOpts{NewSamtoolsSamReaderOpts()}
 	}
 	return &SamtoolsSamReader{
