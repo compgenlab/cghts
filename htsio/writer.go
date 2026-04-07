@@ -151,7 +151,7 @@ func (w *SamtoolsSamWriter) start() error {
 		if w.opts.threads > 0 {
 			args = append(args, "--threads", fmt.Sprintf("%d", w.opts.threads))
 		}
-		args = append(args, "-o", w.filename, "-")
+		args = append(args, "--no-PG", "-o", w.filename, "-")
 		w.cmd = exec.Command("samtools", args...)
 
 		w.outs, err = w.cmd.StdinPipe()

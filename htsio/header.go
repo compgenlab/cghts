@@ -2,6 +2,7 @@ package htsio
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -64,6 +65,46 @@ func (h *SamHeader) ReadGroups() []string {
 		}
 	}
 	return rgs
+}
+
+// AddPGLine appends a @PG header line with PN:{pn} and the current command line.
+// The id is used for the ID field. If a @PG line with the same ID already exists
+// in the header, a numeric suffix (.1, .2, etc.) is appended to make it unique.
+// Extra tab-delimited fields (e.g. "DS:...") can be appended via extras.
+func (h *SamHeader) AddPGLine(id string, pn string, extras ...string) {
+	uniqueID := h.uniquePGID(id)
+	cl := strings.Join(os.Args, " ")
+	var line strings.Builder
+	line.WriteString(fmt.Sprintf("@PG\tID:%s\tPN:%s\tCL:%s", uniqueID, pn, cl))
+	for _, extra := range extras {
+		line.WriteString("\t" + extra)
+	}
+	h.AddLine(line.String())
+}
+
+// uniquePGID returns id if no @PG line uses it, otherwise id.1, id.2, etc.
+func (h *SamHeader) uniquePGID(id string) string {
+	existing := make(map[string]bool)
+	for _, line := range h.Lines {
+		if !strings.HasPrefix(line, "@PG\t") {
+			continue
+		}
+		for _, field := range strings.Split(line, "\t")[1:] {
+			if strings.HasPrefix(field, "ID:") {
+				existing[field[3:]] = true
+				break
+			}
+		}
+	}
+	if !existing[id] {
+		return id
+	}
+	for i := 1; ; i++ {
+		candidate := fmt.Sprintf("%s.%d", id, i)
+		if !existing[candidate] {
+			return candidate
+		}
+	}
 }
 
 // Text returns the full header as a SAM-formatted string (with trailing newline).
