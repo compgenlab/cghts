@@ -49,18 +49,18 @@ func (t SamTag) FloatValue() (float64, bool) {
 
 // SamRecord represents a single alignment record from a SAM/BAM/CRAM file.
 type SamRecord struct {
-	QName string
-	Flag  int
-	RName string
-	Pos   int // 1-based
-	MapQ  int
-	Cigar string
-	RNext string
-	PNext int
-	TLen  int
-	Seq   string
-	Qual  string
-	Tags  map[string]SamTag
+	ReadName  string
+	Flag      int
+	RefName   string
+	Pos       int // 1-based
+	MapQ      int
+	Cigar     string
+	RefNext   string
+	PosNext   int
+	InsertLen int
+	Seq       string
+	Qual      string
+	Tags      map[string]SamTag
 }
 
 // IsUnmapped returns true if the read is unmapped (flag 0x4).
@@ -92,8 +92,8 @@ func (r *SamRecord) IsDuplicate() bool {
 func (r *SamRecord) String() string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s\t%d\t%s\t%d\t%d\t%s\t%s\t%d\t%d\t%s\t%s",
-		r.QName, r.Flag, r.RName, r.Pos, r.MapQ,
-		r.Cigar, r.RNext, r.PNext, r.TLen, r.Seq, r.Qual)
+		r.ReadName, r.Flag, r.RefName, r.Pos, r.MapQ,
+		r.Cigar, r.RefNext, r.PosNext, r.InsertLen, r.Seq, r.Qual)
 	for tag, val := range r.Tags {
 		fmt.Fprintf(&sb, "\t%s:%c:%s", tag, val.Type, val.Value)
 	}
@@ -105,65 +105,78 @@ type SamReader interface {
 	// Next returns the next SamRecord. Returns nil, io.EOF when done.
 	Next() (*SamRecord, error)
 	// Header returns the parsed SAM header. May return nil before the first Next() call.
-	Header() *SamHeader
+	Header() (*SamHeader, error)
 	// Close releases resources.
 	Close() error
 }
 
-// SamtoolsSamReader reads SAM/BAM/CRAM files by executing samtools view.
-type SamtoolsSamReader struct {
-	filename   string
+type SamtoolsSamReaderOpts struct {
 	region     string
 	flagReq    int
 	flagFilter int
 	minMapQ    int
 	threads    int
-	header     *SamHeader
-	cmd        *exec.Cmd
-	stdout     io.ReadCloser
-	stderr     io.ReadCloser
-	scanner    *bufio.Scanner
-	started    bool
+}
+
+// SamtoolsSamReader reads SAM/BAM/CRAM files by executing samtools view.
+type SamtoolsSamReader struct {
+	filename string
+	opts     *SamtoolsSamReaderOpts
+	header   *SamHeader
+	cmd      *exec.Cmd
+	stdout   io.ReadCloser
+	stderr   io.ReadCloser
+	scanner  *bufio.Scanner
+	started  bool
+	nextLine string
 }
 
 // NewSamReader creates a SamtoolsSamReader for the given file.
 // Returns an error if samtools is not found in PATH.
 // Use the builder methods to set options before calling Next().
-func NewSamReader(filename string) (*SamtoolsSamReader, error) {
+func NewSamReader(filename string, opts ...*SamtoolsSamReaderOpts) (SamReader, error) {
 	if err := checkSamtools(); err != nil {
 		return nil, err
 	}
+	if opts == nil || len(opts) == 0 {
+		opts = []*SamtoolsSamReaderOpts{NewSamtoolsSamReaderOpts()}
+	}
 	return &SamtoolsSamReader{
 		filename: filename,
+		opts:     opts[0],
 	}, nil
 }
 
+func NewSamtoolsSamReaderOpts() *SamtoolsSamReaderOpts {
+	return &SamtoolsSamReaderOpts{}
+}
+
 // Region sets the genomic region to query (e.g. "chr1:1000-2000").
-func (r *SamtoolsSamReader) Region(region string) *SamtoolsSamReader {
+func (r *SamtoolsSamReaderOpts) Region(region string) *SamtoolsSamReaderOpts {
 	r.region = region
 	return r
 }
 
 // FlagRequired sets the required flags filter (-f). Only reads with all of these flags set are returned.
-func (r *SamtoolsSamReader) FlagRequired(flag int) *SamtoolsSamReader {
+func (r *SamtoolsSamReaderOpts) FlagRequired(flag int) *SamtoolsSamReaderOpts {
 	r.flagReq = flag
 	return r
 }
 
 // FlagFilter sets the filtering flags (-F). Reads with any of these flags set are excluded.
-func (r *SamtoolsSamReader) FlagFilter(flag int) *SamtoolsSamReader {
+func (r *SamtoolsSamReaderOpts) FlagFilter(flag int) *SamtoolsSamReaderOpts {
 	r.flagFilter = flag
 	return r
 }
 
 // MinMapQ sets the minimum mapping quality filter (-q).
-func (r *SamtoolsSamReader) MinMapQ(mapq int) *SamtoolsSamReader {
+func (r *SamtoolsSamReaderOpts) MinMapQ(mapq int) *SamtoolsSamReaderOpts {
 	r.minMapQ = mapq
 	return r
 }
 
 // Threads sets the number of samtools decompression threads (--threads).
-func (r *SamtoolsSamReader) Threads(n int) *SamtoolsSamReader {
+func (r *SamtoolsSamReaderOpts) Threads(n int) *SamtoolsSamReaderOpts {
 	r.threads = n
 	return r
 }
@@ -182,21 +195,21 @@ func (r *SamtoolsSamReader) start() error {
 	}
 
 	args := []string{"view", "-h"}
-	if r.threads > 0 {
-		args = append(args, "--threads", strconv.Itoa(r.threads))
+	if r.opts.threads > 0 {
+		args = append(args, "--threads", strconv.Itoa(r.opts.threads))
 	}
-	if r.flagReq != 0 {
-		args = append(args, "-f", strconv.Itoa(r.flagReq))
+	if r.opts.flagReq != 0 {
+		args = append(args, "-f", strconv.Itoa(r.opts.flagReq))
 	}
-	if r.flagFilter != 0 {
-		args = append(args, "-F", strconv.Itoa(r.flagFilter))
+	if r.opts.flagFilter != 0 {
+		args = append(args, "-F", strconv.Itoa(r.opts.flagFilter))
 	}
-	if r.minMapQ != 0 {
-		args = append(args, "-q", strconv.Itoa(r.minMapQ))
+	if r.opts.minMapQ != 0 {
+		args = append(args, "-q", strconv.Itoa(r.opts.minMapQ))
 	}
 	args = append(args, r.filename)
-	if r.region != "" {
-		args = append(args, r.region)
+	if r.opts.region != "" {
+		args = append(args, r.opts.region)
 	}
 
 	r.cmd = exec.Command("samtools", args...)
@@ -219,19 +232,47 @@ func (r *SamtoolsSamReader) start() error {
 	r.scanner = bufio.NewScanner(r.stdout)
 	r.scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // up to 10MB lines
 	r.started = true
+	r.populateHeader()
 	return nil
 }
 
 // Header returns the parsed SAM header. The header is populated on the first
 // call to Next(), so this will return nil before any records have been read.
-func (r *SamtoolsSamReader) Header() *SamHeader {
-	return r.header
+func (r *SamtoolsSamReader) Header() (*SamHeader, error) {
+	if err := r.start(); err != nil {
+		return nil, err
+	}
+	return r.header, nil
+}
+
+func (r *SamtoolsSamReader) populateHeader() {
+	for r.scanner.Scan() {
+		line := r.scanner.Text()
+		if strings.HasPrefix(line, "@") {
+			if r.header == nil {
+				r.header = NewSamHeader()
+			}
+			r.header.AddLine(line)
+			continue
+		}
+		r.nextLine = line
+		return
+	}
 }
 
 // Next returns the next SamRecord. Returns nil, io.EOF when done.
 func (r *SamtoolsSamReader) Next() (*SamRecord, error) {
 	if err := r.start(); err != nil {
 		return nil, err
+	}
+
+	if r.nextLine != "" {
+		rec, err := parseSamLine(r.nextLine)
+		r.nextLine = ""
+		if err != nil {
+			return nil, fmt.Errorf("parse SAM: %w", err)
+		}
+		return rec, nil
 	}
 
 	for r.scanner.Scan() {
@@ -307,18 +348,18 @@ func parseSamLine(line string) (*SamRecord, error) {
 	}
 
 	rec := &SamRecord{
-		QName: fields[0],
-		Flag:  flag,
-		RName: fields[2],
-		Pos:   pos,
-		MapQ:  mapq,
-		Cigar: fields[5],
-		RNext: fields[6],
-		PNext: pnext,
-		TLen:  tlen,
-		Seq:   fields[9],
-		Qual:  fields[10],
-		Tags:  make(map[string]SamTag),
+		ReadName:  fields[0],
+		Flag:      flag,
+		RefName:   fields[2],
+		Pos:       pos,
+		MapQ:      mapq,
+		Cigar:     fields[5],
+		RefNext:   fields[6],
+		PosNext:   pnext,
+		InsertLen: tlen,
+		Seq:       fields[9],
+		Qual:      fields[10],
+		Tags:      make(map[string]SamTag),
 	}
 
 	if len(fields) > 11 {
