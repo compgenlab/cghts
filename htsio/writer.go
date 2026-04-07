@@ -24,48 +24,88 @@ type SamWriter interface {
 	Close() error
 }
 
+type samWriterOptions struct {
+	header        *SamHeader
+	format        SamOutputFormat
+	threads       int
+	reference     string
+	sortedCoord   bool
+	sortedName    bool
+	sortTmpPrefix string
+}
+
 // SamtoolsSamWriter writes SAM/BAM/CRAM files by piping SAM text to samtools view.
 type SamtoolsSamWriter struct {
 	filename string
-	format   SamOutputFormat
-	header   *SamHeader
-	refFile  string // CRAM reference FASTA
-	threads  int
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stderr   io.ReadCloser
-	started  bool
+	opts     *samWriterOptions
+	// format   SamOutputFormat
+	// header   *SamHeader
+	// refFile  string // CRAM reference FASTA
+	// threads  int
+	cmd     *exec.Cmd
+	outs    io.WriteCloser
+	stderr  io.ReadCloser
+	started bool
 }
 
 // NewSamWriter creates a SamtoolsSamWriter for the given output file.
 // Returns an error if samtools is not found in PATH.
 // Default format is BAM. Use the builder methods to set options before calling Write().
-func NewSamWriter(filename string, header *SamHeader) (*SamtoolsSamWriter, error) {
+func NewSamWriter(filename string, opts *samWriterOptions) (*SamtoolsSamWriter, error) {
 	if err := checkSamtools(); err != nil {
 		return nil, err
 	}
 	return &SamtoolsSamWriter{
 		filename: filename,
-		header:   header,
-		format:   FormatBAM,
+		opts:     opts,
+		// header:   opts.header,
+		// format:   opts.format,
+		// threads:  opts.threads,
+		// refFile:  opts.reference,
 	}, nil
 }
 
 // Format sets the output format (FormatSAM, FormatBAM, or FormatCRAM).
-func (w *SamtoolsSamWriter) Format(f SamOutputFormat) *SamtoolsSamWriter {
-	w.format = f
+func SamWriterOptions(h *SamHeader) *samWriterOptions {
+	w := &samWriterOptions{}
+	w.header = h
+	return w
+}
+
+// Format sets the output format (FormatSAM, FormatBAM, or FormatCRAM).
+func (w *samWriterOptions) BAM() *samWriterOptions {
+	w.format = FormatBAM
+	return w
+}
+
+// Format sets the output format (FormatSAM, FormatBAM, or FormatCRAM).
+func (w *samWriterOptions) CRAM(ref string) *samWriterOptions {
+	w.format = FormatCRAM
+	w.reference = ref
 	return w
 }
 
 // Threads sets the number of samtools compression threads (--threads).
-func (w *SamtoolsSamWriter) Threads(n int) *SamtoolsSamWriter {
+func (w *samWriterOptions) Threads(n int) *samWriterOptions {
 	w.threads = n
 	return w
 }
 
-// Reference sets the reference FASTA file, required for CRAM output.
-func (w *SamtoolsSamWriter) Reference(ref string) *SamtoolsSamWriter {
-	w.refFile = ref
+// Threads sets the number of samtools compression threads (--threads).
+func (w *samWriterOptions) SortCoord() *samWriterOptions {
+	w.sortedCoord = true
+	return w
+}
+
+// Threads sets the number of samtools compression threads (--threads).
+func (w *samWriterOptions) SortName() *samWriterOptions {
+	w.sortedName = true
+	return w
+}
+
+// Threads sets the number of samtools compression threads (--threads).
+func (w *samWriterOptions) SortTempPrefix(prefix string) *samWriterOptions {
+	w.sortTmpPrefix = prefix
 	return w
 }
 
@@ -73,49 +113,67 @@ func (w *SamtoolsSamWriter) start() error {
 	if w.started {
 		return nil
 	}
+	var err error
 
-	args := []string{"view", "-S"}
-	if w.threads > 0 {
-		args = append(args, "--threads", fmt.Sprintf("%d", w.threads))
-	}
+	if w.opts.format == FormatSAM {
+		w.outs, err = os.Create(w.filename)
+		if err != nil {
+			return err
+			// return fmt.Errorf("create output file: %w", err)
+		}
+	} else {
 
-	switch w.format {
-	case FormatSAM:
-		args = append(args, "-h")
-	case FormatBAM:
-		args = append(args, "-b")
-	case FormatCRAM:
-		args = append(args, "-C")
-		if w.refFile != "" {
-			args = append(args, "-T", w.refFile)
+		args := []string{}
+
+		if w.opts.sortedCoord {
+			args = append(args, "sort")
+			if w.opts.sortTmpPrefix != "" {
+				args = append(args, "-T", w.opts.sortTmpPrefix)
+			}
+		} else if w.opts.sortedName {
+			args = append(args, "sort", "-N")
+			if w.opts.sortTmpPrefix != "" {
+				args = append(args, "-T", w.opts.sortTmpPrefix)
+			}
+		} else {
+			args = append(args, "view")
+		}
+		switch w.opts.format {
+		case FormatBAM:
+			args = append(args, "-O", "bam")
+		case FormatCRAM:
+			args = append(args, "-O", "cram")
+			if w.opts.reference != "" {
+				args = append(args, "--reference", w.opts.reference)
+			}
+		}
+
+		if w.opts.threads > 0 {
+			args = append(args, "--threads", fmt.Sprintf("%d", w.opts.threads))
+		}
+		args = append(args, "-o", w.filename, "-")
+		w.cmd = exec.Command("samtools", args...)
+
+		w.outs, err = w.cmd.StdinPipe()
+		if err != nil {
+			return fmt.Errorf("samtools stdin pipe: %w", err)
+		}
+
+		w.stderr, err = w.cmd.StderrPipe()
+		if err != nil {
+			return fmt.Errorf("samtools stderr pipe: %w", err)
+		}
+
+		if err := w.cmd.Start(); err != nil {
+			return fmt.Errorf("samtools start: %w", err)
 		}
 	}
-
-	args = append(args, "-o", w.filename, "-")
-
-	w.cmd = exec.Command("samtools", args...)
-
-	var err error
-	w.stdin, err = w.cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("samtools stdin pipe: %w", err)
-	}
-
-	w.stderr, err = w.cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("samtools stderr pipe: %w", err)
-	}
-
-	if err := w.cmd.Start(); err != nil {
-		return fmt.Errorf("samtools start: %w", err)
-	}
-
 	w.started = true
 
-	if w.header != nil {
-		headerText := w.header.Text()
+	if w.opts.header != nil {
+		headerText := w.opts.header.Text()
 		if headerText != "" {
-			if _, err := io.WriteString(w.stdin, headerText); err != nil {
+			if _, err := io.WriteString(w.outs, headerText); err != nil {
 				return fmt.Errorf("write header: %w", err)
 			}
 		}
@@ -129,7 +187,7 @@ func (w *SamtoolsSamWriter) Write(rec *SamRecord) error {
 	if err := w.start(); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintln(w.stdin, rec.String())
+	_, err := fmt.Fprintln(w.outs, rec.String())
 	if err != nil {
 		return fmt.Errorf("write record: %w", err)
 	}
@@ -141,14 +199,16 @@ func (w *SamtoolsSamWriter) Close() error {
 	if !w.started {
 		return nil
 	}
-	if w.stdin != nil {
-		w.stdin.Close()
+	if w.outs != nil {
+		w.outs.Close()
 	}
 	if w.stderr != nil {
 		stderrBytes, _ := io.ReadAll(w.stderr)
 		w.stderr.Close()
-		if err := w.cmd.Wait(); err != nil {
-			return fmt.Errorf("samtools: %w: %s", err, string(stderrBytes))
+		if w.cmd != nil {
+			if err := w.cmd.Wait(); err != nil {
+				return fmt.Errorf("samtools: %w: %s", err, string(stderrBytes))
+			}
 		}
 	} else if w.cmd != nil {
 		return w.cmd.Wait()

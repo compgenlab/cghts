@@ -190,21 +190,19 @@ func TestSamRecordString(t *testing.T) {
 
 func TestSamWriterBuilder(t *testing.T) {
 	h := NewSamHeader()
-	w, err := NewSamWriter("out.bam", h)
+	w, err := NewSamWriter("out.bam", SamWriterOptions(h).CRAM("ref.fa"))
 	if err != nil {
 		t.Fatalf("NewSamWriter: %v", err)
 	}
-	w.Format(FormatCRAM).
-		Reference("ref.fa")
 
 	if w.filename != "out.bam" {
 		t.Errorf("filename = %q, want %q", w.filename, "out.bam")
 	}
-	if w.format != FormatCRAM {
-		t.Errorf("format = %d, want %d", w.format, FormatCRAM)
+	if w.opts.format != FormatCRAM {
+		t.Errorf("format = %d, want %d", w.opts.format, FormatCRAM)
 	}
-	if w.refFile != "ref.fa" {
-		t.Errorf("refFile = %q, want %q", w.refFile, "ref.fa")
+	if w.opts.reference != "ref.fa" {
+		t.Errorf("reference = %q, want %q", w.opts.reference, "ref.fa")
 	}
 
 	// verify it satisfies the SamWriter interface
