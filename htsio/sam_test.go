@@ -11,14 +11,14 @@ func TestParseSamLine(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if rec.QName != "read1" {
-		t.Errorf("QName = %q, want %q", rec.QName, "read1")
+	if rec.ReadName != "read1" {
+		t.Errorf("QName = %q, want %q", rec.ReadName, "read1")
 	}
 	if rec.Flag != 0 {
 		t.Errorf("Flag = %d, want 0", rec.Flag)
 	}
-	if rec.RName != "chr1" {
-		t.Errorf("RName = %q, want %q", rec.RName, "chr1")
+	if rec.RefName != "chr1" {
+		t.Errorf("RName = %q, want %q", rec.RefName, "chr1")
 	}
 	if rec.Pos != 100 {
 		t.Errorf("Pos = %d, want 100", rec.Pos)
@@ -61,8 +61,8 @@ func TestParseSamLineMinimalFields(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if rec.QName != "read2" {
-		t.Errorf("QName = %q, want %q", rec.QName, "read2")
+	if rec.ReadName != "read2" {
+		t.Errorf("QName = %q, want %q", rec.ReadName, "read2")
 	}
 	if rec.Flag != 16 {
 		t.Errorf("Flag = %d, want 16", rec.Flag)
@@ -108,33 +108,26 @@ func TestSamRecordFlags(t *testing.T) {
 }
 
 func TestSamReaderBuilder(t *testing.T) {
-	r, err := NewSamReader("test.bam")
-	if err != nil {
-		t.Fatalf("NewSamReader: %v", err)
-	}
-	r.Region("chr1:100-200").
+
+	opts := NewSamtoolsSamReaderOpts().
+		Region("chr1:100-200").
 		FlagRequired(0x2).
 		FlagFilter(0x4 | 0x100).
 		MinMapQ(20)
 
-	if r.filename != "test.bam" {
-		t.Errorf("filename = %q, want %q", r.filename, "test.bam")
+	if opts.region != "chr1:100-200" {
+		t.Errorf("region = %q, want %q", opts.region, "chr1:100-200")
 	}
-	if r.region != "chr1:100-200" {
-		t.Errorf("region = %q, want %q", r.region, "chr1:100-200")
+	if opts.flagReq != 0x2 {
+		t.Errorf("flagReq = %d, want %d", opts.flagReq, 0x2)
 	}
-	if r.flagReq != 0x2 {
-		t.Errorf("flagReq = %d, want %d", r.flagReq, 0x2)
+	if opts.flagFilter != 0x104 {
+		t.Errorf("flagFilter = %d, want %d", opts.flagFilter, 0x104)
 	}
-	if r.flagFilter != 0x104 {
-		t.Errorf("flagFilter = %d, want %d", r.flagFilter, 0x104)
-	}
-	if r.minMapQ != 20 {
-		t.Errorf("minMapQ = %d, want %d", r.minMapQ, 20)
+	if opts.minMapQ != 20 {
+		t.Errorf("minMapQ = %d, want %d", opts.minMapQ, 20)
 	}
 
-	// verify it satisfies the SamReader interface
-	var _ SamReader = r
 }
 
 func TestSamHeader(t *testing.T) {
@@ -168,18 +161,18 @@ func TestSamHeader(t *testing.T) {
 
 func TestSamRecordString(t *testing.T) {
 	rec := &SamRecord{
-		QName: "read1",
-		Flag:  0,
-		RName: "chr1",
-		Pos:   100,
-		MapQ:  60,
-		Cigar: "50M",
-		RNext: "*",
-		PNext: 0,
-		TLen:  0,
-		Seq:   "ACGT",
-		Qual:  "IIII",
-		Tags:  map[string]SamTag{},
+		ReadName:  "read1",
+		Flag:      0,
+		RefName:   "chr1",
+		Pos:       100,
+		MapQ:      60,
+		Cigar:     "50M",
+		RefNext:   "*",
+		PosNext:   0,
+		InsertLen: 0,
+		Seq:       "ACGT",
+		Qual:      "IIII",
+		Tags:      map[string]SamTag{},
 	}
 
 	s := rec.String()
