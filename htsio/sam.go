@@ -110,7 +110,7 @@ type SamReader interface {
 	Close() error
 }
 
-type SamtoolsSamReaderOpts struct {
+type SamReaderOpts struct {
 	region     string
 	flagReq    int
 	flagFilter int
@@ -121,7 +121,7 @@ type SamtoolsSamReaderOpts struct {
 // SamtoolsSamReader reads SAM/BAM/CRAM files by executing samtools view.
 type SamtoolsSamReader struct {
 	filename string
-	opts     *SamtoolsSamReaderOpts
+	opts     *SamReaderOpts
 	header   *SamHeader
 	cmd      *exec.Cmd
 	stdout   io.ReadCloser
@@ -131,15 +131,19 @@ type SamtoolsSamReader struct {
 	nextLine string
 }
 
-// NewSamReader creates a SamtoolsSamReader for the given file.
+func NewSamReader(filename string, opts ...*SamReaderOpts) (SamReader, error) {
+	return newSamtoolsReader(filename, opts...)
+}
+
+// NewSamtoolsReader creates a SamtoolsSamReader for the given file.
 // Returns an error if samtools is not found in PATH.
 // Use the builder methods to set options before calling Next().
-func NewSamReader(filename string, opts ...*SamtoolsSamReaderOpts) (SamReader, error) {
+func newSamtoolsReader(filename string, opts ...*SamReaderOpts) (SamReader, error) {
 	if err := checkSamtools(); err != nil {
 		return nil, err
 	}
 	if len(opts) == 0 {
-		opts = []*SamtoolsSamReaderOpts{NewSamtoolsSamReaderOpts()}
+		opts = []*SamReaderOpts{NewSamReaderOpts()}
 	}
 	return &SamtoolsSamReader{
 		filename: filename,
@@ -147,36 +151,36 @@ func NewSamReader(filename string, opts ...*SamtoolsSamReaderOpts) (SamReader, e
 	}, nil
 }
 
-func NewSamtoolsSamReaderOpts() *SamtoolsSamReaderOpts {
-	return &SamtoolsSamReaderOpts{}
+func NewSamReaderOpts() *SamReaderOpts {
+	return &SamReaderOpts{}
 }
 
 // Region sets the genomic region to query (e.g. "chr1:1000-2000").
-func (r *SamtoolsSamReaderOpts) Region(region string) *SamtoolsSamReaderOpts {
+func (r *SamReaderOpts) Region(region string) *SamReaderOpts {
 	r.region = region
 	return r
 }
 
 // FlagRequired sets the required flags filter (-f). Only reads with all of these flags set are returned.
-func (r *SamtoolsSamReaderOpts) FlagRequired(flag int) *SamtoolsSamReaderOpts {
+func (r *SamReaderOpts) FlagRequired(flag int) *SamReaderOpts {
 	r.flagReq = flag
 	return r
 }
 
 // FlagFilter sets the filtering flags (-F). Reads with any of these flags set are excluded.
-func (r *SamtoolsSamReaderOpts) FlagFilter(flag int) *SamtoolsSamReaderOpts {
+func (r *SamReaderOpts) FlagFilter(flag int) *SamReaderOpts {
 	r.flagFilter = flag
 	return r
 }
 
 // MinMapQ sets the minimum mapping quality filter (-q).
-func (r *SamtoolsSamReaderOpts) MinMapQ(mapq int) *SamtoolsSamReaderOpts {
+func (r *SamReaderOpts) MinMapQ(mapq int) *SamReaderOpts {
 	r.minMapQ = mapq
 	return r
 }
 
 // Threads sets the number of samtools decompression threads (--threads).
-func (r *SamtoolsSamReaderOpts) Threads(n int) *SamtoolsSamReaderOpts {
+func (r *SamReaderOpts) Threads(n int) *SamReaderOpts {
 	r.threads = n
 	return r
 }

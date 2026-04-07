@@ -109,7 +109,7 @@ func TestSamRecordFlags(t *testing.T) {
 
 func TestSamReaderBuilder(t *testing.T) {
 
-	opts := NewSamtoolsSamReaderOpts().
+	opts := NewSamReaderOpts().
 		Region("chr1:100-200").
 		FlagRequired(0x2).
 		FlagFilter(0x4 | 0x100).
