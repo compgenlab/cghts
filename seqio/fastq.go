@@ -239,6 +239,11 @@ type FastqWriter struct {
 	file   *os.File
 }
 
+// NewFastqWriter creates a FastqWriter that writes to the given io.Writer.
+func NewFastqWriter(w io.Writer) *FastqWriter {
+	return &FastqWriter{writer: bufio.NewWriter(w)}
+}
+
 // OpenFastqWriter creates a FastqWriter for the given filename.
 // If the filename ends in ".gz", the output will be gzip-compressed.
 func OpenFastqWriter(filename string) (*FastqWriter, error) {

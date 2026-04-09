@@ -3,6 +3,7 @@ package seqio
 import (
 	"bufio"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"iter"
 	"os"
@@ -231,4 +232,108 @@ func (r *FastaSeqRecord) Name() string {
 
 func (r *FastaSeqRecord) Comment() string {
 	return r.comment
+}
+
+// FastaWriterOpts configures a FastaWriter.
+type FastaWriterOpts struct {
+	wrap int
+}
+
+// NewFastaWriterOpts returns a new FastaWriterOpts with default settings.
+func NewFastaWriterOpts() *FastaWriterOpts {
+	return &FastaWriterOpts{}
+}
+
+// Wrap sets the line wrap length for output sequences. 0 means no wrapping.
+func (o *FastaWriterOpts) Wrap(n int) *FastaWriterOpts {
+	o.wrap = n
+	return o
+}
+
+// FastaWriter writes FASTA records to a file, optionally gzip-compressed.
+type FastaWriter struct {
+	writer *bufio.Writer
+	gz     *gzip.Writer
+	file   *os.File
+	opts   *FastaWriterOpts
+}
+
+// NewFastaWriter creates a FastaWriter that writes to the given io.Writer.
+func NewFastaWriter(w io.Writer, opts ...*FastaWriterOpts) *FastaWriter {
+	var o *FastaWriterOpts
+	if len(opts) > 0 && opts[0] != nil {
+		o = opts[0]
+	} else {
+		o = NewFastaWriterOpts()
+	}
+	return &FastaWriter{writer: bufio.NewWriter(w), opts: o}
+}
+
+// OpenFastaWriter creates a FastaWriter for the given filename.
+// If the filename ends in ".gz", the output will be gzip-compressed.
+func OpenFastaWriter(filename string, opts ...*FastaWriterOpts) (*FastaWriter, error) {
+	f, err := os.Create(filename)
+	if err != nil {
+		return nil, err
+	}
+	var o *FastaWriterOpts
+	if len(opts) > 0 && opts[0] != nil {
+		o = opts[0]
+	} else {
+		o = NewFastaWriterOpts()
+	}
+	w := &FastaWriter{file: f, opts: o}
+	if strings.HasSuffix(filename, ".gz") {
+		gz := gzip.NewWriter(f)
+		w.gz = gz
+		w.writer = bufio.NewWriter(gz)
+	} else {
+		w.writer = bufio.NewWriter(f)
+	}
+	return w, nil
+}
+
+// WriteRecord writes a single FASTA record.
+func (w *FastaWriter) WriteRecord(name, comment, seq string) error {
+	if comment != "" {
+		if _, err := fmt.Fprintf(w.writer, ">%s %s\n", name, comment); err != nil {
+			return err
+		}
+	} else {
+		if _, err := fmt.Fprintf(w.writer, ">%s\n", name); err != nil {
+			return err
+		}
+	}
+	if w.opts.wrap > 0 {
+		for i := 0; i < len(seq); i += w.opts.wrap {
+			end := i + w.opts.wrap
+			if end > len(seq) {
+				end = len(seq)
+			}
+			if _, err := fmt.Fprintf(w.writer, "%s\n", seq[i:end]); err != nil {
+				return err
+			}
+		}
+	} else {
+		if _, err := fmt.Fprintf(w.writer, "%s\n", seq); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Close flushes and closes the writer.
+func (w *FastaWriter) Close() error {
+	if err := w.writer.Flush(); err != nil {
+		return err
+	}
+	if w.gz != nil {
+		if err := w.gz.Close(); err != nil {
+			return err
+		}
+	}
+	if w.file != nil {
+		return w.file.Close()
+	}
+	return nil
 }
