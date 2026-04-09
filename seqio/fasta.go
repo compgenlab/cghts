@@ -322,6 +322,48 @@ func (w *FastaWriter) WriteRecord(name, comment, seq string) error {
 	return nil
 }
 
+// WriteSeq writes a SeqRecord, streaming chunks to avoid loading the full sequence into memory.
+func (w *FastaWriter) WriteSeq(rec SeqRecord) error {
+	comment := rec.Comment()
+	if comment != "" {
+		if _, err := fmt.Fprintf(w.writer, ">%s %s\n", rec.Name(), comment); err != nil {
+			return err
+		}
+	} else {
+		if _, err := fmt.Fprintf(w.writer, ">%s\n", rec.Name()); err != nil {
+			return err
+		}
+	}
+
+	if w.opts.wrap > 0 {
+		buf := ""
+		for chunk := range rec.Chunks(w.opts.wrap) {
+			buf += chunk.Seq()
+			for len(buf) >= w.opts.wrap {
+				if _, err := fmt.Fprintf(w.writer, "%s\n", buf[:w.opts.wrap]); err != nil {
+					return err
+				}
+				buf = buf[w.opts.wrap:]
+			}
+		}
+		if len(buf) > 0 {
+			if _, err := fmt.Fprintf(w.writer, "%s\n", buf); err != nil {
+				return err
+			}
+		}
+	} else {
+		for chunk := range rec.Chunks(1024) {
+			if _, err := w.writer.WriteString(chunk.Seq()); err != nil {
+				return err
+			}
+		}
+		if _, err := w.writer.WriteString("\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Close flushes and closes the writer.
 func (w *FastaWriter) Close() error {
 	if err := w.writer.Flush(); err != nil {
