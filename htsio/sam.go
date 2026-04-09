@@ -110,12 +110,113 @@ type SamReader interface {
 	Close() error
 }
 
+// TagFilterOp specifies the comparison operation for a tag filter.
+type TagFilterOp int
+
+const (
+	TagEq          TagFilterOp = iota // equals
+	TagNotEq                          // not equals
+	TagContains                       // substring match
+	TagNotContains                    // no substring match
+	TagLt                             // less than (numeric)
+	TagGt                             // greater than (numeric)
+	TagLte                            // less than or equal (numeric)
+	TagGte                            // greater than or equal (numeric)
+)
+
+// TagFilter represents a single tag-based filter condition.
+type TagFilter struct {
+	Tag string
+	Op  TagFilterOp
+	Val string
+}
+
+// matchesRecord returns true if the SAM record passes this tag filter.
+func (f *TagFilter) matchesRecord(rec *SamRecord) bool {
+	t, ok := rec.Tags[f.Tag]
+	if !ok {
+		return false
+	}
+
+	switch f.Op {
+	case TagEq:
+		return t.Value == f.Val
+	case TagNotEq:
+		return t.Value != f.Val
+	case TagContains:
+		return strings.Contains(t.Value, f.Val)
+	case TagNotContains:
+		return !strings.Contains(t.Value, f.Val)
+	case TagLt, TagGt, TagLte, TagGte:
+		return f.numericCompare(t)
+	}
+	return false
+}
+
+func (f *TagFilter) numericCompare(t SamTag) bool {
+	switch t.Type {
+	case 'i':
+		tv, ok := t.IntValue()
+		if !ok {
+			return false
+		}
+		fv, err := strconv.Atoi(f.Val)
+		if err != nil {
+			return false
+		}
+		switch f.Op {
+		case TagLt:
+			return tv < fv
+		case TagGt:
+			return tv > fv
+		case TagLte:
+			return tv <= fv
+		case TagGte:
+			return tv >= fv
+		}
+	case 'f':
+		tv, ok := t.FloatValue()
+		if !ok {
+			return false
+		}
+		fv, err := strconv.ParseFloat(f.Val, 64)
+		if err != nil {
+			return false
+		}
+		switch f.Op {
+		case TagLt:
+			return tv < fv
+		case TagGt:
+			return tv > fv
+		case TagLte:
+			return tv <= fv
+		case TagGte:
+			return tv >= fv
+		}
+	}
+	return false
+}
+
+// ParseTagFilter parses a "TAG:VALUE" string into a TagFilter with the given op.
+func ParseTagFilter(s string, op TagFilterOp) (*TagFilter, error) {
+	idx := strings.Index(s, ":")
+	if idx < 1 {
+		return nil, fmt.Errorf("invalid tag filter %q: expected TAG:VALUE", s)
+	}
+	return &TagFilter{
+		Tag: s[:idx],
+		Op:  op,
+		Val: s[idx+1:],
+	}, nil
+}
+
 type SamReaderOpts struct {
 	region     string
 	flagReq    int
 	flagFilter int
 	minMapQ    int
 	threads    int
+	tagFilters []*TagFilter
 }
 
 // SamtoolsSamReader reads SAM/BAM/CRAM files by executing samtools view.
@@ -182,6 +283,12 @@ func (r *SamReaderOpts) MinMapQ(mapq int) *SamReaderOpts {
 // Threads sets the number of samtools decompression threads (--threads).
 func (r *SamReaderOpts) Threads(n int) *SamReaderOpts {
 	r.threads = n
+	return r
+}
+
+// AddTagFilter adds a tag-based filter. Multiple filters are ANDed together.
+func (r *SamReaderOpts) AddTagFilter(f *TagFilter) *SamReaderOpts {
+	r.tagFilters = append(r.tagFilters, f)
 	return r
 }
 
@@ -276,7 +383,9 @@ func (r *SamtoolsSamReader) Next() (*SamRecord, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse SAM: %w", err)
 		}
-		return rec, nil
+		if r.passesTagFilters(rec) {
+			return rec, nil
+		}
 	}
 
 	for r.scanner.Scan() {
@@ -292,7 +401,9 @@ func (r *SamtoolsSamReader) Next() (*SamRecord, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse SAM: %w", err)
 		}
-		return rec, nil
+		if r.passesTagFilters(rec) {
+			return rec, nil
+		}
 	}
 
 	if err := r.scanner.Err(); err != nil {
@@ -300,6 +411,16 @@ func (r *SamtoolsSamReader) Next() (*SamRecord, error) {
 	}
 
 	return nil, io.EOF
+}
+
+// passesTagFilters returns true if the record passes all tag filters.
+func (r *SamtoolsSamReader) passesTagFilters(rec *SamRecord) bool {
+	for _, f := range r.opts.tagFilters {
+		if !f.matchesRecord(rec) {
+			return false
+		}
+	}
+	return true
 }
 
 // Close waits for the samtools process to finish and releases resources.
