@@ -122,13 +122,16 @@ const (
 	TagGt                             // greater than (numeric)
 	TagLte                            // less than or equal (numeric)
 	TagGte                            // greater than or equal (numeric)
+	TagInSet                          // value is in a set
+	TagNotInSet                       // value is not in a set
 )
 
 // TagFilter represents a single tag-based filter condition.
 type TagFilter struct {
-	Tag string
-	Op  TagFilterOp
-	Val string
+	Tag    string
+	Op     TagFilterOp
+	Val    string            // single value for eq/not-eq/contains/numeric ops
+	Values map[string]bool   // value set for TagInSet/TagNotInSet ops
 }
 
 // matchesRecord returns true if the SAM record passes this tag filter.
@@ -149,6 +152,10 @@ func (f *TagFilter) matchesRecord(rec *SamRecord) bool {
 		return !strings.Contains(t.Value, f.Val)
 	case TagLt, TagGt, TagLte, TagGte:
 		return f.numericCompare(t)
+	case TagInSet:
+		return f.Values[t.Value]
+	case TagNotInSet:
+		return !f.Values[t.Value]
 	}
 	return false
 }
