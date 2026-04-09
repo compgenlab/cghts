@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
 )
 
 // SamOutputFormat specifies the output file format for SamWriter.
@@ -35,17 +36,18 @@ type samWriterOptions struct {
 }
 
 // SamtoolsSamWriter writes SAM/BAM/CRAM files by piping SAM text to samtools view.
+// It is safe for concurrent use from multiple goroutines.
 type SamtoolsSamWriter struct {
 	filename string
 	opts     *samWriterOptions
-	// format   SamOutputFormat
-	// header   *SamHeader
-	// refFile  string // CRAM reference FASTA
-	// threads  int
-	cmd     *exec.Cmd
-	outs    io.WriteCloser
-	stderr  io.ReadCloser
-	started bool
+	cmd      *exec.Cmd
+	outs     io.WriteCloser
+	stderr   io.ReadCloser
+	started  bool
+	writeCh  chan string    // buffered channel for async writes
+	writeWg  sync.WaitGroup // tracks the writer goroutine
+	writeErr error          // first error from the writer goroutine
+	mu       sync.Mutex     // protects start()
 }
 
 // NewSamWriter creates a SamtoolsSamWriter for the given output file.
@@ -58,10 +60,6 @@ func NewSamWriter(filename string, opts *samWriterOptions) (*SamtoolsSamWriter, 
 	return &SamtoolsSamWriter{
 		filename: filename,
 		opts:     opts,
-		// header:   opts.header,
-		// format:   opts.format,
-		// threads:  opts.threads,
-		// refFile:  opts.reference,
 	}, nil
 }
 
@@ -110,6 +108,9 @@ func (w *samWriterOptions) SortTempPrefix(prefix string) *samWriterOptions {
 }
 
 func (w *SamtoolsSamWriter) start() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	if w.started {
 		return nil
 	}
@@ -119,10 +120,8 @@ func (w *SamtoolsSamWriter) start() error {
 		w.outs, err = os.Create(w.filename)
 		if err != nil {
 			return err
-			// return fmt.Errorf("create output file: %w", err)
 		}
 	} else {
-
 		args := []string{}
 
 		if w.opts.sortedCoord {
@@ -168,7 +167,6 @@ func (w *SamtoolsSamWriter) start() error {
 			return fmt.Errorf("samtools start: %w", err)
 		}
 	}
-	w.started = true
 
 	if w.opts.header != nil {
 		headerText := w.opts.header.Text()
@@ -179,28 +177,60 @@ func (w *SamtoolsSamWriter) start() error {
 		}
 	}
 
+	// Start buffered writer goroutine.
+	w.writeCh = make(chan string, 1024)
+	w.writeWg.Add(1)
+	go func() {
+		defer w.writeWg.Done()
+		for line := range w.writeCh {
+			if _, err := io.WriteString(w.outs, line); err != nil {
+				w.writeErr = fmt.Errorf("write record: %w", err)
+				// Drain remaining records to unblock senders.
+				for range w.writeCh {
+				}
+				return
+			}
+		}
+	}()
+
+	w.started = true
 	return nil
 }
 
-// Write writes a SamRecord to the output.
+// Write serializes a SamRecord and sends it to the buffered write channel.
+// It is safe for concurrent use from multiple goroutines.
 func (w *SamtoolsSamWriter) Write(rec *SamRecord) error {
 	if err := w.start(); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintln(w.outs, rec.String())
-	if err != nil {
-		return fmt.Errorf("write record: %w", err)
+	if w.writeErr != nil {
+		return w.writeErr
 	}
+	w.writeCh <- rec.String() + "\n"
 	return nil
 }
 
-// Close flushes remaining data and waits for the samtools process to finish.
+// Close drains the write buffer, waits for the writer goroutine to finish,
+// and waits for the samtools process to exit.
 func (w *SamtoolsSamWriter) Close() error {
 	if !w.started {
 		return nil
 	}
+	close(w.writeCh)
+	w.writeWg.Wait()
 	if w.outs != nil {
 		w.outs.Close()
+	}
+	if w.writeErr != nil {
+		// Still wait for samtools to exit.
+		if w.stderr != nil {
+			io.ReadAll(w.stderr)
+			w.stderr.Close()
+		}
+		if w.cmd != nil {
+			w.cmd.Wait()
+		}
+		return w.writeErr
 	}
 	if w.stderr != nil {
 		stderrBytes, _ := io.ReadAll(w.stderr)
