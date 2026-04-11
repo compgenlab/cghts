@@ -111,81 +111,115 @@ func rotateRowToFront(p *MSAAlignment, idx int) *MSAAlignment {
 	}
 }
 
+// forEachConsensusColumn walks the alignment columns once and calls fn for
+// every column with the consensus base (0 if the column has no non-gap
+// bases among the non-ref rows) and the chosen HP length for that column.
+//
+// When HPLens is populated, the chosen length is computed by chooseHPLength
+// over the non-ref reads at that column, folding in the reference as a
+// last-resort tiebreaker. When HPLens is nil, chosenLen is always 0 and fn
+// should ignore it.
+//
+// This is the single-pass walker used by RehydratedConsensus, ConsensusRow,
+// and the HP-length row rendering in WriteClustal — they all need the same
+// column-by-column (base, length) derivation, so keeping it in one place
+// avoids drift between them.
+func (p *MSAAlignment) forEachConsensusColumn(fn func(colIdx int, base byte, chosenLen int)) {
+	hasHP := p.HPLens != nil
+
+	// rowCursors[i] tracks the compressed-sequence index into HPLens[i].
+	// Every time row i has a non-gap base at a column, we consume
+	// HPLens[i][rowCursors[i]] and advance the cursor. This maps
+	// "alignment column k" back to "original HP run k' in row i" without
+	// needing to pre-expand anything.
+	rowCursors := make([]int, p.NumSeqs)
+
+	for c, col := range p.Columns {
+		base := consensusBase(col, p.RefIdx)
+
+		chosen := 0
+		if hasHP {
+			var readLens []int
+			var refLen int
+			var hasRef bool
+			for i, b := range col.Bases {
+				if b == '-' {
+					continue
+				}
+				cur := rowCursors[i]
+				rowCursors[i]++
+				if p.HPLens[i] == nil || cur >= len(p.HPLens[i]) {
+					// Defensive guard — mismatched HPLens should not
+					// walk off the end.
+					continue
+				}
+				runLen := p.HPLens[i][cur]
+				if i == p.RefIdx {
+					refLen = runLen
+					hasRef = true
+					continue
+				}
+				readLens = append(readLens, runLen)
+			}
+			if base != 0 {
+				chosen = chooseHPLength(readLens, refLen, hasRef)
+			}
+		}
+
+		fn(c, base, chosen)
+	}
+}
+
 // RehydratedConsensus reconstructs the full-length consensus by expanding
 // each compressed-position consensus base by its chosen homopolymer run
 // length. It requires HPLens to be populated (i.e., MSA must have been
 // called with MSAOptions.HPCompress(true)).
 //
-// Length-selection rule at each column:
+// Length-selection rule at each column (see chooseHPLength):
 //
 //  1. Count HP length frequencies across the non-ref rows with a non-gap
-//     base at this column (ignore rows that have a gap — they contribute
-//     nothing, matching the spec).
+//     base at this column.
 //  2. If the mode is unique, use it.
-//  3. If multiple lengths are tied for the mode, fold the reference's HP
-//     length into the tally (when a reference is present and non-gap at
-//     this column) and look for a new unique mode.
-//  4. If still tied, return the ceiling of the mean of the currently-tied
-//     mode set. This guarantees a single integer output.
-//
-// Edge case: if no non-ref row has a non-gap base at a column but the
-// reference does, the ref's length is used directly. If no row contributes,
-// the column is skipped.
+//  3. If multiple lengths are tied, fold the reference's HP length in and
+//     look again.
+//  4. If still tied, return the ceiling of the mean of the tied mode set.
 func (p *MSAAlignment) RehydratedConsensus() string {
 	if p.HPLens == nil {
 		// No HP data — fall back to the plain consensus. Callers who
 		// really want rehydration should have enabled HPCompress.
 		return p.Consensus()
 	}
-
-	// rowCursors[i] tracks the compressed-sequence index into HPLens[i].
-	// Every time row i has a non-gap base at a column we consume
-	// HPLens[i][rowCursors[i]] and advance the cursor. This is how we map
-	// "alignment column k" back to "original HP run k' in row i" without
-	// needing to pre-expand anything.
-	rowCursors := make([]int, p.NumSeqs)
-
 	var out strings.Builder
-	for _, col := range p.Columns {
-		// Majority-vote base, ignoring the ref row (see Consensus).
-		base := consensusBase(col, p.RefIdx)
-
-		// Gather per-row HP lengths. We still have to advance the cursors
-		// for all non-gap rows even when base == 0 (shouldn't normally
-		// happen because Columns only contain columns with >=1 non-gap),
-		// so we run this loop unconditionally.
-		var readLens []int
-		var refLen int
-		var hasRef bool
-		for i, b := range col.Bases {
-			if b == '-' {
-				continue
-			}
-			cur := rowCursors[i]
-			rowCursors[i]++
-			if p.HPLens[i] == nil || cur >= len(p.HPLens[i]) {
-				// Defensive guard — if the caller hand-built an alignment
-				// with mismatched HPLens, don't walk off the end.
-				continue
-			}
-			runLen := p.HPLens[i][cur]
-			if i == p.RefIdx {
-				refLen = runLen
-				hasRef = true
-				continue
-			}
-			readLens = append(readLens, runLen)
-		}
-
+	p.forEachConsensusColumn(func(_ int, base byte, chosen int) {
 		if base == 0 {
-			continue
+			return
 		}
-		chosen := chooseHPLength(readLens, refLen, hasRef)
 		for k := 0; k < chosen; k++ {
 			out.WriteByte(base)
 		}
-	}
+	})
 	return out.String()
+}
+
+// ConsensusRow returns the majority-vote consensus as a string aligned
+// one-to-one with Columns: exactly len(Columns) characters, with '-' for
+// any column that has no non-gap non-ref base. Unlike Consensus(), this
+// preserves positional correspondence with the rest of the alignment so
+// it can be shown as an extra row in CLUSTAL-style output.
+//
+// The reference row (if any) is excluded from the vote — the consensus
+// reflects the reads only.
+func (p *MSAAlignment) ConsensusRow() string {
+	out := make([]byte, len(p.Columns))
+	for c, col := range p.Columns {
+		b := consensusBase(col, p.RefIdx)
+		if b == 0 {
+			out[c] = '-'
+		} else {
+			out[c] = b
+		}
+	}
+	return string(out)
 }
 
 // chooseHPLength implements the per-column length-selection rule documented
@@ -262,14 +296,40 @@ func (p *MSAAlignment) WriteFasta(w io.Writer) error {
 	return nil
 }
 
+// consensusRowName is the label used for the synthetic consensus row
+// appended by WriteClustalWithConsensus and Expanded(withConsensus=true).
+const consensusRowName = "consensus"
+
 // WriteClustal writes the alignment in CLUSTAL interleaved format.
 //
 // Blocks are 60 columns wide. A conservation line under each block marks
-// columns where every displayed row has the same non-gap base with '*'
-// (amino-acid similarity groups are not emitted — this is a DNA format).
-// Row names are padded to a consistent width so the sequence columns stay
-// aligned across blocks.
+// columns where every row has the same non-gap base with '*' (amino-acid
+// similarity groups are not emitted — this is a DNA format). Row names
+// are padded to a consistent width so the sequence columns stay aligned
+// across blocks.
 func (p *MSAAlignment) WriteClustal(w io.Writer) error {
+	return p.writeClustalImpl(w, false)
+}
+
+// WriteClustalWithConsensus is like WriteClustal but appends a synthetic
+// "consensus" row to the bottom of every block, showing the majority-vote
+// base at each column (with '-' for columns that have no non-gap non-ref
+// bases). This is not strictly valid CLUSTAL — the consensus is a derived
+// sequence, not an input — but it is useful when eyeballing PCR-duplicate
+// read clusters to see how the consensus differs from the individual
+// reads. The required "CLUSTAL" header line is preserved so standard
+// parsers will still accept the file.
+//
+// The conservation line is computed from the input sequences only; the
+// consensus row is not included in the vote.
+func (p *MSAAlignment) WriteClustalWithConsensus(w io.Writer) error {
+	return p.writeClustalImpl(w, true)
+}
+
+// writeClustalImpl is the shared CLUSTAL writer used by both WriteClustal
+// and WriteClustalWithConsensus. showConsensus toggles whether a synthetic
+// consensus row is appended to each block.
+func (p *MSAAlignment) writeClustalImpl(w io.Writer, showConsensus bool) error {
 	const blockWidth = 60
 
 	gapped := p.GappedSequences()
@@ -277,13 +337,23 @@ func (p *MSAAlignment) WriteClustal(w io.Writer) error {
 		return nil
 	}
 
-	// Name-column width: max(10, longest name) + 6-space gutter to match
-	// the classical CLUSTAL layout.
+	// When showConsensus is set, precompute the ConsensusRow once so the
+	// block loop can slice it. Exactly len(Columns) characters.
+	var consensusRow string
+	if showConsensus {
+		consensusRow = p.ConsensusRow()
+	}
+
+	// Name-column width: max of (10, longest real name, consensus label)
+	// plus a 6-space gutter to match the classical CLUSTAL layout.
 	nameWidth := 10
 	for _, n := range p.Names {
 		if len(n) > nameWidth {
 			nameWidth = len(n)
 		}
+	}
+	if showConsensus && len(consensusRowName) > nameWidth {
+		nameWidth = len(consensusRowName)
 	}
 	nameWidth += 6
 
@@ -303,14 +373,26 @@ func (p *MSAAlignment) WriteClustal(w io.Writer) error {
 		if end > alnLen {
 			end = alnLen
 		}
+
+		// Input sequence rows.
 		for i, seq := range gapped {
 			if _, err := fmt.Fprintf(w, "%-*s%s\n", nameWidth, p.Names[i], seq[start:end]); err != nil {
 				return err
 			}
 		}
-		// Conservation line: '*' where every row has the same non-gap base,
-		// space otherwise. A single gap anywhere in the column suppresses
-		// the mark.
+
+		// Synthetic consensus row (optional). Emitted before the
+		// conservation line so the block visually ends with the stars.
+		if showConsensus {
+			if _, err := fmt.Fprintf(w, "%-*s%s\n", nameWidth, consensusRowName, consensusRow[start:end]); err != nil {
+				return err
+			}
+		}
+
+		// Conservation line: '*' where every input row has the same
+		// non-gap base, space otherwise. A single gap anywhere in the
+		// column suppresses the mark. Intentionally computed from the
+		// sequences only, not from the consensus row.
 		var cons strings.Builder
 		for j := start; j < end; j++ {
 			first := gapped[0][j]
@@ -335,4 +417,159 @@ func (p *MSAAlignment) WriteClustal(w io.Writer) error {
 		}
 	}
 	return nil
+}
+
+// Expanded returns a new MSAAlignment where each compressed column has
+// been expanded by the per-row homopolymer run lengths recorded in
+// HPLens. The expansion turns the collapsed-bases alignment into a
+// full-length alignment that can be compared against the original input
+// sequences.
+//
+// How a single compressed column expands:
+//
+//   - Determine the maximum run length at this column across the rows
+//     that contribute (all non-gap rows, plus the consensus if
+//     withConsensus is true and the column has a majority base).
+//   - Emit that many sub-columns. In each sub-column, a row's base is
+//     repeated while the sub-column index is still within that row's run
+//     length; once exhausted, the row gets a gap for the remaining
+//     sub-columns.
+//
+// This produces the "expand" half of HP compress/expand: every input
+// sequence ends up back at its original length, with gap padding where
+// other rows had longer homopolymer runs. The result's HPLens is nil
+// (the bases are already fully expanded), and the reference row index
+// is preserved.
+//
+// If withConsensus is true, a synthetic "consensus" row is added at the
+// end of the alignment. Its bases are the ConsensusRow and its HP
+// lengths are the per-column chosen lengths from chooseHPLength. These
+// also contribute to the per-column max, so every run in the result is
+// visible — the consensus row is not silently truncated.
+//
+// Returns nil if HPLens is not populated (no HP data to expand).
+func (p *MSAAlignment) Expanded(withConsensus bool) *MSAAlignment {
+	if p.HPLens == nil {
+		return nil
+	}
+
+	numCols := len(p.Columns)
+
+	// Walk the compressed columns once, recording per-row HP lengths,
+	// the consensus base and chosen length, and the per-column max
+	// width of the expanded block.
+	rowLens := make([][]int, numCols) // rowLens[c][i] = original HP run length for row i at column c; 0 for gaps
+	maxLens := make([]int, numCols)   // total sub-columns at expanded column c
+	consBases := make([]byte, numCols) // consBases[c] = majority base at column c, 0 if none
+	consLens := make([]int, numCols)   // consLens[c] = chosen HP length for the consensus at column c
+
+	// Per-row cursor into HPLens[i]. Advances on every non-gap base
+	// encountered, so we can map (row, column) -> original run length.
+	rowCursors := make([]int, p.NumSeqs)
+
+	for c, col := range p.Columns {
+		rowLens[c] = make([]int, p.NumSeqs)
+		maxLen := 0
+
+		// Non-ref read lengths for the consensus-length calculation and
+		// the ref length (if any) for the tiebreak.
+		var readLens []int
+		var refLen int
+		var hasRef bool
+
+		for i, b := range col.Bases {
+			if b == '-' {
+				// Row has a gap at this column — contributes nothing.
+				continue
+			}
+			cur := rowCursors[i]
+			rowCursors[i]++
+			if p.HPLens[i] == nil || cur >= len(p.HPLens[i]) {
+				// Defensive: mismatched HPLens, leave length at 0.
+				continue
+			}
+			runLen := p.HPLens[i][cur]
+			rowLens[c][i] = runLen
+			if runLen > maxLen {
+				maxLen = runLen
+			}
+			if i == p.RefIdx {
+				refLen = runLen
+				hasRef = true
+				continue
+			}
+			readLens = append(readLens, runLen)
+		}
+
+		// Consensus base + chosen length for this column.
+		base := consensusBase(col, p.RefIdx)
+		if base != 0 {
+			consBases[c] = base
+			if withConsensus {
+				chosen := chooseHPLength(readLens, refLen, hasRef)
+				consLens[c] = chosen
+				if chosen > maxLen {
+					maxLen = chosen
+				}
+			}
+		}
+
+		maxLens[c] = maxLen
+	}
+
+	// Build the expanded columns.
+	//
+	// For each compressed column c, we emit maxLens[c] sub-columns. At
+	// sub-column s of column c, a row's base is:
+	//   - '-' if the row had a gap at c (rowLens[c][i] == 0)
+	//   - col.Bases[i] if s < rowLens[c][i]
+	//   - '-' otherwise (the row's run is exhausted)
+	//
+	// The consensus row (when requested) follows the same pattern but
+	// uses consBases[c] and consLens[c].
+	total := 0
+	for _, m := range maxLens {
+		total += m
+	}
+
+	numRows := p.NumSeqs
+	if withConsensus {
+		numRows++
+	}
+
+	newCols := make([]MSAColumn, 0, total)
+	for c, col := range p.Columns {
+		for s := 0; s < maxLens[c]; s++ {
+			bases := make([]byte, numRows)
+			for i := 0; i < p.NumSeqs; i++ {
+				if s < rowLens[c][i] {
+					bases[i] = col.Bases[i]
+				} else {
+					bases[i] = '-'
+				}
+			}
+			if withConsensus {
+				if consBases[c] != 0 && s < consLens[c] {
+					bases[p.NumSeqs] = consBases[c]
+				} else {
+					bases[p.NumSeqs] = '-'
+				}
+			}
+			newCols = append(newCols, MSAColumn{Bases: bases})
+		}
+	}
+
+	newNames := make([]string, numRows)
+	copy(newNames, p.Names)
+	if withConsensus {
+		newNames[p.NumSeqs] = consensusRowName
+	}
+
+	return &MSAAlignment{
+		Names:   newNames,
+		Columns: newCols,
+		NumSeqs: numRows,
+		RefIdx:  p.RefIdx, // ref row keeps its position; consensus is appended after
+		// HPLens left nil — the bases are already expanded.
+	}
 }
