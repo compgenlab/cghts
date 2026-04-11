@@ -717,3 +717,188 @@ func TestWriteClustalHeader(t *testing.T) {
 		t.Errorf("first line = %q, must start with 'CLUSTAL'", first)
 	}
 }
+
+// TestConsensusRow verifies that ConsensusRow returns exactly one
+// character per column (unlike Consensus, which skips empty columns).
+// This is the invariant the CLUSTAL writer relies on when displaying
+// the synthetic consensus row alongside the real sequences.
+func TestConsensusRow(t *testing.T) {
+	p := &MSAAlignment{
+		Names: []string{"s1", "s2"},
+		Columns: []MSAColumn{
+			{Bases: []byte{'A', 'A'}},
+			{Bases: []byte{'C', '-'}},
+			{Bases: []byte{'G', 'G'}},
+		},
+		NumSeqs: 2,
+		RefIdx:  -1,
+	}
+	got := p.ConsensusRow()
+	want := "ACG"
+	if got != want {
+		t.Errorf("ConsensusRow = %q, want %q", got, want)
+	}
+}
+
+func TestWriteClustalWithConsensus(t *testing.T) {
+	// No HP data — consensus row should be appended but no _hp rows.
+	seqs := []seqio.SeqQual{
+		seqio.NewStringSeq("ACGT", "r1").FullSeq(),
+		seqio.NewStringSeq("ACGT", "r2").FullSeq(),
+		seqio.NewStringSeq("ACTT", "r3").FullSeq(), // G->T at col 2
+	}
+	opts := NewMSAOptions(DnaAlignmentDefaults())
+	aln, err := MSA(seqs, opts)
+	if err != nil {
+		t.Fatalf("MSA: %v", err)
+	}
+
+	var buf strings.Builder
+	if err := aln.WriteClustalWithConsensus(&buf); err != nil {
+		t.Fatalf("WriteClustalWithConsensus: %v", err)
+	}
+	out := buf.String()
+
+	// Consensus row must appear, named "consensus", with bases ACGT
+	// (majority vote beats the lone T at col 2).
+	if !strings.Contains(out, "consensus") {
+		t.Errorf("expected consensus row, got:\n%s", out)
+	}
+	if !strings.Contains(out, "ACGT") {
+		t.Errorf("expected 'ACGT' in consensus output, got:\n%s", out)
+	}
+	// HP length rows must NOT appear when HP data is absent.
+	if strings.Contains(out, "_hp") {
+		t.Errorf("unexpected _hp row in non-HP output:\n%s", out)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Expanded(): HP compression + expansion (rehydration of the full alignment)
+// -----------------------------------------------------------------------------
+
+// TestExpanded_IdenticalLengthsNoOp verifies that when every read has the
+// same HP run lengths, Expanded() produces an alignment where every row
+// matches the original input exactly — no extra gap padding is added
+// because no row's run is longer than any other's.
+func TestExpanded_IdenticalLengthsNoOp(t *testing.T) {
+	seqs := []seqio.SeqQual{
+		seqio.NewStringSeq("AACGTTTGG", "r1").FullSeq(),
+		seqio.NewStringSeq("AACGTTTGG", "r2").FullSeq(),
+	}
+	opts := NewMSAOptions(OntAlignmentDefaults()).HPCompress(true)
+	aln, err := MSA(seqs, opts)
+	if err != nil {
+		t.Fatalf("MSA: %v", err)
+	}
+	exp := aln.Expanded(false)
+	if exp == nil {
+		t.Fatal("Expanded returned nil")
+	}
+	gapped := exp.GappedSequences()
+	for i, g := range gapped {
+		if g != "AACGTTTGG" {
+			t.Errorf("row %d expanded = %q, want %q", i, g, "AACGTTTGG")
+		}
+	}
+}
+
+// TestExpanded_DifferingLengthsPadWithGaps verifies that when rows have
+// different HP run lengths at the same compressed column, the expanded
+// alignment adds trailing gap padding so every row's bases line up at
+// the left of their column's expanded block.
+func TestExpanded_DifferingLengthsPadWithGaps(t *testing.T) {
+	// r1 runs: A=2, C=1, G=1, T=3, G=2 -> AACGTTTGG
+	// r2 runs: A=4, C=1, G=1, T=5, G=3 -> AAAACGTTTTTGGG
+	// Per-column max: A=4, C=1, G=1, T=5, G=3 -> total 14 columns.
+	// r1 expanded: AA--  C  G  TTT--  GG-
+	// r2 expanded: AAAA  C  G  TTTTT  GGG
+	seqs := []seqio.SeqQual{
+		seqio.NewStringSeq("AACGTTTGG", "r1").FullSeq(),
+		seqio.NewStringSeq("AAAACGTTTTTGGG", "r2").FullSeq(),
+	}
+	opts := NewMSAOptions(OntAlignmentDefaults()).HPCompress(true)
+	aln, err := MSA(seqs, opts)
+	if err != nil {
+		t.Fatalf("MSA: %v", err)
+	}
+	exp := aln.Expanded(false)
+	if exp == nil {
+		t.Fatal("Expanded returned nil")
+	}
+	gapped := exp.GappedSequences()
+	if len(gapped) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(gapped))
+	}
+	// Both rows must be the same length (the alignment invariant).
+	if len(gapped[0]) != len(gapped[1]) {
+		t.Errorf("row lengths differ: %d vs %d", len(gapped[0]), len(gapped[1]))
+	}
+	// Every column's expanded block is the union of both rows' runs —
+	// each row recovers its original sequence when the gaps are stripped.
+	for i, g := range gapped {
+		stripped := strings.ReplaceAll(g, "-", "")
+		want := []string{"AACGTTTGG", "AAAACGTTTTTGGG"}[i]
+		if stripped != want {
+			t.Errorf("row %d stripped = %q, want %q (full row = %q)", i, stripped, want, g)
+		}
+	}
+}
+
+// TestExpanded_WithConsensusIncludesRow verifies that Expanded(true)
+// appends a synthetic consensus row whose HP lengths come from
+// chooseHPLength at each column, and that those consensus runs
+// participate in the per-column max width so the consensus is shown
+// without truncation.
+func TestExpanded_WithConsensusIncludesRow(t *testing.T) {
+	seqs := []seqio.SeqQual{
+		seqio.NewStringSeq("AACGTTTGG", "r1").FullSeq(),      // 2,1,1,3,2
+		seqio.NewStringSeq("AAAACGTTTTTGGG", "r2").FullSeq(), // 4,1,1,5,3
+		seqio.NewStringSeq("AACCGTTTGG", "r3").FullSeq(),     // 2,2,1,3,2
+	}
+	// Expected per-column mode:
+	//   A: [2,4,2] -> 2
+	//   C: [1,1,2] -> 1
+	//   G: [1,1,1] -> 1
+	//   T: [3,5,3] -> 3
+	//   G: [2,3,2] -> 2
+	// Consensus rehydrated: AACGTTTGG.
+	opts := NewMSAOptions(OntAlignmentDefaults()).HPCompress(true)
+	aln, err := MSA(seqs, opts)
+	if err != nil {
+		t.Fatalf("MSA: %v", err)
+	}
+	exp := aln.Expanded(true)
+	if exp == nil {
+		t.Fatal("Expanded returned nil")
+	}
+	// Consensus row must be the last row, labelled "consensus".
+	if exp.Names[exp.NumSeqs-1] != "consensus" {
+		t.Errorf("last row name = %q, want %q", exp.Names[exp.NumSeqs-1], "consensus")
+	}
+	gapped := exp.GappedSequences()
+	// Stripped consensus row should be "AACGTTTGG".
+	consRow := gapped[exp.NumSeqs-1]
+	stripped := strings.ReplaceAll(consRow, "-", "")
+	if stripped != "AACGTTTGG" {
+		t.Errorf("consensus row stripped = %q, want %q (full row = %q)", stripped, "AACGTTTGG", consRow)
+	}
+}
+
+// TestExpanded_NoHPData verifies that Expanded is a no-op (returns nil)
+// when the alignment has no HPLens data, so callers can't accidentally
+// expand an already-expanded or never-compressed alignment.
+func TestExpanded_NoHPData(t *testing.T) {
+	seqs := []seqio.SeqQual{
+		seqio.NewStringSeq("ACGT", "r1").FullSeq(),
+		seqio.NewStringSeq("ACGT", "r2").FullSeq(),
+	}
+	opts := NewMSAOptions(DnaAlignmentDefaults()) // no HPCompress
+	aln, err := MSA(seqs, opts)
+	if err != nil {
+		t.Fatalf("MSA: %v", err)
+	}
+	if got := aln.Expanded(false); got != nil {
+		t.Errorf("Expanded on non-HP alignment should return nil, got %v", got)
+	}
+}
