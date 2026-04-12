@@ -1,10 +1,13 @@
 package htsio
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 )
 
@@ -48,6 +51,14 @@ type SamtoolsSamWriter struct {
 	writeWg  sync.WaitGroup // tracks the writer goroutine
 	writeErr error          // first error from the writer goroutine
 	mu       sync.Mutex     // protects start()
+
+	// stderrBuf captures samtools' stderr output across the lifetime of the
+	// process. A dedicated goroutine tees samtools stderr into both this
+	// buffer (for later diagnostic printing in Close) and cgltk's own
+	// stderr (for real-time visibility). stderrWg tracks that goroutine so
+	// Close can wait for it to finish before reading the buffer.
+	stderrBuf bytes.Buffer
+	stderrWg  sync.WaitGroup
 }
 
 // NewSamWriter creates a SamtoolsSamWriter for the given output file.
@@ -153,6 +164,11 @@ func (w *SamtoolsSamWriter) start() error {
 		args = append(args, "--no-PG", "-o", w.filename, "-")
 		w.cmd = exec.Command("samtools", args...)
 
+		// Instrumentation point 1: log the full samtools argv once, right
+		// before Start(). This pins down exactly what we invoked so the
+		// command can be reproduced by hand from a job log.
+		fmt.Fprintf(os.Stderr, "samtools cmd: samtools %s\n", strings.Join(args, " "))
+
 		w.outs, err = w.cmd.StdinPipe()
 		if err != nil {
 			return fmt.Errorf("samtools stdin pipe: %w", err)
@@ -166,6 +182,30 @@ func (w *SamtoolsSamWriter) start() error {
 		if err := w.cmd.Start(); err != nil {
 			return fmt.Errorf("samtools start: %w", err)
 		}
+
+		// Drain samtools stderr concurrently. Every line is tee'd to both
+		// cgltk's stderr (with a "samtools: " prefix, so the user sees
+		// samtools messages in real time) and an internal bytes.Buffer
+		// (so Close can include the full text in any error return).
+		//
+		// This also eliminates the possibility of samtools blocking on a
+		// full stderr pipe buffer — unlikely in practice with samtools
+		// sort but a correctness concern worth closing off.
+		w.stderrWg.Add(1)
+		go func() {
+			defer w.stderrWg.Done()
+			scanner := bufio.NewScanner(w.stderr)
+			scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				w.stderrBuf.Write(line)
+				w.stderrBuf.WriteByte('\n')
+				fmt.Fprintf(os.Stderr, "samtools: %s\n", line)
+			}
+			// Scanner errors (other than EOF) are intentionally ignored
+			// here — the pipe may return ErrClosed after cmd.Wait, which
+			// isn't something we want to escalate.
+		}()
 	}
 
 	if w.opts.header != nil {
@@ -212,6 +252,11 @@ func (w *SamtoolsSamWriter) Write(rec *SamRecord) error {
 
 // Close drains the write buffer, waits for the writer goroutine to finish,
 // and waits for the samtools process to exit.
+//
+// Instrumentation: Close logs the samtools exit status (success or error)
+// to cgltk's stderr. The samtools stderr buffer is populated by the
+// concurrent drain goroutine started in start(); we only need to wait for
+// that goroutine to finish before reading the buffer in the error paths.
 func (w *SamtoolsSamWriter) Close() error {
 	if !w.started {
 		return nil
@@ -221,27 +266,44 @@ func (w *SamtoolsSamWriter) Close() error {
 	if w.outs != nil {
 		w.outs.Close()
 	}
-	if w.writeErr != nil {
-		// Still wait for samtools to exit.
-		if w.stderr != nil {
-			io.ReadAll(w.stderr)
-			w.stderr.Close()
-		}
-		if w.cmd != nil {
-			w.cmd.Wait()
-		}
-		return w.writeErr
+
+	// Wait for samtools to exit and its stderr drain goroutine to finish.
+	// The drain goroutine returns as soon as the samtools process closes
+	// its end of the stderr pipe (i.e., as soon as samtools exits).
+	var waitErr error
+	if w.cmd != nil {
+		waitErr = w.cmd.Wait()
 	}
-	if w.stderr != nil {
-		stderrBytes, _ := io.ReadAll(w.stderr)
-		w.stderr.Close()
-		if w.cmd != nil {
-			if err := w.cmd.Wait(); err != nil {
-				return fmt.Errorf("samtools: %w: %s", err, string(stderrBytes))
-			}
+	w.stderrWg.Wait()
+	stderrText := w.stderrBuf.String()
+
+	// Instrumentation point 3: log the samtools exit status unconditionally
+	// on the success and error paths. If this line is missing from a job's
+	// stderr, we know cmd.Wait() never returned — which means cgltk is
+	// hanging in Close rather than exiting cleanly.
+	if w.cmd != nil {
+		if waitErr != nil {
+			fmt.Fprintf(os.Stderr, "samtools exit: %v\n", waitErr)
+		} else {
+			fmt.Fprintf(os.Stderr, "samtools exit: ok\n")
 		}
-	} else if w.cmd != nil {
-		return w.cmd.Wait()
+	}
+
+	// If the writer goroutine saw an EPIPE (samtools died before consuming
+	// our writes), surface that as the primary error but also include the
+	// samtools exit status and any stderr text so we don't lose the real
+	// cause.
+	if w.writeErr != nil {
+		if waitErr != nil {
+			return fmt.Errorf("%w (samtools: %v: %s)", w.writeErr, waitErr, stderrText)
+		}
+		return fmt.Errorf("%w (samtools stderr: %s)", w.writeErr, stderrText)
+	}
+
+	// No writer error. If samtools exited non-zero, surface that along
+	// with the captured stderr.
+	if waitErr != nil {
+		return fmt.Errorf("samtools: %w: %s", waitErr, stderrText)
 	}
 	return nil
 }
