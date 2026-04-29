@@ -193,78 +193,93 @@ func (r *Reader) nextBlock() error {
 		return err
 	}
 
-	// Total block size = bsize + 1. The header is already consumed.
 	blockSize := int(hdr.bsize) + 1
-	remaining := blockSize - bgzfHeaderSize
-	if remaining < gzipTrailerSize {
-		return fmt.Errorf("bgzf: block too small: bsize=%d", hdr.bsize)
-	}
 
-	// Read the rest of the block (compressed data + trailer).
-	blockData := make([]byte, remaining)
-	if _, err := io.ReadFull(r.r, blockData); err != nil {
-		if err == io.ErrUnexpectedEOF {
-			return fmt.Errorf("bgzf: truncated block data")
-		}
-		return fmt.Errorf("bgzf: reading block: %w", err)
+	// Check for EOF block (bsize == 27, uncompressed size will be 0).
+	data, err := readBlockData(r.r, hdr.bsize, r.buf)
+	if err != nil {
+		return err
 	}
 
 	r.fileOffset += int64(blockSize)
 
-	compressedData := blockData[:len(blockData)-gzipTrailerSize]
-	trailer := blockData[len(blockData)-gzipTrailerSize:]
-
-	expectedCRC := binary.LittleEndian.Uint32(trailer[0:4])
-	expectedSize := binary.LittleEndian.Uint32(trailer[4:8])
-
-	// Empty block (EOF marker) — size 0 is valid.
-	if expectedSize == 0 {
+	if len(data) == 0 {
 		r.buf = r.buf[:0]
 		r.pos = 0
-		// Peek to see if there's more data. An EOF block at the end
-		// of the file should return io.EOF.
+		// Peek to see if there's more data after the EOF block.
 		if _, err := r.r.Peek(1); err != nil {
 			return io.EOF
 		}
 		return nil
 	}
 
+	r.buf = data
+	r.pos = 0
+	return nil
+}
+
+// decompressBlock decompresses raw DEFLATE data and verifies it against
+// the expected CRC32 and uncompressed size from the BGZF trailer.
+// If buf has sufficient capacity it is reused; otherwise a new slice is allocated.
+func decompressBlock(compressedData []byte, expectedCRC uint32, expectedSize uint32, buf []byte) ([]byte, error) {
 	if expectedSize > MaxUncompressedSize {
-		return fmt.Errorf("bgzf: uncompressed size %d exceeds maximum %d", expectedSize, MaxUncompressedSize)
+		return nil, fmt.Errorf("bgzf: uncompressed size %d exceeds maximum %d", expectedSize, MaxUncompressedSize)
 	}
 
-	// Decompress using raw DEFLATE (no gzip wrapper).
 	fr := flate.NewReader(nil)
 	resetter, ok := fr.(flate.Resetter)
 	if !ok {
-		return fmt.Errorf("bgzf: flate.Reader does not implement Resetter")
+		return nil, fmt.Errorf("bgzf: flate.Reader does not implement Resetter")
 	}
 	if err := resetter.Reset(io.NopCloser(newBytesReader(compressedData)), nil); err != nil {
-		return fmt.Errorf("bgzf: flate reset: %w", err)
+		return nil, fmt.Errorf("bgzf: flate reset: %w", err)
 	}
 
-	// Reuse r.buf if it has enough capacity.
-	if cap(r.buf) >= int(expectedSize) {
-		r.buf = r.buf[:expectedSize]
+	if cap(buf) >= int(expectedSize) {
+		buf = buf[:expectedSize]
 	} else {
-		r.buf = make([]byte, expectedSize)
+		buf = make([]byte, expectedSize)
 	}
 
-	n, err := io.ReadFull(fr, r.buf)
+	n, err := io.ReadFull(fr, buf)
 	if err != nil {
-		return fmt.Errorf("bgzf: decompressing block: %w", err)
+		return nil, fmt.Errorf("bgzf: decompressing block: %w", err)
 	}
-	r.buf = r.buf[:n]
+	buf = buf[:n]
 	fr.Close()
 
-	// Verify CRC32.
-	actualCRC := crc32.ChecksumIEEE(r.buf)
+	actualCRC := crc32.ChecksumIEEE(buf)
 	if actualCRC != expectedCRC {
-		return fmt.Errorf("bgzf: CRC32 mismatch: expected %#x, got %#x", expectedCRC, actualCRC)
+		return nil, fmt.Errorf("bgzf: CRC32 mismatch: expected %#x, got %#x", expectedCRC, actualCRC)
 	}
 
-	r.pos = 0
-	return nil
+	return buf, nil
+}
+
+// readBlockData reads the data portion of a BGZF block (after the header)
+// from r, decompresses it, and returns the uncompressed data. The bsize
+// field is from the block header. buf is reused if it has enough capacity.
+func readBlockData(r io.Reader, bsize uint16, buf []byte) ([]byte, error) {
+	blockSize := int(bsize) + 1
+	remaining := blockSize - bgzfHeaderSize
+	if remaining < gzipTrailerSize {
+		return nil, fmt.Errorf("bgzf: block too small: bsize=%d", bsize)
+	}
+
+	blockData := make([]byte, remaining)
+	if _, err := io.ReadFull(r, blockData); err != nil {
+		if err == io.ErrUnexpectedEOF {
+			return nil, fmt.Errorf("bgzf: truncated block data")
+		}
+		return nil, fmt.Errorf("bgzf: reading block: %w", err)
+	}
+
+	compressedData := blockData[:len(blockData)-gzipTrailerSize]
+	trailer := blockData[len(blockData)-gzipTrailerSize:]
+	expectedCRC := binary.LittleEndian.Uint32(trailer[0:4])
+	expectedSize := binary.LittleEndian.Uint32(trailer[4:8])
+
+	return decompressBlock(compressedData, expectedCRC, expectedSize, buf)
 }
 
 // bytesReader is a minimal io.Reader over a byte slice, avoiding
