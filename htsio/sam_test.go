@@ -188,18 +188,20 @@ func TestSamWriterBuilder(t *testing.T) {
 		t.Fatalf("NewSamWriter: %v", err)
 	}
 
-	if w.filename != "out.bam" {
-		t.Errorf("filename = %q, want %q", w.filename, "out.bam")
+	// CRAM format goes through samtools, so we get a SamtoolsSamWriter.
+	sw, ok := w.(*SamtoolsSamWriter)
+	if !ok {
+		t.Fatalf("expected *SamtoolsSamWriter, got %T", w)
 	}
-	if w.opts.format != FormatCRAM {
-		t.Errorf("format = %d, want %d", w.opts.format, FormatCRAM)
+	if sw.filename != "out.bam" {
+		t.Errorf("filename = %q, want %q", sw.filename, "out.bam")
 	}
-	if w.opts.reference != "ref.fa" {
-		t.Errorf("reference = %q, want %q", w.opts.reference, "ref.fa")
+	if sw.opts.format != FormatCRAM {
+		t.Errorf("format = %d, want %d", sw.opts.format, FormatCRAM)
 	}
-
-	// verify it satisfies the SamWriter interface
-	var _ SamWriter = w
+	if sw.opts.reference != "ref.fa" {
+		t.Errorf("reference = %q, want %q", sw.opts.reference, "ref.fa")
+	}
 }
 
 func TestStdoutSamWriterInterface(t *testing.T) {
