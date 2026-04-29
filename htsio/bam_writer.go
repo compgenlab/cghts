@@ -146,10 +146,15 @@ func (bw *BamWriter) Close() error {
 	}
 	bw.closed = true
 
-	if bw.started {
-		close(bw.writeCh)
-		bw.writeWg.Wait()
+	if !bw.started {
+		// Ensure header is written even if no records were added.
+		if err := bw.start(); err != nil {
+			return err
+		}
 	}
+
+	close(bw.writeCh)
+	bw.writeWg.Wait()
 
 	if err := bw.w.Close(); err != nil && bw.err == nil {
 		bw.err = err

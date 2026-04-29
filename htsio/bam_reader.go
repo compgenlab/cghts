@@ -186,11 +186,17 @@ func (b *BamReader) passesFilters(rec *SamRecord) bool {
 	return true
 }
 
-// readRecord reads a single BAM alignment record and converts it to a SamRecord.
+// readRecord is a convenience wrapper for the BamReader.
 func (b *BamReader) readRecord() (*SamRecord, error) {
+	return readBamRecord(b.r, b.refs)
+}
+
+// readBamRecord reads a single BAM alignment record from r and converts it
+// to a SamRecord, using refs to resolve reference IDs to names.
+func readBamRecord(r io.Reader, refs []bamRefInfo) (*SamRecord, error) {
 	// Block size (excludes the 4-byte block_size field itself).
 	var blockSize int32
-	if err := binary.Read(b.r, binary.LittleEndian, &blockSize); err != nil {
+	if err := binary.Read(r, binary.LittleEndian, &blockSize); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			return nil, io.EOF
 		}
@@ -202,7 +208,7 @@ func (b *BamReader) readRecord() (*SamRecord, error) {
 
 	// Read the entire record into a buffer for efficient parsing.
 	buf := make([]byte, blockSize)
-	if _, err := io.ReadFull(b.r, buf); err != nil {
+	if _, err := io.ReadFull(r, buf); err != nil {
 		if err == io.ErrUnexpectedEOF {
 			return nil, fmt.Errorf("bam: truncated record")
 		}
@@ -259,12 +265,12 @@ func (b *BamReader) readRecord() (*SamRecord, error) {
 
 	// Resolve reference names.
 	refName := "*"
-	if refID >= 0 && int(refID) < len(b.refs) {
-		refName = b.refs[refID].name
+	if refID >= 0 && int(refID) < len(refs) {
+		refName = refs[refID].name
 	}
 	refNext := "*"
-	if nextRefID >= 0 && int(nextRefID) < len(b.refs) {
-		refNext = b.refs[nextRefID].name
+	if nextRefID >= 0 && int(nextRefID) < len(refs) {
+		refNext = refs[nextRefID].name
 	}
 	// SAM uses "=" for mate on same reference.
 	if nextRefID == refID && refID >= 0 {
