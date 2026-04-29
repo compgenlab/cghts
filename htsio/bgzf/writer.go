@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"hash/crc32"
 	"io"
+	"os"
 )
 
 // Writer writes BGZF-compressed data. It implements io.WriteCloser.
@@ -13,10 +14,12 @@ import (
 // at which point it is flushed as a complete BGZF block. Call Close to flush
 // the final partial block and write the EOF marker.
 type Writer struct {
-	w     io.Writer
-	buf   []byte // uncompressed data pending flush
-	level int    // flate compression level
-	err   error  // sticky error
+	w      io.Writer
+	f      *os.File // non-nil if opened by NewBGZipFile
+	buf    []byte   // uncompressed data pending flush
+	level  int      // flate compression level
+	closed bool     // prevents double-close
+	err    error    // sticky error
 }
 
 // NewWriter creates a BGZF writer using the default compression level.
@@ -26,6 +29,18 @@ func NewWriter(w io.Writer) *Writer {
 		buf:   make([]byte, 0, MaxUncompressedSize),
 		level: flate.DefaultCompression,
 	}
+}
+
+// NewBGZipFile creates a Writer that writes to the named file. The file is
+// created (or truncated) and will be closed when the writer is closed.
+func NewBGZipFile(filename string) (*Writer, error) {
+	f, err := os.Create(filename)
+	if err != nil {
+		return nil, err
+	}
+	w := NewWriter(f)
+	w.f = f
+	return w, nil
 }
 
 // NewWriterLevel creates a BGZF writer with the specified flate compression level.
@@ -82,9 +97,14 @@ func (w *Writer) Flush() error {
 	return w.flush()
 }
 
-// Close flushes any remaining data, writes the BGZF EOF block, and returns.
-// It does NOT close the underlying writer.
+// Close flushes any remaining data, writes the BGZF EOF block, and closes
+// the underlying file if the writer was created with NewBGZipFile. Close is
+// idempotent.
 func (w *Writer) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
 	if w.err != nil {
 		return w.err
 	}
@@ -95,11 +115,14 @@ func (w *Writer) Close() error {
 		}
 	}
 	// Write the standard EOF block.
-	_, err := w.w.Write(bgzfEOFBlock)
-	if err != nil {
+	if _, err := w.w.Write(bgzfEOFBlock); err != nil {
 		w.err = err
+		return err
 	}
-	return err
+	if w.f != nil {
+		return w.f.Close()
+	}
+	return nil
 }
 
 // maxCompressedPayload is the space available for DEFLATE output within a
