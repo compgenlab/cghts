@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -240,6 +241,24 @@ type SamtoolsSamReader struct {
 }
 
 func NewSamReader(filename string, opts ...*SamReaderOpts) (SamReader, error) {
+	var o *SamReaderOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	} else {
+		o = NewSamReaderOpts()
+	}
+
+	// Use native BAM reader for .bam files when no region query is needed.
+	// Region queries require an index, which the native reader doesn't
+	// support yet, so those fall through to samtools.
+	if strings.HasSuffix(filename, ".bam") && o.region == "" {
+		f, err := os.Open(filename)
+		if err != nil {
+			return nil, err
+		}
+		return NewBamReader(f, o)
+	}
+
 	return newSamtoolsReader(filename, opts...)
 }
 
