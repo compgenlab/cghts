@@ -14,12 +14,13 @@ import (
 // at which point it is flushed as a complete BGZF block. Call Close to flush
 // the final partial block and write the EOF marker.
 type Writer struct {
-	w      io.Writer
-	f      *os.File // non-nil if opened by NewBGZipFile
-	buf    []byte   // uncompressed data pending flush
-	level  int      // flate compression level
-	closed bool     // prevents double-close
-	err    error    // sticky error
+	w              io.Writer
+	f              *os.File // non-nil if opened by NewBGZipFile
+	buf            []byte   // uncompressed data pending flush
+	level          int      // flate compression level
+	closed         bool     // prevents double-close
+	err            error    // sticky error
+	compressedOff  int64    // compressed bytes written so far (block boundaries)
 }
 
 // NewWriter creates a BGZF writer using the default compression level.
@@ -84,6 +85,13 @@ func (w *Writer) Write(p []byte) (int, error) {
 		total += n
 	}
 	return total, nil
+}
+
+// VirtualTell returns the virtual offset where the next byte will be written.
+// This is the compressed block offset of the current (unflushed) block
+// combined with the uncompressed position within it.
+func (w *Writer) VirtualTell() VirtualOffset {
+	return NewVirtualOffset(w.compressedOff, uint16(len(w.buf)))
 }
 
 // Flush writes the current buffer as a BGZF block, even if it is not full.
@@ -194,6 +202,7 @@ func (w *Writer) flush() error {
 		return err
 	}
 
+	w.compressedOff += int64(blockSize)
 	w.buf = w.buf[:0]
 	return nil
 }
