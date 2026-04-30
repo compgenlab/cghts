@@ -11,14 +11,34 @@ import (
 	"github.com/compgen-io/cgltk/htsio/bgzf"
 )
 
+// tabixIndex is the interface shared by TBI (BinIndex) and CSI (CSIIndex)
+// for tabix region queries.
+type tabixIndex interface {
+	Query(refID int, start, end int) []Chunk
+	RefID(name string) int
+}
+
+// tabixMeta holds the column definitions and coordinate metadata from
+// a tabix index (TBI or CSI).
+type tabixMeta struct {
+	Format    int32
+	ColSeq    int32
+	ColBeg    int32
+	ColEnd    int32
+	Meta      int32
+	Skip      int32
+	ZeroBased bool
+}
+
 // TabixReader reads BGZF-compressed, tabix-indexed text files (BED, VCF, GFF,
-// etc.) with random access by genomic region. The .tbi index is required — it
-// provides column definitions, the coordinate system (0-based vs 1-based),
-// comment character, and header skip count.
+// etc.) with random access by genomic region. Supports both .tbi and .csi
+// indexes, which provide column definitions, the coordinate system (0-based
+// vs 1-based), comment character, and header skip count.
 type TabixReader struct {
-	ir  *bgzf.IndexedReader
-	f   *os.File
-	idx *BinIndex
+	ir   *bgzf.IndexedReader
+	f    *os.File
+	idx  tabixIndex
+	meta tabixMeta
 }
 
 // TabixRecord holds a single parsed line from a tabix query along with the
@@ -33,7 +53,7 @@ type TabixRecord struct {
 // TabixIterator yields lines from a tabix query region.
 type TabixIterator struct {
 	ir      *bgzf.IndexedReader
-	idx     *BinIndex
+	meta    *tabixMeta
 	scanner *bufio.Scanner
 	chunks  []Chunk
 	ref     string
@@ -43,13 +63,47 @@ type TabixIterator struct {
 	done    bool
 }
 
-// NewTabixReader opens a BGZF-compressed file and its .tbi index.
-// The TBI index file must exist at filename.tbi.
+// NewTabixReader opens a BGZF-compressed file and its tabix index.
+// It looks for a .tbi index first, then falls back to .csi.
 func NewTabixReader(filename string) (*TabixReader, error) {
+	var idx tabixIndex
+	var meta tabixMeta
+
 	tbiPath := filename + ".tbi"
-	idx, err := LoadTBI(tbiPath)
-	if err != nil {
-		return nil, fmt.Errorf("tabix: loading index: %w", err)
+	csiPath := filename + ".csi"
+
+	if _, err := os.Stat(tbiPath); err == nil {
+		tbi, err := LoadTBI(tbiPath)
+		if err != nil {
+			return nil, fmt.Errorf("tabix: loading TBI index: %w", err)
+		}
+		idx = tbi
+		meta = tabixMeta{
+			Format:    tbi.Format,
+			ColSeq:    tbi.ColSeq,
+			ColBeg:    tbi.ColBeg,
+			ColEnd:    tbi.ColEnd,
+			Meta:      tbi.Meta,
+			Skip:      tbi.Skip,
+			ZeroBased: tbi.ZeroBased,
+		}
+	} else if _, err := os.Stat(csiPath); err == nil {
+		csi, err := LoadCSI(csiPath)
+		if err != nil {
+			return nil, fmt.Errorf("tabix: loading CSI index: %w", err)
+		}
+		idx = csi
+		meta = tabixMeta{
+			Format:    csi.Format,
+			ColSeq:    csi.ColSeq,
+			ColBeg:    csi.ColBeg,
+			ColEnd:    csi.ColEnd,
+			Meta:      csi.Meta,
+			Skip:      csi.Skip,
+			ZeroBased: csi.ZeroBased,
+		}
+	} else {
+		return nil, fmt.Errorf("tabix: no index found (.tbi or .csi) for %s", filename)
 	}
 
 	f, err := os.Open(filename)
@@ -60,9 +114,10 @@ func NewTabixReader(filename string) (*TabixReader, error) {
 	ir := bgzf.NewIndexedReader(f)
 
 	return &TabixReader{
-		ir:  ir,
-		f:   f,
-		idx: idx,
+		ir:   ir,
+		f:    f,
+		idx:  idx,
+		meta: meta,
 	}, nil
 }
 
@@ -74,10 +129,9 @@ func (tr *TabixReader) Close() error {
 	return nil
 }
 
-// Index returns the parsed TBI index, which contains column definitions,
-// coordinate system info, and reference sequence names.
-func (tr *TabixReader) Index() *BinIndex {
-	return tr.idx
+// Meta returns the tabix metadata (column definitions, coordinate system).
+func (tr *TabixReader) Meta() tabixMeta {
+	return tr.meta
 }
 
 // Query returns an iterator that yields TabixRecords overlapping the
@@ -95,7 +149,7 @@ func (tr *TabixReader) Query(ref string, start, end int) (*TabixIterator, error)
 
 	return &TabixIterator{
 		ir:     tr.ir,
-		idx:    tr.idx,
+		meta:   &tr.meta,
 		chunks: chunks,
 		ref:    ref,
 		start:  start,
@@ -131,7 +185,7 @@ func (ti *TabixIterator) Next() (*TabixRecord, error) {
 		if line == "" {
 			continue
 		}
-		if ti.idx.Meta != 0 && line[0] == byte(ti.idx.Meta) {
+		if ti.meta.Meta != 0 && line[0] == byte(ti.meta.Meta) {
 			continue
 		}
 
@@ -174,9 +228,9 @@ func (ti *TabixIterator) Next() (*TabixRecord, error) {
 func (ti *TabixIterator) parseLine(line string) (*TabixRecord, error) {
 	fields := strings.Split(line, "\t")
 
-	colSeq := int(ti.idx.ColSeq) - 1 // 1-based → 0-based column index
-	colBeg := int(ti.idx.ColBeg) - 1
-	colEnd := int(ti.idx.ColEnd) - 1
+	colSeq := int(ti.meta.ColSeq) - 1 // 1-based → 0-based column index
+	colBeg := int(ti.meta.ColBeg) - 1
+	colEnd := int(ti.meta.ColEnd) - 1
 
 	if colSeq < 0 || colSeq >= len(fields) {
 		return nil, fmt.Errorf("seq column %d out of range", colSeq)
@@ -194,17 +248,17 @@ func (ti *TabixIterator) parseLine(line string) (*TabixRecord, error) {
 	}
 
 	// Convert to 0-based if the file uses 1-based coordinates.
-	if !ti.idx.ZeroBased {
+	if !ti.meta.ZeroBased {
 		beg--
 	}
 
 	// End coordinate.
 	end := beg + 1 // default: point feature
-	if ti.idx.ColEnd != 0 && colEnd >= 0 && colEnd < len(fields) {
+	if ti.meta.ColEnd != 0 && colEnd >= 0 && colEnd < len(fields) {
 		endStr := fields[colEnd]
 		e, err := strconv.Atoi(endStr)
 		if err == nil {
-			if !ti.idx.ZeroBased {
+			if !ti.meta.ZeroBased {
 				// 1-based inclusive end → 0-based exclusive: no change needed
 				// (1-based [1,10] = 0-based [0,10))
 				end = e

@@ -7,6 +7,8 @@ import (
 
 const testBEDPath = "testdata/test.bed.gz"
 const testVCFPath = "testdata/test.vcf.gz"
+const testCSIBEDPath = "testdata/test_csi.bed.gz"
+const testCSIVCFPath = "testdata/test_csi.vcf.gz"
 
 func TestTabixReaderBEDQuery(t *testing.T) {
 	tr, err := NewTabixReader(testBEDPath)
@@ -257,6 +259,133 @@ func TestTabixReaderCoordinates(t *testing.T) {
 	}
 	if rec.Start != 50 || rec.End != 150 {
 		t.Errorf("coordinates: got [%d, %d), want [50, 150)", rec.Start, rec.End)
+	}
+}
+
+// CSI index tests — same queries as TBI, using CSI-indexed files.
+
+func TestTabixReaderCSIBEDQuery(t *testing.T) {
+	tr, err := NewTabixReader(testCSIBEDPath)
+	if err != nil {
+		t.Fatalf("NewTabixReader: %v", err)
+	}
+	defer tr.Close()
+
+	iter, err := tr.Query("chr1", 400, 600)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	var names []string
+	for {
+		rec, err := iter.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		fields := splitTabs(rec.Line)
+		if len(fields) >= 4 {
+			names = append(names, fields[3])
+		}
+	}
+
+	if len(names) != 1 || names[0] != "feature2" {
+		t.Errorf("expected [feature2], got %v", names)
+	}
+}
+
+func TestTabixReaderCSIBEDQueryMultiple(t *testing.T) {
+	tr, err := NewTabixReader(testCSIBEDPath)
+	if err != nil {
+		t.Fatalf("NewTabixReader: %v", err)
+	}
+	defer tr.Close()
+
+	iter, err := tr.Query("chr1", 0, 700)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	var names []string
+	for {
+		rec, err := iter.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		fields := splitTabs(rec.Line)
+		if len(fields) >= 4 {
+			names = append(names, fields[3])
+		}
+	}
+
+	if len(names) != 2 || names[0] != "feature1" || names[1] != "feature2" {
+		t.Errorf("expected [feature1, feature2], got %v", names)
+	}
+}
+
+func TestTabixReaderCSIVCFQuery(t *testing.T) {
+	tr, err := NewTabixReader(testCSIVCFPath)
+	if err != nil {
+		t.Fatalf("NewTabixReader: %v", err)
+	}
+	defer tr.Close()
+
+	iter, err := tr.Query("chr1", 400, 600)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	var positions []int
+	for {
+		rec, err := iter.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		positions = append(positions, rec.Start)
+	}
+
+	if len(positions) != 1 || positions[0] != 499 {
+		t.Errorf("expected [499], got %v", positions)
+	}
+}
+
+func TestTabixReaderCSIChr2(t *testing.T) {
+	tr, err := NewTabixReader(testCSIBEDPath)
+	if err != nil {
+		t.Fatalf("NewTabixReader: %v", err)
+	}
+	defer tr.Close()
+
+	iter, err := tr.Query("chr2", 0, 1000)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	var names []string
+	for {
+		rec, err := iter.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		fields := splitTabs(rec.Line)
+		if len(fields) >= 4 {
+			names = append(names, fields[3])
+		}
+	}
+
+	if len(names) != 1 || names[0] != "feature5" {
+		t.Errorf("expected [feature5], got %v", names)
 	}
 }
 
