@@ -61,10 +61,17 @@ type SamtoolsSamWriter struct {
 	stderrWg  sync.WaitGroup
 }
 
-// NewSamWriter creates a SamtoolsSamWriter for the given output file.
-// Returns an error if samtools is not found in PATH.
-// Default format is BAM. Use the builder methods to set options before calling Write().
-func NewSamWriter(filename string, opts *samWriterOptions) (*SamtoolsSamWriter, error) {
+// NewSamWriter creates a SamWriter for the given output file. For BAM format,
+// a native writer is used (no samtools dependency). For CRAM or SAM format,
+// samtools is required.
+func NewSamWriter(filename string, opts *samWriterOptions) (SamWriter, error) {
+	if opts.format == FormatBAM {
+		if opts.sortedCoord || opts.sortedName {
+			return newSortedBamWriter(filename, opts.header, opts.sortedCoord, opts.sortTmpPrefix)
+		}
+		return newBamWriter(filename, opts.header)
+	}
+
 	if err := checkSamtools(); err != nil {
 		return nil, err
 	}

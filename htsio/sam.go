@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"iter"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -106,6 +108,10 @@ type SamReader interface {
 	Next() (*SamRecord, error)
 	// Header returns the parsed SAM header. May return nil before the first Next() call.
 	Header() (*SamHeader, error)
+	// Query returns an iterator over records overlapping the 0-based
+	// half-open region [start, end) on the given reference. Returns an
+	// error if the file is not indexed.
+	Query(ref string, start, end int) (iter.Seq2[*SamRecord, error], error)
 	// Close releases resources.
 	Close() error
 }
@@ -218,7 +224,6 @@ func ParseTagFilter(s string, op TagFilterOp) (*TagFilter, error) {
 }
 
 type SamReaderOpts struct {
-	region     string
 	flagReq    int
 	flagFilter int
 	minMapQ    int
@@ -240,6 +245,28 @@ type SamtoolsSamReader struct {
 }
 
 func NewSamReader(filename string, opts ...*SamReaderOpts) (SamReader, error) {
+	var o *SamReaderOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	} else {
+		o = NewSamReaderOpts()
+	}
+
+	// Use native BAM reader for .bam files.
+	if strings.HasSuffix(filename, ".bam") {
+		f, err := os.Open(filename)
+		if err != nil {
+			return nil, err
+		}
+		return NewBamReader(f, o)
+	}
+
+	// Use native SAM text reader for .sam and .sam.gz files.
+	if strings.HasSuffix(filename, ".sam") || strings.HasSuffix(filename, ".sam.gz") {
+		return NewSamTextReader(filename, o)
+	}
+
+	// CRAM and other formats use samtools.
 	return newSamtoolsReader(filename, opts...)
 }
 
@@ -261,12 +288,6 @@ func newSamtoolsReader(filename string, opts ...*SamReaderOpts) (SamReader, erro
 
 func NewSamReaderOpts() *SamReaderOpts {
 	return &SamReaderOpts{}
-}
-
-// Region sets the genomic region to query (e.g. "chr1:1000-2000").
-func (r *SamReaderOpts) Region(region string) *SamReaderOpts {
-	r.region = region
-	return r
 }
 
 // FlagRequired sets the required flags filter (-f). Only reads with all of these flags set are returned.
@@ -326,9 +347,6 @@ func (r *SamtoolsSamReader) start() error {
 		args = append(args, "-q", strconv.Itoa(r.opts.minMapQ))
 	}
 	args = append(args, r.filename)
-	if r.opts.region != "" {
-		args = append(args, r.opts.region)
-	}
 
 	r.cmd = exec.Command("samtools", args...)
 
@@ -448,6 +466,75 @@ func (r *SamtoolsSamReader) Close() error {
 	return nil
 }
 
+// Query spawns a new samtools view process with the given region and
+// returns an iterator over matching records. The region is converted
+// from 0-based half-open to the samtools format (1-based inclusive).
+func (r *SamtoolsSamReader) Query(ref string, start, end int) (iter.Seq2[*SamRecord, error], error) {
+	// Convert 0-based half-open [start, end) to samtools 1-based region string.
+	region := fmt.Sprintf("%s:%d-%d", ref, start+1, end)
+
+	opts := &SamReaderOpts{}
+	if r.opts != nil {
+		*opts = *r.opts
+	}
+
+	sr := &SamtoolsSamReader{
+		filename: r.filename,
+		opts:     opts,
+	}
+
+	args := []string{"view", "-h"}
+	if opts.threads > 0 {
+		args = append(args, "--threads", strconv.Itoa(opts.threads))
+	}
+	if opts.flagReq != 0 {
+		args = append(args, "-f", strconv.Itoa(opts.flagReq))
+	}
+	if opts.flagFilter != 0 {
+		args = append(args, "-F", strconv.Itoa(opts.flagFilter))
+	}
+	if opts.minMapQ != 0 {
+		args = append(args, "-q", strconv.Itoa(opts.minMapQ))
+	}
+	args = append(args, r.filename, region)
+
+	sr.cmd = exec.Command("samtools", args...)
+
+	var err error
+	sr.stdout, err = sr.cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("samtools stdout pipe: %w", err)
+	}
+	sr.stderr, err = sr.cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("samtools stderr pipe: %w", err)
+	}
+	if err := sr.cmd.Start(); err != nil {
+		return nil, fmt.Errorf("samtools start: %w", err)
+	}
+
+	sr.scanner = bufio.NewScanner(sr.stdout)
+	sr.scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	sr.started = true
+	sr.populateHeader()
+
+	return func(yield func(*SamRecord, error) bool) {
+		defer sr.Close()
+		for {
+			rec, err := sr.Next()
+			if err == io.EOF {
+				return
+			}
+			if !yield(rec, err) {
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}, nil
+}
+
 func parseSamLine(line string) (*SamRecord, error) {
 	fields := strings.SplitN(line, "\t", 12)
 	if len(fields) < 11 {
@@ -531,4 +618,94 @@ func CigarRefLen(cigar string) int {
 		}
 	}
 	return refLen
+}
+
+// ParseRegion parses a samtools-style region string into 0-based half-open
+// coordinates. Supported formats:
+//   - "chr1"           → ref="chr1", start=0, end=-1 (whole chromosome; caller should use ref length)
+//   - "chr1:1000-2000" → ref="chr1", start=999, end=2000 (input is 1-based inclusive)
+//   - "chr1:1000"      → ref="chr1", start=999, end=-1 (to end of chromosome)
+//
+// Returns ref, start, end. An end of -1 means "to end of reference."
+func ParseRegion(region string) (ref string, start, end int, err error) {
+	colonIdx := strings.Index(region, ":")
+	if colonIdx < 0 {
+		return region, 0, -1, nil
+	}
+
+	ref = region[:colonIdx]
+	coords := region[colonIdx+1:]
+
+	// Remove commas (samtools allows "1,000" style)
+	coords = strings.ReplaceAll(coords, ",", "")
+
+	dashIdx := strings.Index(coords, "-")
+	if dashIdx < 0 {
+		// Just start position.
+		s, err := strconv.Atoi(coords)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("invalid region %q: %w", region, err)
+		}
+		return ref, s - 1, -1, nil
+	}
+
+	startStr := coords[:dashIdx]
+	endStr := coords[dashIdx+1:]
+
+	s, err := strconv.Atoi(startStr)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("invalid region start %q: %w", region, err)
+	}
+	e, err := strconv.Atoi(endStr)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("invalid region end %q: %w", region, err)
+	}
+
+	// samtools regions are 1-based inclusive → 0-based half-open
+	return ref, s - 1, e, nil
+}
+
+// iterReaderState wraps an iter.Seq2 of SamRecords into a SamReader,
+// enabling code that expects Next()/Header()/Close() to consume an
+// iterator-based query result.
+type iterReaderState struct {
+	next   func() (*SamRecord, error, bool)
+	stop   func()
+	hdr    *SamHeader
+	done   bool
+}
+
+// IterReader wraps an iter.Seq2[*SamRecord, error] as a SamReader.
+func IterReader(seq iter.Seq2[*SamRecord, error], hdr *SamHeader) SamReader {
+	next, stop := iter.Pull2(seq)
+	return &iterReaderState{next: next, stop: stop, hdr: hdr}
+}
+
+func (r *iterReaderState) Next() (*SamRecord, error) {
+	if r.done {
+		return nil, io.EOF
+	}
+	rec, err, ok := r.next()
+	if !ok {
+		r.done = true
+		return nil, io.EOF
+	}
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (r *iterReaderState) Header() (*SamHeader, error) {
+	return r.hdr, nil
+}
+
+func (r *iterReaderState) Query(ref string, start, end int) (iter.Seq2[*SamRecord, error], error) {
+	return nil, fmt.Errorf("Query not supported on iterator reader")
+}
+
+func (r *iterReaderState) Close() error {
+	r.stop()
+	r.done = true
+	return nil
 }

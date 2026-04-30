@@ -110,14 +110,10 @@ func TestSamRecordFlags(t *testing.T) {
 func TestSamReaderBuilder(t *testing.T) {
 
 	opts := NewSamReaderOpts().
-		Region("chr1:100-200").
 		FlagRequired(0x2).
 		FlagFilter(0x4 | 0x100).
 		MinMapQ(20)
 
-	if opts.region != "chr1:100-200" {
-		t.Errorf("region = %q, want %q", opts.region, "chr1:100-200")
-	}
 	if opts.flagReq != 0x2 {
 		t.Errorf("flagReq = %d, want %d", opts.flagReq, 0x2)
 	}
@@ -188,18 +184,20 @@ func TestSamWriterBuilder(t *testing.T) {
 		t.Fatalf("NewSamWriter: %v", err)
 	}
 
-	if w.filename != "out.bam" {
-		t.Errorf("filename = %q, want %q", w.filename, "out.bam")
+	// CRAM format goes through samtools, so we get a SamtoolsSamWriter.
+	sw, ok := w.(*SamtoolsSamWriter)
+	if !ok {
+		t.Fatalf("expected *SamtoolsSamWriter, got %T", w)
 	}
-	if w.opts.format != FormatCRAM {
-		t.Errorf("format = %d, want %d", w.opts.format, FormatCRAM)
+	if sw.filename != "out.bam" {
+		t.Errorf("filename = %q, want %q", sw.filename, "out.bam")
 	}
-	if w.opts.reference != "ref.fa" {
-		t.Errorf("reference = %q, want %q", w.opts.reference, "ref.fa")
+	if sw.opts.format != FormatCRAM {
+		t.Errorf("format = %d, want %d", sw.opts.format, FormatCRAM)
 	}
-
-	// verify it satisfies the SamWriter interface
-	var _ SamWriter = w
+	if sw.opts.reference != "ref.fa" {
+		t.Errorf("reference = %q, want %q", sw.opts.reference, "ref.fa")
+	}
 }
 
 func TestStdoutSamWriterInterface(t *testing.T) {
@@ -242,4 +240,74 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestParseRegion(t *testing.T) {
+	tests := []struct {
+		input string
+		ref   string
+		start int
+		end   int
+	}{
+		{"chr1", "chr1", 0, -1},
+		{"chr1:1000-2000", "chr1", 999, 2000},
+		{"chr1:1000", "chr1", 999, -1},
+		{"chr2:1,000-2,000", "chr2", 999, 2000},
+	}
+
+	for _, tt := range tests {
+		ref, start, end, err := ParseRegion(tt.input)
+		if err != nil {
+			t.Errorf("ParseRegion(%q): %v", tt.input, err)
+			continue
+		}
+		if ref != tt.ref || start != tt.start || end != tt.end {
+			t.Errorf("ParseRegion(%q) = (%q, %d, %d), want (%q, %d, %d)",
+				tt.input, ref, start, end, tt.ref, tt.start, tt.end)
+		}
+	}
+}
+
+func TestBamReaderQuery(t *testing.T) {
+	reader, err := NewSamReader("testdata/test.bam")
+	if err != nil {
+		t.Fatalf("NewSamReader: %v", err)
+	}
+	defer reader.Close()
+
+	// Query chr1 [400, 600) — should get read2 (pos 500).
+	records, err := reader.Query("chr1", 400, 600)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	var names []string
+	for rec, err := range records {
+		if err != nil {
+			t.Fatalf("iter: %v", err)
+		}
+		names = append(names, rec.ReadName)
+	}
+
+	if len(names) != 1 || names[0] != "read2" {
+		t.Errorf("expected [read2], got %v", names)
+	}
+
+	// Second query on same reader — should work (tests lazy index loading).
+	records, err = reader.Query("chr2", 0, 1000)
+	if err != nil {
+		t.Fatalf("Query chr2: %v", err)
+	}
+
+	names = nil
+	for rec, err := range records {
+		if err != nil {
+			t.Fatalf("iter: %v", err)
+		}
+		names = append(names, rec.ReadName)
+	}
+
+	if len(names) != 1 || names[0] != "read5" {
+		t.Errorf("expected [read5], got %v", names)
+	}
 }
