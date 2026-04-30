@@ -3,7 +3,7 @@ package htsio
 import (
 	"bufio"
 	"fmt"
-	"io"
+	"iter"
 	"os"
 	"strconv"
 	"strings"
@@ -48,19 +48,6 @@ type TabixRecord struct {
 	Ref   string
 	Start int // 0-based
 	End   int // 0-based, exclusive
-}
-
-// TabixIterator yields lines from a tabix query region.
-type TabixIterator struct {
-	ir      *bgzf.IndexedReader
-	meta    *tabixMeta
-	scanner *bufio.Scanner
-	chunks  []Chunk
-	ref     string
-	start   int // query start, 0-based
-	end     int // query end, 0-based exclusive
-	started bool
-	done    bool
 }
 
 // NewTabixReader opens a BGZF-compressed file and its tabix index.
@@ -134,9 +121,9 @@ func (tr *TabixReader) Meta() tabixMeta {
 	return tr.meta
 }
 
-// Query returns an iterator that yields TabixRecords overlapping the
-// 0-based half-open region [start, end) on the given reference.
-func (tr *TabixReader) Query(ref string, start, end int) (*TabixIterator, error) {
+// Query returns an iterator over TabixRecords overlapping the 0-based
+// half-open region [start, end) on the given reference.
+func (tr *TabixReader) Query(ref string, start, end int) (iter.Seq2[*TabixRecord, error], error) {
 	refID := tr.idx.RefID(ref)
 	if refID < 0 {
 		return nil, fmt.Errorf("tabix: unknown reference %q", ref)
@@ -144,93 +131,68 @@ func (tr *TabixReader) Query(ref string, start, end int) (*TabixIterator, error)
 
 	chunks := tr.idx.Query(refID, start, end)
 	if len(chunks) == 0 {
-		return &TabixIterator{done: true}, nil
+		return func(yield func(*TabixRecord, error) bool) {}, nil
 	}
 
-	return &TabixIterator{
-		ir:     tr.ir,
-		meta:   &tr.meta,
-		chunks: chunks,
-		ref:    ref,
-		start:  start,
-		end:    end,
-	}, nil
+	return tr.iterChunks(chunks, ref, start, end), nil
 }
 
-// Next returns the next TabixRecord overlapping the query region.
-// Returns nil, io.EOF when done.
-func (ti *TabixIterator) Next() (*TabixRecord, error) {
-	if ti.done {
-		return nil, io.EOF
+// iterChunks returns an iterator that reads lines from the given chunks,
+// parses coordinates, and yields records overlapping [start, end).
+func (tr *TabixReader) iterChunks(chunks []Chunk, ref string, start, end int) iter.Seq2[*TabixRecord, error] {
+	return func(yield func(*TabixRecord, error) bool) {
+		if err := tr.ir.SeekToVirtualOffset(chunks[0].Begin); err != nil {
+			yield(nil, fmt.Errorf("tabix: seeking to chunk: %w", err))
+			return
+		}
+
+		scanner := bufio.NewScanner(tr.ir)
+		scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			if line == "" {
+				continue
+			}
+			if tr.meta.Meta != 0 && line[0] == byte(tr.meta.Meta) {
+				continue
+			}
+
+			rec, err := parseTabulatedLine(line, &tr.meta)
+			if err != nil {
+				continue
+			}
+
+			if rec.Ref != ref {
+				return // past our reference
+			}
+			if rec.End <= start {
+				continue
+			}
+			if rec.Start >= end {
+				return
+			}
+
+			if !yield(rec, nil) {
+				return
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			yield(nil, err)
+		}
 	}
-
-	// Seek to the first chunk on first call.
-	if !ti.started {
-		ti.started = true
-		if err := ti.ir.SeekToVirtualOffset(ti.chunks[0].Begin); err != nil {
-			ti.done = true
-			return nil, io.EOF
-		}
-		ti.scanner = bufio.NewScanner(ti.ir)
-		ti.scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
-	}
-
-	// Read lines sequentially. The chunks are merged and sorted, so we
-	// scan until we find an overlapping record, hit the end of all chunks,
-	// or pass the query region.
-	for ti.scanner.Scan() {
-		line := ti.scanner.Text()
-
-		// Skip empty lines and comment lines.
-		if line == "" {
-			continue
-		}
-		if ti.meta.Meta != 0 && line[0] == byte(ti.meta.Meta) {
-			continue
-		}
-
-		// Parse the line to extract coordinates.
-		rec, err := ti.parseLine(line)
-		if err != nil {
-			continue // skip unparseable lines
-		}
-
-		// Check reference match.
-		if rec.Ref != ti.ref {
-			// Past our reference — done.
-			ti.done = true
-			return nil, io.EOF
-		}
-
-		// Filter: record must overlap [start, end).
-		if rec.End <= ti.start {
-			continue // before query region
-		}
-		if rec.Start >= ti.end {
-			// Past query region.
-			ti.done = true
-			return nil, io.EOF
-		}
-
-		return rec, nil
-	}
-
-	if err := ti.scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	ti.done = true
-	return nil, io.EOF
 }
 
-// parseLine extracts the reference name and coordinates from a tab-delimited
-// line using the column definitions from the TBI index.
-func (ti *TabixIterator) parseLine(line string) (*TabixRecord, error) {
+// parseTabulatedLine extracts the reference name and coordinates from a
+// tab-delimited line using the column definitions from the tabix metadata.
+func parseTabulatedLine(line string, meta *tabixMeta) (*TabixRecord, error) {
 	fields := strings.Split(line, "\t")
 
-	colSeq := int(ti.meta.ColSeq) - 1 // 1-based → 0-based column index
-	colBeg := int(ti.meta.ColBeg) - 1
-	colEnd := int(ti.meta.ColEnd) - 1
+	colSeq := int(meta.ColSeq) - 1 // 1-based → 0-based column index
+	colBeg := int(meta.ColBeg) - 1
+	colEnd := int(meta.ColEnd) - 1
 
 	if colSeq < 0 || colSeq >= len(fields) {
 		return nil, fmt.Errorf("seq column %d out of range", colSeq)
@@ -248,23 +210,17 @@ func (ti *TabixIterator) parseLine(line string) (*TabixRecord, error) {
 	}
 
 	// Convert to 0-based if the file uses 1-based coordinates.
-	if !ti.meta.ZeroBased {
+	if !meta.ZeroBased {
 		beg--
 	}
 
 	// End coordinate.
 	end := beg + 1 // default: point feature
-	if ti.meta.ColEnd != 0 && colEnd >= 0 && colEnd < len(fields) {
+	if meta.ColEnd != 0 && colEnd >= 0 && colEnd < len(fields) {
 		endStr := fields[colEnd]
 		e, err := strconv.Atoi(endStr)
 		if err == nil {
-			if !ti.meta.ZeroBased {
-				// 1-based inclusive end → 0-based exclusive: no change needed
-				// (1-based [1,10] = 0-based [0,10))
-				end = e
-			} else {
-				end = e
-			}
+			end = e
 		}
 	}
 
