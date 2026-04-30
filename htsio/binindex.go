@@ -103,10 +103,11 @@ func LoadTBI(filename string) (*BinIndex, error) {
 		return nil, fmt.Errorf("tbi: reading skip: %w", err)
 	}
 
-	// Bit 16 of col_beg indicates 0-based coordinates.
-	if idx.ColBeg&0x10000 != 0 {
+	// Bit 16 of the format field indicates 0-based coordinates (TBX_UCSC).
+	// This is set by tabix -p bed or tabix -0.
+	if idx.Format&0x10000 != 0 {
 		idx.ZeroBased = true
-		idx.ColBeg &= 0xFFFF
+		idx.Format &= 0xFFFF
 	}
 
 	// Read concatenated sequence names.
