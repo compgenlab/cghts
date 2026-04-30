@@ -261,6 +261,12 @@ func NewSamReader(filename string, opts ...*SamReaderOpts) (SamReader, error) {
 		return NewBamReader(f, o)
 	}
 
+	// Use native SAM text reader for .sam and .sam.gz files.
+	if strings.HasSuffix(filename, ".sam") || strings.HasSuffix(filename, ".sam.gz") {
+		return NewSamTextReader(filename, o)
+	}
+
+	// CRAM and other formats use samtools.
 	return newSamtoolsReader(filename, opts...)
 }
 
