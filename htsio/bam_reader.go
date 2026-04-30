@@ -4,7 +4,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"iter"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 
@@ -39,12 +41,16 @@ type bamRefInfo struct {
 // BamReader reads BAM files natively using the bgzf package.
 // It implements the SamReader interface.
 type BamReader struct {
-	r    *bgzf.Reader
-	src  io.ReadCloser // underlying file/reader, closed on Close()
-	refs []bamRefInfo  // reference sequences from the BAM header
-	hdr  *SamHeader
-	opts *SamReaderOpts
-	err  error // sticky error
+	r        *bgzf.Reader
+	src      io.ReadCloser // underlying file/reader, closed on Close()
+	filename string        // original filename (for finding .bai)
+	refs     []bamRefInfo  // reference sequences from the BAM header
+	refMap   map[string]int // ref name → index
+	hdr      *SamHeader
+	opts     *SamReaderOpts
+	idx      *BinIndex     // BAI index, loaded lazily on first Query()
+	ir       *bgzf.IndexedReader // created lazily for Query()
+	err      error         // sticky error
 }
 
 // NewBamReader creates a BAM reader from an io.ReadCloser.
@@ -63,9 +69,20 @@ func NewBamReader(rc io.ReadCloser, opts ...*SamReaderOpts) (*BamReader, error) 
 		opts: o,
 	}
 
+	// Capture filename if the underlying reader is a file.
+	if f, ok := rc.(*os.File); ok {
+		br.filename = f.Name()
+	}
+
 	if err := br.readHeader(); err != nil {
 		rc.Close()
 		return nil, fmt.Errorf("bam: reading header: %w", err)
+	}
+
+	// Build ref name → index map.
+	br.refMap = make(map[string]int, len(br.refs))
+	for i, r := range br.refs {
+		br.refMap[r.name] = i
 	}
 
 	return br, nil
@@ -82,6 +99,126 @@ func (b *BamReader) Close() error {
 		return b.src.Close()
 	}
 	return nil
+}
+
+// Query returns an iterator over records overlapping the 0-based half-open
+// region [start, end) on the given reference. Requires a .bai index file
+// at filename.bai.
+func (b *BamReader) Query(ref string, start, end int) (iter.Seq2[*SamRecord, error], error) {
+	if b.filename == "" {
+		return nil, fmt.Errorf("bam: Query requires a file-backed reader")
+	}
+
+	refID, ok := b.refMap[ref]
+	if !ok {
+		return nil, fmt.Errorf("bam: unknown reference %q", ref)
+	}
+
+	// Lazily load the BAI index.
+	if b.idx == nil {
+		baiPath := b.filename + ".bai"
+		idx, err := LoadBAI(baiPath)
+		if err != nil {
+			return nil, fmt.Errorf("bam: loading BAI index: %w", err)
+		}
+		b.idx = idx
+	}
+
+	// Lazily create the indexed reader (shares the underlying file).
+	if b.ir == nil {
+		f, err := os.Open(b.filename)
+		if err != nil {
+			return nil, err
+		}
+		b.ir = bgzf.NewIndexedReader(f)
+	}
+
+	chunks := b.idx.Query(refID, start, end)
+	if len(chunks) == 0 {
+		return func(yield func(*SamRecord, error) bool) {}, nil
+	}
+
+	return b.iterChunks(chunks, refID, start, end), nil
+}
+
+// iterChunks returns an iterator that reads BAM records from the given
+// chunks, filtering to those overlapping [start, end) on refID.
+func (b *BamReader) iterChunks(chunks []Chunk, refID, start, end int) iter.Seq2[*SamRecord, error] {
+	return func(yield func(*SamRecord, error) bool) {
+		for ci, chunk := range chunks {
+			if err := b.ir.SeekToVirtualOffset(chunk.Begin); err != nil {
+				yield(nil, fmt.Errorf("bam: seeking to chunk: %w", err))
+				return
+			}
+
+			for {
+				// Check if we've passed the chunk end.
+				if ci < len(chunks) && b.ir.VirtualTell() >= chunk.End {
+					break
+				}
+
+				rec, err := readBamRecord(b.ir, b.refs)
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					if !yield(nil, err) {
+						return
+					}
+					return
+				}
+
+				// Check reference.
+				recRefID := -1
+				if rec.RefName != "*" {
+					if id, ok := b.refMap[rec.RefName]; ok {
+						recRefID = id
+					}
+				}
+				if recRefID != refID {
+					return // past our reference
+				}
+
+				// Record position (0-based).
+				recStart := rec.Pos - 1
+				recEnd := recStart + CigarRefLen(rec.Cigar)
+
+				if recEnd <= start {
+					continue // before query region
+				}
+				if recStart >= end {
+					return // past query region
+				}
+
+				// Apply filters.
+				if b.opts != nil {
+					if b.opts.flagReq != 0 && rec.Flag&b.opts.flagReq != b.opts.flagReq {
+						continue
+					}
+					if b.opts.flagFilter != 0 && rec.Flag&b.opts.flagFilter != 0 {
+						continue
+					}
+					if b.opts.minMapQ != 0 && rec.MapQ < b.opts.minMapQ {
+						continue
+					}
+					skip := false
+					for _, f := range b.opts.tagFilters {
+						if !f.matchesRecord(rec) {
+							skip = true
+							break
+						}
+					}
+					if skip {
+						continue
+					}
+				}
+
+				if !yield(rec, nil) {
+					return
+				}
+			}
+		}
+	}
 }
 
 // readHeader reads the BAM magic, header text, and reference sequence dictionary.

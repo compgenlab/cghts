@@ -1,33 +1,27 @@
 package htsio
 
 import (
-	"io"
 	"testing"
 )
 
 const testBAMPath = "testdata/test.bam"
 
-func TestIndexedSamReaderQuery(t *testing.T) {
-	isr, err := NewIndexedSamReader(testBAMPath)
+func TestBamQuerySingleResult(t *testing.T) {
+	reader, err := NewSamReader(testBAMPath)
 	if err != nil {
-		t.Fatalf("NewIndexedSamReader: %v", err)
+		t.Fatalf("NewSamReader: %v", err)
 	}
-	defer isr.Close()
+	defer reader.Close()
 
-	// Query [400, 600) — should match read2 (pos 500, 50M → [499, 549) 0-based).
-	iter, err := isr.Query("chr1", 400, 600)
+	records, err := reader.Query("chr1", 400, 600)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 
 	var names []string
-	for {
-		rec, err := iter.Next()
-		if err == io.EOF {
-			break
-		}
+	for rec, err := range records {
 		if err != nil {
-			t.Fatalf("Next: %v", err)
+			t.Fatalf("iter: %v", err)
 		}
 		names = append(names, rec.ReadName)
 	}
@@ -37,27 +31,22 @@ func TestIndexedSamReaderQuery(t *testing.T) {
 	}
 }
 
-func TestIndexedSamReaderQueryMultiple(t *testing.T) {
-	isr, err := NewIndexedSamReader(testBAMPath)
+func TestBamQueryMultipleResults(t *testing.T) {
+	reader, err := NewSamReader(testBAMPath)
 	if err != nil {
-		t.Fatalf("NewIndexedSamReader: %v", err)
+		t.Fatalf("NewSamReader: %v", err)
 	}
-	defer isr.Close()
+	defer reader.Close()
 
-	// Query [0, 300) — should match read1 (pos 100).
-	iter, err := isr.Query("chr1", 0, 300)
+	records, err := reader.Query("chr1", 0, 300)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 
 	var names []string
-	for {
-		rec, err := iter.Next()
-		if err == io.EOF {
-			break
-		}
+	for rec, err := range records {
 		if err != nil {
-			t.Fatalf("Next: %v", err)
+			t.Fatalf("iter: %v", err)
 		}
 		names = append(names, rec.ReadName)
 	}
@@ -67,93 +56,100 @@ func TestIndexedSamReaderQueryMultiple(t *testing.T) {
 	}
 }
 
-func TestIndexedSamReaderQueryNoResults(t *testing.T) {
-	isr, err := NewIndexedSamReader(testBAMPath)
+func TestBamQueryNoResults(t *testing.T) {
+	reader, err := NewSamReader(testBAMPath)
 	if err != nil {
-		t.Fatalf("NewIndexedSamReader: %v", err)
+		t.Fatalf("NewSamReader: %v", err)
 	}
-	defer isr.Close()
+	defer reader.Close()
 
-	// Query a region between reads.
-	iter, err := isr.Query("chr1", 2000, 3000)
+	records, err := reader.Query("chr1", 2000, 3000)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 
-	rec, err := iter.Next()
-	if err != io.EOF {
-		t.Errorf("expected io.EOF, got rec=%v err=%v", rec, err)
+	count := 0
+	for _, err := range records {
+		if err != nil {
+			t.Fatalf("iter: %v", err)
+		}
+		count++
+	}
+	if count != 0 {
+		t.Errorf("expected 0 records, got %d", count)
 	}
 }
 
-func TestIndexedSamReaderUnknownRef(t *testing.T) {
-	isr, err := NewIndexedSamReader(testBAMPath)
+func TestBamQueryUnknownRef(t *testing.T) {
+	reader, err := NewSamReader(testBAMPath)
 	if err != nil {
-		t.Fatalf("NewIndexedSamReader: %v", err)
+		t.Fatalf("NewSamReader: %v", err)
 	}
-	defer isr.Close()
+	defer reader.Close()
 
-	_, err = isr.Query("chrX", 0, 100)
+	_, err = reader.Query("chrX", 0, 100)
 	if err == nil {
 		t.Error("expected error for unknown reference")
 	}
 }
 
-func TestIndexedSamReaderMultipleQueries(t *testing.T) {
-	isr, err := NewIndexedSamReader(testBAMPath)
+func TestBamQueryMultipleQueries(t *testing.T) {
+	reader, err := NewSamReader(testBAMPath)
 	if err != nil {
-		t.Fatalf("NewIndexedSamReader: %v", err)
+		t.Fatalf("NewSamReader: %v", err)
 	}
-	defer isr.Close()
+	defer reader.Close()
 
 	// First query: get read1.
-	iter, err := isr.Query("chr1", 0, 200)
+	records, err := reader.Query("chr1", 0, 200)
 	if err != nil {
 		t.Fatalf("Query 1: %v", err)
 	}
-	rec, err := iter.Next()
-	if err != nil {
-		t.Fatalf("Next 1: %v", err)
+	var name string
+	for rec, err := range records {
+		if err != nil {
+			t.Fatalf("iter 1: %v", err)
+		}
+		name = rec.ReadName
+		break
 	}
-	if rec.ReadName != "read1" {
-		t.Errorf("query 1: got %q, want read1", rec.ReadName)
+	if name != "read1" {
+		t.Errorf("query 1: got %q, want read1", name)
 	}
 
 	// Second query: get read4 (tests re-seeking with cache).
-	iter, err = isr.Query("chr1", 4900, 5100)
+	records, err = reader.Query("chr1", 4900, 5100)
 	if err != nil {
 		t.Fatalf("Query 2: %v", err)
 	}
-	rec, err = iter.Next()
-	if err != nil {
-		t.Fatalf("Next 2: %v", err)
+	for rec, err := range records {
+		if err != nil {
+			t.Fatalf("iter 2: %v", err)
+		}
+		name = rec.ReadName
+		break
 	}
-	if rec.ReadName != "read4" {
-		t.Errorf("query 2: got %q, want read4", rec.ReadName)
+	if name != "read4" {
+		t.Errorf("query 2: got %q, want read4", name)
 	}
 }
 
-func TestIndexedSamReaderQueryChr2(t *testing.T) {
-	isr, err := NewIndexedSamReader(testBAMPath)
+func TestBamQueryChr2(t *testing.T) {
+	reader, err := NewSamReader(testBAMPath)
 	if err != nil {
-		t.Fatalf("NewIndexedSamReader: %v", err)
+		t.Fatalf("NewSamReader: %v", err)
 	}
-	defer isr.Close()
+	defer reader.Close()
 
-	// Query chr2 — should get read5.
-	iter, err := isr.Query("chr2", 0, 1000)
+	records, err := reader.Query("chr2", 0, 1000)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 
 	var names []string
-	for {
-		rec, err := iter.Next()
-		if err == io.EOF {
-			break
-		}
+	for rec, err := range records {
 		if err != nil {
-			t.Fatalf("Next: %v", err)
+			t.Fatalf("iter: %v", err)
 		}
 		names = append(names, rec.ReadName)
 	}
@@ -163,14 +159,14 @@ func TestIndexedSamReaderQueryChr2(t *testing.T) {
 	}
 }
 
-func TestIndexedSamReaderHeader(t *testing.T) {
-	isr, err := NewIndexedSamReader(testBAMPath)
+func TestBamQueryHeader(t *testing.T) {
+	reader, err := NewSamReader(testBAMPath)
 	if err != nil {
-		t.Fatalf("NewIndexedSamReader: %v", err)
+		t.Fatalf("NewSamReader: %v", err)
 	}
-	defer isr.Close()
+	defer reader.Close()
 
-	hdr, err := isr.Header()
+	hdr, err := reader.Header()
 	if err != nil {
 		t.Fatalf("Header: %v", err)
 	}
