@@ -61,12 +61,14 @@ type SamtoolsSamWriter struct {
 	stderrWg  sync.WaitGroup
 }
 
-// NewSamWriter creates a SamWriter for the given output file. When the format
-// is BAM and no sorting is requested, a native BamWriter is used (no samtools
-// dependency). Otherwise, a SamtoolsSamWriter is used.
+// NewSamWriter creates a SamWriter for the given output file. For BAM format,
+// a native writer is used (no samtools dependency). For CRAM or SAM format,
+// samtools is required.
 func NewSamWriter(filename string, opts *samWriterOptions) (SamWriter, error) {
-	// Use native BAM writer when: format is BAM, no sorting requested.
-	if opts.format == FormatBAM && !opts.sortedCoord && !opts.sortedName {
+	if opts.format == FormatBAM {
+		if opts.sortedCoord || opts.sortedName {
+			return newSortedBamWriter(filename, opts.header, opts.sortedCoord, opts.sortTmpPrefix)
+		}
 		return newBamWriter(filename, opts.header)
 	}
 
