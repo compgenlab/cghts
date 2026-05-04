@@ -144,7 +144,15 @@ type TagFilter struct {
 func (f *TagFilter) matchesRecord(rec *SamRecord) bool {
 	t, ok := rec.Tags[f.Tag]
 	if !ok {
-		return false
+		// Missing tag: treat as empty string for equality checks.
+		switch f.Op {
+		case TagEq:
+			return f.Val == ""
+		case TagNotEq:
+			return f.Val != ""
+		default:
+			return false
+		}
 	}
 
 	switch f.Op {
