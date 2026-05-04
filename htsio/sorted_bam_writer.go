@@ -3,7 +3,7 @@ package htsio
 import (
 	"container/heap"
 	"fmt"
-	"io"
+	"iter"
 	"os"
 	"sort"
 	"sync"
@@ -258,15 +258,32 @@ func (sw *sortedBamWriter) mergeFiles() error {
 		return err
 	}
 
+	// Convert each reader's Records() iterator into a pull function
+	// so we can pull one record at a time during the k-way merge.
+	type pullReader struct {
+		next func() (*SamRecord, error, bool)
+		stop func()
+	}
+	pullers := make([]pullReader, len(readers))
+	for i, r := range readers {
+		next, stop := iter.Pull2(r.Records())
+		pullers[i] = pullReader{next: next, stop: stop}
+	}
+	defer func() {
+		for _, p := range pullers {
+			p.stop()
+		}
+	}()
+
 	// Initialize the merge heap.
 	h := &mergeHeap{less: sw.lessCoord}
 	if !sw.sortCoord {
 		h.less = sw.lessName
 	}
 
-	for i, r := range readers {
-		rec, err := r.Next()
-		if err == io.EOF {
+	for i := range pullers {
+		rec, err, ok := pullers[i].next()
+		if !ok {
 			continue
 		}
 		if err != nil {
@@ -284,8 +301,8 @@ func (sw *sortedBamWriter) mergeFiles() error {
 		}
 
 		// Refill from the same reader.
-		rec, err := readers[entry.readerIdx].Next()
-		if err == io.EOF {
+		rec, err, ok := pullers[entry.readerIdx].next()
+		if !ok {
 			continue
 		}
 		if err != nil {

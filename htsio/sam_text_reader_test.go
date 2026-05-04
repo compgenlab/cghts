@@ -1,7 +1,6 @@
 package htsio
 
 import (
-	"io"
 	"testing"
 )
 
@@ -25,13 +24,9 @@ func TestSamTextReaderBasic(t *testing.T) {
 	}
 
 	var names []string
-	for {
-		rec, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
+	for rec, err := range reader.Records() {
 		if err != nil {
-			t.Fatalf("Next: %v", err)
+			t.Fatalf("Records: %v", err)
 		}
 		names = append(names, rec.ReadName)
 	}
@@ -55,13 +50,9 @@ func TestSamTextReaderViaNewSamReader(t *testing.T) {
 	defer reader.Close()
 
 	count := 0
-	for {
-		_, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
+	for _, err := range reader.Records() {
 		if err != nil {
-			t.Fatalf("Next: %v", err)
+			t.Fatalf("Records: %v", err)
 		}
 		count++
 	}
@@ -80,13 +71,9 @@ func TestSamTextReaderFlagFilter(t *testing.T) {
 	defer reader.Close()
 
 	count := 0
-	for {
-		_, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
+	for _, err := range reader.Records() {
 		if err != nil {
-			t.Fatalf("Next: %v", err)
+			t.Fatalf("Records: %v", err)
 		}
 		count++
 	}

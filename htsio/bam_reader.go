@@ -286,20 +286,27 @@ func (b *BamReader) readHeader() error {
 	return nil
 }
 
-// Next returns the next SamRecord. Returns nil, io.EOF when done.
-func (b *BamReader) Next() (*SamRecord, error) {
-	if b.err != nil {
-		return nil, b.err
-	}
-
-	for {
-		rec, err := b.readRecord()
-		if err != nil {
-			b.err = err
-			return nil, err
+// Records returns an iterator over all records in the BAM file.
+func (b *BamReader) Records() iter.Seq2[*SamRecord, error] {
+	return func(yield func(*SamRecord, error) bool) {
+		if b.err != nil {
+			yield(nil, b.err)
+			return
 		}
-		if b.passesFilters(rec) {
-			return rec, nil
+		for {
+			rec, err := b.readRecord()
+			if err != nil {
+				if err != io.EOF {
+					yield(nil, err)
+				}
+				b.err = err
+				return
+			}
+			if b.passesFilters(rec) {
+				if !yield(rec, nil) {
+					return
+				}
+			}
 		}
 	}
 }
