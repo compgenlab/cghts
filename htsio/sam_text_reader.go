@@ -80,48 +80,58 @@ func (r *SamTextReader) Header() (*SamHeader, error) {
 }
 
 // Next returns the next SamRecord. Returns nil, io.EOF when done.
-func (r *SamTextReader) Next() (*SamRecord, error) {
-	if r.err != nil {
-		return nil, r.err
-	}
-
-	// Return the buffered first data line.
-	if r.nextLine != "" {
-		rec, err := parseSamLine(r.nextLine)
-		r.nextLine = ""
-		if err != nil {
-			return nil, fmt.Errorf("parse SAM: %w", err)
+// Records returns an iterator over all records in the SAM file.
+func (r *SamTextReader) Records() iter.Seq2[*SamRecord, error] {
+	return func(yield func(*SamRecord, error) bool) {
+		if r.err != nil {
+			yield(nil, r.err)
+			return
 		}
-		if r.passesFilters(rec) {
-			return rec, nil
-		}
-	}
 
-	for r.scanner.Scan() {
-		line := r.scanner.Text()
-		if strings.HasPrefix(line, "@") {
-			if r.header == nil {
-				r.header = NewSamHeader()
+		// Return the buffered first data line.
+		if r.nextLine != "" {
+			rec, err := parseSamLine(r.nextLine)
+			r.nextLine = ""
+			if err != nil {
+				yield(nil, fmt.Errorf("parse SAM: %w", err))
+				return
 			}
-			r.header.AddLine(line)
-			continue
+			if r.passesFilters(rec) {
+				if !yield(rec, nil) {
+					return
+				}
+			}
 		}
-		rec, err := parseSamLine(line)
-		if err != nil {
-			return nil, fmt.Errorf("parse SAM: %w", err)
-		}
-		if r.passesFilters(rec) {
-			return rec, nil
-		}
-	}
 
-	if err := r.scanner.Err(); err != nil {
-		r.err = err
-		return nil, err
-	}
+		for r.scanner.Scan() {
+			line := r.scanner.Text()
+			if strings.HasPrefix(line, "@") {
+				if r.header == nil {
+					r.header = NewSamHeader()
+				}
+				r.header.AddLine(line)
+				continue
+			}
+			rec, err := parseSamLine(line)
+			if err != nil {
+				yield(nil, fmt.Errorf("parse SAM: %w", err))
+				return
+			}
+			if r.passesFilters(rec) {
+				if !yield(rec, nil) {
+					return
+				}
+			}
+		}
 
-	r.err = io.EOF
-	return nil, io.EOF
+		if err := r.scanner.Err(); err != nil {
+			r.err = err
+			yield(nil, err)
+			return
+		}
+
+		r.err = io.EOF
+	}
 }
 
 func (r *SamTextReader) passesFilters(rec *SamRecord) bool {

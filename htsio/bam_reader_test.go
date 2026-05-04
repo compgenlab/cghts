@@ -192,11 +192,19 @@ func TestBamReaderBasic(t *testing.T) {
 		t.Fatal("expected non-nil header")
 	}
 
-	samRec, err := reader.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
+	var recs []*SamRecord
+	for rec, err := range reader.Records() {
+		if err != nil {
+			t.Fatalf("Records: %v", err)
+		}
+		recs = append(recs, rec)
 	}
 
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+
+	samRec := recs[0]
 	if samRec.ReadName != "read1" {
 		t.Errorf("ReadName: got %q, want %q", samRec.ReadName, "read1")
 	}
@@ -224,12 +232,6 @@ func TestBamReaderBasic(t *testing.T) {
 	if samRec.Qual != expectedQual {
 		t.Errorf("Qual: got %q, want %q", samRec.Qual, expectedQual)
 	}
-
-	// Should be EOF
-	_, err = reader.Next()
-	if err != io.EOF {
-		t.Errorf("expected io.EOF, got %v", err)
-	}
 }
 
 func TestBamReaderMultipleRecords(t *testing.T) {
@@ -254,31 +256,29 @@ func TestBamReaderMultipleRecords(t *testing.T) {
 	}
 	defer reader.Close()
 
-	// First record
-	r1, err := reader.Next()
-	if err != nil {
-		t.Fatalf("Next[0]: %v", err)
+	var recs []*SamRecord
+	for rec, err := range reader.Records() {
+		if err != nil {
+			t.Fatalf("Records: %v", err)
+		}
+		recs = append(recs, rec)
 	}
+
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(recs))
+	}
+
+	r1 := recs[0]
 	if r1.ReadName != "readA" || r1.RefName != "chr1" || r1.Pos != 1 {
 		t.Errorf("rec1: name=%q ref=%q pos=%d", r1.ReadName, r1.RefName, r1.Pos)
 	}
 
-	// Second record
-	r2, err := reader.Next()
-	if err != nil {
-		t.Fatalf("Next[1]: %v", err)
-	}
+	r2 := recs[1]
 	if r2.ReadName != "readB" || r2.RefName != "chr2" || r2.Pos != 1000 {
 		t.Errorf("rec2: name=%q ref=%q pos=%d", r2.ReadName, r2.RefName, r2.Pos)
 	}
 	if !r2.IsReverse() {
 		t.Error("rec2 should be reverse strand")
-	}
-
-	// EOF
-	_, err = reader.Next()
-	if err != io.EOF {
-		t.Errorf("expected io.EOF, got %v", err)
 	}
 }
 
@@ -310,11 +310,19 @@ func TestBamReaderAuxTags(t *testing.T) {
 	}
 	defer reader.Close()
 
-	r, err := reader.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
+	var recs []*SamRecord
+	for rec, err := range reader.Records() {
+		if err != nil {
+			t.Fatalf("Records: %v", err)
+		}
+		recs = append(recs, rec)
 	}
 
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+
+	r := recs[0]
 	rg, ok := r.Tags["RG"]
 	if !ok {
 		t.Fatal("missing RG tag")
@@ -360,11 +368,19 @@ func TestBamReaderComplexCigar(t *testing.T) {
 	}
 	defer reader.Close()
 
-	r, err := reader.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
+	var recs []*SamRecord
+	for rec, err := range reader.Records() {
+		if err != nil {
+			t.Fatalf("Records: %v", err)
+		}
+		recs = append(recs, rec)
 	}
 
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+
+	r := recs[0]
 	if r.Cigar != "5S10M2I3M1D4M3S" {
 		t.Errorf("Cigar: got %q, want %q", r.Cigar, "5S10M2I3M1D4M3S")
 	}
@@ -393,13 +409,9 @@ func TestBamReaderFlagFilter(t *testing.T) {
 	defer reader.Close()
 
 	var names []string
-	for {
-		r, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
+	for r, err := range reader.Records() {
 		if err != nil {
-			t.Fatalf("Next: %v", err)
+			t.Fatalf("Records: %v", err)
 		}
 		names = append(names, r.ReadName)
 	}
@@ -427,10 +439,19 @@ func TestBamReaderUnmapped(t *testing.T) {
 	}
 	defer reader.Close()
 
-	r, err := reader.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
+	var recs []*SamRecord
+	for rec, err := range reader.Records() {
+		if err != nil {
+			t.Fatalf("Records: %v", err)
+		}
+		recs = append(recs, rec)
 	}
+
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+
+	r := recs[0]
 	if r.RefName != "*" {
 		t.Errorf("RefName: got %q, want *", r.RefName)
 	}

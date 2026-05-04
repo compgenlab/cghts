@@ -1,7 +1,6 @@
 package htsio
 
 import (
-	"io"
 	"os"
 	"testing"
 )
@@ -99,11 +98,20 @@ func TestBamWriterRoundTrip(t *testing.T) {
 		t.Errorf("refs: %v", refs)
 	}
 
-	// Read record 1
-	r, err := reader.Next()
-	if err != nil {
-		t.Fatalf("Next[0]: %v", err)
+	var recs []*SamRecord
+	for rec, err := range reader.Records() {
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs = append(recs, rec)
 	}
+
+	if len(recs) != 3 {
+		t.Fatalf("expected 3 records, got %d", len(recs))
+	}
+
+	// Check record 1
+	r := recs[0]
 	if r.ReadName != "read1" {
 		t.Errorf("ReadName: got %q, want %q", r.ReadName, "read1")
 	}
@@ -131,11 +139,8 @@ func TestBamWriterRoundTrip(t *testing.T) {
 		t.Errorf("NM tag: %v", r.Tags["NM"])
 	}
 
-	// Read record 2
-	r, err = reader.Next()
-	if err != nil {
-		t.Fatalf("Next[1]: %v", err)
-	}
+	// Check record 2
+	r = recs[1]
 	if r.ReadName != "read2" {
 		t.Errorf("ReadName: got %q, want %q", r.ReadName, "read2")
 	}
@@ -146,11 +151,8 @@ func TestBamWriterRoundTrip(t *testing.T) {
 		t.Error("expected reverse strand")
 	}
 
-	// Read record 3 (unmapped)
-	r, err = reader.Next()
-	if err != nil {
-		t.Fatalf("Next[2]: %v", err)
-	}
+	// Check record 3 (unmapped)
+	r = recs[2]
 	if r.ReadName != "unmapped" {
 		t.Errorf("ReadName: got %q, want %q", r.ReadName, "unmapped")
 	}
@@ -159,12 +161,6 @@ func TestBamWriterRoundTrip(t *testing.T) {
 	}
 	if !r.IsUnmapped() {
 		t.Error("expected unmapped flag")
-	}
-
-	// EOF
-	_, err = reader.Next()
-	if err != io.EOF {
-		t.Errorf("expected io.EOF, got %v", err)
 	}
 }
 
@@ -212,10 +208,19 @@ func TestBamWriterMateOnSameRef(t *testing.T) {
 	}
 	defer reader.Close()
 
-	r, err := reader.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
+	var recs []*SamRecord
+	for rec, err := range reader.Records() {
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs = append(recs, rec)
 	}
+
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+
+	r := recs[0]
 	if r.RefNext != "=" {
 		t.Errorf("RefNext: got %q, want =", r.RefNext)
 	}

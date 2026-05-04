@@ -104,9 +104,9 @@ func (r *SamRecord) String() string {
 
 // SamReader is the interface for reading SAM/BAM/CRAM records.
 type SamReader interface {
-	// Next returns the next SamRecord. Returns nil, io.EOF when done.
-	Next() (*SamRecord, error)
-	// Header returns the parsed SAM header. May return nil before the first Next() call.
+	// Records returns an iterator over all records in the reader.
+	Records() iter.Seq2[*SamRecord, error]
+	// Header returns the parsed SAM header. May return nil before the first Records() call.
 	Header() (*SamHeader, error)
 	// Query returns an iterator over records overlapping the 0-based
 	// half-open region [start, end) on the given reference. Returns an
@@ -396,46 +396,54 @@ func (r *SamtoolsSamReader) populateHeader() {
 	}
 }
 
-// Next returns the next SamRecord. Returns nil, io.EOF when done.
-func (r *SamtoolsSamReader) Next() (*SamRecord, error) {
-	if err := r.start(); err != nil {
-		return nil, err
-	}
-
-	if r.nextLine != "" {
-		rec, err := parseSamLine(r.nextLine)
-		r.nextLine = ""
-		if err != nil {
-			return nil, fmt.Errorf("parse SAM: %w", err)
+// Records returns an iterator over all records from the samtools process.
+func (r *SamtoolsSamReader) Records() iter.Seq2[*SamRecord, error] {
+	return func(yield func(*SamRecord, error) bool) {
+		if err := r.start(); err != nil {
+			yield(nil, err)
+			return
 		}
-		if r.passesTagFilters(rec) {
-			return rec, nil
-		}
-	}
 
-	for r.scanner.Scan() {
-		line := r.scanner.Text()
-		if strings.HasPrefix(line, "@") {
-			if r.header == nil {
-				r.header = NewSamHeader()
+		if r.nextLine != "" {
+			rec, err := parseSamLine(r.nextLine)
+			r.nextLine = ""
+			if err != nil {
+				yield(nil, fmt.Errorf("parse SAM: %w", err))
+				return
 			}
-			r.header.AddLine(line)
-			continue
+			if r.passesTagFilters(rec) {
+				if !yield(rec, nil) {
+					return
+				}
+			}
 		}
-		rec, err := parseSamLine(line)
-		if err != nil {
-			return nil, fmt.Errorf("parse SAM: %w", err)
+
+		for r.scanner.Scan() {
+			line := r.scanner.Text()
+			if strings.HasPrefix(line, "@") {
+				if r.header == nil {
+					r.header = NewSamHeader()
+				}
+				r.header.AddLine(line)
+				continue
+			}
+			rec, err := parseSamLine(line)
+			if err != nil {
+				yield(nil, fmt.Errorf("parse SAM: %w", err))
+				return
+			}
+			if r.passesTagFilters(rec) {
+				if !yield(rec, nil) {
+					return
+				}
+			}
 		}
-		if r.passesTagFilters(rec) {
-			return rec, nil
+
+		if err := r.scanner.Err(); err != nil {
+			yield(nil, fmt.Errorf("samtools read: %w", err))
+			return
 		}
 	}
-
-	if err := r.scanner.Err(); err != nil {
-		return nil, fmt.Errorf("samtools read: %w", err)
-	}
-
-	return nil, io.EOF
 }
 
 // passesTagFilters returns true if the record passes all tag filters.
@@ -520,11 +528,7 @@ func (r *SamtoolsSamReader) Query(ref string, start, end int) (iter.Seq2[*SamRec
 
 	return func(yield func(*SamRecord, error) bool) {
 		defer sr.Close()
-		for {
-			rec, err := sr.Next()
-			if err == io.EOF {
-				return
-			}
+		for rec, err := range sr.Records() {
 			if !yield(rec, err) {
 				return
 			}
@@ -666,34 +670,20 @@ func ParseRegion(region string) (ref string, start, end int, err error) {
 }
 
 // iterReaderState wraps an iter.Seq2 of SamRecords into a SamReader,
-// enabling code that expects Next()/Header()/Close() to consume an
+// enabling code that expects Records()/Header()/Close() to consume an
 // iterator-based query result.
 type iterReaderState struct {
-	next   func() (*SamRecord, error, bool)
-	stop   func()
-	hdr    *SamHeader
-	done   bool
+	seq  iter.Seq2[*SamRecord, error]
+	hdr  *SamHeader
 }
 
 // IterReader wraps an iter.Seq2[*SamRecord, error] as a SamReader.
 func IterReader(seq iter.Seq2[*SamRecord, error], hdr *SamHeader) SamReader {
-	next, stop := iter.Pull2(seq)
-	return &iterReaderState{next: next, stop: stop, hdr: hdr}
+	return &iterReaderState{seq: seq, hdr: hdr}
 }
 
-func (r *iterReaderState) Next() (*SamRecord, error) {
-	if r.done {
-		return nil, io.EOF
-	}
-	rec, err, ok := r.next()
-	if !ok {
-		r.done = true
-		return nil, io.EOF
-	}
-	if err != nil {
-		return nil, err
-	}
-	return rec, nil
+func (r *iterReaderState) Records() iter.Seq2[*SamRecord, error] {
+	return r.seq
 }
 
 func (r *iterReaderState) Header() (*SamHeader, error) {
@@ -705,7 +695,5 @@ func (r *iterReaderState) Query(ref string, start, end int) (iter.Seq2[*SamRecor
 }
 
 func (r *iterReaderState) Close() error {
-	r.stop()
-	r.done = true
 	return nil
 }

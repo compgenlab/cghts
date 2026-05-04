@@ -1,7 +1,6 @@
 package htsio
 
 import (
-	"io"
 	"os"
 	"testing"
 )
@@ -50,13 +49,9 @@ func TestSortedBamWriterCoordSort(t *testing.T) {
 	defer reader.Close()
 
 	var names []string
-	for {
-		rec, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
+	for rec, err := range reader.Records() {
 		if err != nil {
-			t.Fatalf("Next: %v", err)
+			t.Fatalf("Records: %v", err)
 		}
 		names = append(names, rec.ReadName)
 	}
@@ -112,13 +107,9 @@ func TestSortedBamWriterNameSort(t *testing.T) {
 	defer reader.Close()
 
 	var names []string
-	for {
-		rec, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
+	for rec, err := range reader.Records() {
 		if err != nil {
-			t.Fatalf("Next: %v", err)
+			t.Fatalf("Records: %v", err)
 		}
 		names = append(names, rec.ReadName)
 	}
@@ -185,13 +176,9 @@ func TestSortedBamWriterMerge(t *testing.T) {
 	defer reader.Close()
 
 	var names []string
-	for {
-		rec, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
+	for rec, err := range reader.Records() {
 		if err != nil {
-			t.Fatalf("Next: %v", err)
+			t.Fatalf("Records: %v", err)
 		}
 		names = append(names, rec.ReadName)
 	}
@@ -235,8 +222,14 @@ func TestSortedBamWriterEmpty(t *testing.T) {
 	}
 	defer reader.Close()
 
-	_, err = reader.Next()
-	if err != io.EOF {
-		t.Errorf("expected io.EOF, got %v", err)
+	count := 0
+	for _, err := range reader.Records() {
+		if err != nil {
+			t.Fatalf("Records: %v", err)
+		}
+		count++
+	}
+	if count != 0 {
+		t.Errorf("expected 0 records, got %d", count)
 	}
 }
