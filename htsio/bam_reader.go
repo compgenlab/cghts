@@ -405,7 +405,7 @@ func readBamRecord(r io.Reader, refs []bamRefInfo) (*SamRecord, error) {
 	offset += int(seqLen)
 
 	// Auxiliary tags.
-	tags := decodeTags(buf[offset:])
+	tags, tagOrder := decodeTags(buf[offset:])
 
 	// Resolve reference names.
 	refName := "*"
@@ -434,6 +434,7 @@ func readBamRecord(r io.Reader, refs []bamRefInfo) (*SamRecord, error) {
 		Seq:       seq,
 		Qual:      qual,
 		Tags:      tags,
+		TagOrder:  tagOrder,
 	}
 
 	return rec, nil
@@ -495,9 +496,11 @@ func decodeQual(data []byte) string {
 	return string(buf)
 }
 
-// decodeTags parses the auxiliary data section of a BAM record into a tag map.
-func decodeTags(data []byte) map[string]SamTag {
+// decodeTags parses the auxiliary data section of a BAM record into a tag map
+// and an ordered list of tag keys.
+func decodeTags(data []byte) (map[string]SamTag, []string) {
 	tags := make(map[string]SamTag)
+	var order []string
 	pos := 0
 	for pos+3 <= len(data) {
 		tag := string(data[pos : pos+2])
@@ -508,51 +511,51 @@ func decodeTags(data []byte) map[string]SamTag {
 		switch valType {
 		case 'A': // printable character
 			if pos >= len(data) {
-				return tags
+				return tags, order
 			}
 			samTag = SamTag{Type: 'A', Value: string(data[pos : pos+1])}
 			pos++
 
 		case 'c': // int8
 			if pos >= len(data) {
-				return tags
+				return tags, order
 			}
 			samTag = SamTag{Type: 'i', Value: strconv.Itoa(int(int8(data[pos])))}
 			pos++
 		case 'C': // uint8
 			if pos >= len(data) {
-				return tags
+				return tags, order
 			}
 			samTag = SamTag{Type: 'i', Value: strconv.Itoa(int(data[pos]))}
 			pos++
 		case 's': // int16
 			if pos+2 > len(data) {
-				return tags
+				return tags, order
 			}
 			samTag = SamTag{Type: 'i', Value: strconv.Itoa(int(int16(binary.LittleEndian.Uint16(data[pos:]))))}
 			pos += 2
 		case 'S': // uint16
 			if pos+2 > len(data) {
-				return tags
+				return tags, order
 			}
 			samTag = SamTag{Type: 'i', Value: strconv.Itoa(int(binary.LittleEndian.Uint16(data[pos:])))}
 			pos += 2
 		case 'i': // int32
 			if pos+4 > len(data) {
-				return tags
+				return tags, order
 			}
 			samTag = SamTag{Type: 'i', Value: strconv.Itoa(int(int32(binary.LittleEndian.Uint32(data[pos:]))))}
 			pos += 4
 		case 'I': // uint32
 			if pos+4 > len(data) {
-				return tags
+				return tags, order
 			}
 			samTag = SamTag{Type: 'i', Value: strconv.FormatUint(uint64(binary.LittleEndian.Uint32(data[pos:])), 10)}
 			pos += 4
 
 		case 'f': // float32
 			if pos+4 > len(data) {
-				return tags
+				return tags, order
 			}
 			bits := binary.LittleEndian.Uint32(data[pos:])
 			samTag = SamTag{Type: 'f', Value: strconv.FormatFloat(float64(math.Float32frombits(bits)), 'g', -1, 32)}
@@ -576,18 +579,19 @@ func decodeTags(data []byte) map[string]SamTag {
 
 		case 'B': // array
 			if pos >= len(data) {
-				return tags
+				return tags, order
 			}
 			samTag, pos = decodeArrayTag(data, pos)
 
 		default:
 			// Unknown type — skip rest of tags.
-			return tags
+			return tags, order
 		}
 
 		tags[tag] = samTag
+		order = append(order, tag)
 	}
-	return tags
+	return tags, order
 }
 
 // decodeArrayTag decodes a B-type (array) auxiliary tag.

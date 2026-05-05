@@ -200,7 +200,7 @@ func (bw *BamWriter) encodeRecord(rec *SamRecord) error {
 	qualBytes := encodeQualBytes(rec.Qual, seqLen)
 
 	// Encode aux tags
-	auxBytes := encodeAuxTags(rec.Tags)
+	auxBytes := encodeAuxTags(rec.Tags, rec.TagOrder)
 
 	// Read name (NUL-terminated)
 	nameBytes := append([]byte(rec.ReadName), 0)
@@ -376,56 +376,72 @@ func encodeQualBytes(qual string, seqLen int) []byte {
 }
 
 // encodeAuxTags encodes SAM optional tags into BAM binary format.
-func encodeAuxTags(tags map[string]SamTag) []byte {
+func encodeAuxTags(tags map[string]SamTag, tagOrder []string) []byte {
 	if len(tags) == 0 {
 		return nil
 	}
 	var buf []byte
-	for tag, st := range tags {
-		buf = append(buf, tag[0], tag[1])
-		switch st.Type {
-		case 'A':
-			buf = append(buf, 'A')
-			if len(st.Value) > 0 {
-				buf = append(buf, st.Value[0])
-			} else {
-				buf = append(buf, 0)
+
+	if len(tagOrder) > 0 {
+		for _, tag := range tagOrder {
+			st, ok := tags[tag]
+			if !ok {
+				continue
 			}
-		case 'i':
-			v, _ := strconv.ParseInt(st.Value, 10, 64)
-			if v >= 0 && v <= 255 {
-				buf = append(buf, 'C', byte(v))
-			} else if v >= -128 && v <= 127 {
-				buf = append(buf, 'c', byte(int8(v)))
-			} else if v >= 0 && v <= 65535 {
-				buf = append(buf, 'S')
-				buf = binary.LittleEndian.AppendUint16(buf, uint16(v))
-			} else if v >= -32768 && v <= 32767 {
-				buf = append(buf, 's')
-				buf = binary.LittleEndian.AppendUint16(buf, uint16(int16(v)))
-			} else if v >= 0 && v <= 4294967295 {
-				buf = append(buf, 'I')
-				buf = binary.LittleEndian.AppendUint32(buf, uint32(v))
-			} else {
-				buf = append(buf, 'i')
-				buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(v)))
-			}
-		case 'f':
-			buf = append(buf, 'f')
-			v, _ := strconv.ParseFloat(st.Value, 32)
-			buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(float32(v)))
-		case 'Z':
-			buf = append(buf, 'Z')
-			buf = append(buf, st.Value...)
-			buf = append(buf, 0)
-		case 'H':
-			buf = append(buf, 'H')
-			buf = append(buf, st.Value...)
-			buf = append(buf, 0)
-		case 'B':
-			buf = append(buf, 'B')
-			buf = encodeArrayTagValue(buf, st.Value)
+			buf = encodeOneTag(buf, tag, st)
 		}
+	} else {
+		for tag, st := range tags {
+			buf = encodeOneTag(buf, tag, st)
+		}
+	}
+	return buf
+}
+
+func encodeOneTag(buf []byte, tag string, st SamTag) []byte {
+	buf = append(buf, tag[0], tag[1])
+	switch st.Type {
+	case 'A':
+		buf = append(buf, 'A')
+		if len(st.Value) > 0 {
+			buf = append(buf, st.Value[0])
+		} else {
+			buf = append(buf, 0)
+		}
+	case 'i':
+		v, _ := strconv.ParseInt(st.Value, 10, 64)
+		if v >= 0 && v <= 255 {
+			buf = append(buf, 'C', byte(v))
+		} else if v >= -128 && v <= 127 {
+			buf = append(buf, 'c', byte(int8(v)))
+		} else if v >= 0 && v <= 65535 {
+			buf = append(buf, 'S')
+			buf = binary.LittleEndian.AppendUint16(buf, uint16(v))
+		} else if v >= -32768 && v <= 32767 {
+			buf = append(buf, 's')
+			buf = binary.LittleEndian.AppendUint16(buf, uint16(int16(v)))
+		} else if v >= 0 && v <= 4294967295 {
+			buf = append(buf, 'I')
+			buf = binary.LittleEndian.AppendUint32(buf, uint32(v))
+		} else {
+			buf = append(buf, 'i')
+			buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(v)))
+		}
+	case 'f':
+		buf = append(buf, 'f')
+		v, _ := strconv.ParseFloat(st.Value, 32)
+		buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(float32(v)))
+	case 'Z':
+		buf = append(buf, 'Z')
+		buf = append(buf, st.Value...)
+		buf = append(buf, 0)
+	case 'H':
+		buf = append(buf, 'H')
+		buf = append(buf, st.Value...)
+		buf = append(buf, 0)
+	case 'B':
+		buf = append(buf, 'B')
+		buf = encodeArrayTagValue(buf, st.Value)
 	}
 	return buf
 }

@@ -63,6 +63,7 @@ type SamRecord struct {
 	Seq       string
 	Qual      string
 	Tags      map[string]SamTag
+	TagOrder  []string // insertion order of tag keys, for consistent output
 }
 
 // IsUnmapped returns true if the read is unmapped (flag 0x4).
@@ -91,13 +92,22 @@ func (r *SamRecord) IsDuplicate() bool {
 }
 
 // String returns the record as a SAM-formatted line (no trailing newline).
+// Tags are output in TagOrder if set, otherwise in map iteration order.
 func (r *SamRecord) String() string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s\t%d\t%s\t%d\t%d\t%s\t%s\t%d\t%d\t%s\t%s",
 		r.ReadName, r.Flag, r.RefName, r.Pos, r.MapQ,
 		r.Cigar, r.RefNext, r.PosNext, r.InsertLen, r.Seq, r.Qual)
-	for tag, val := range r.Tags {
-		fmt.Fprintf(&sb, "\t%s:%c:%s", tag, val.Type, val.Value)
+	if len(r.TagOrder) > 0 {
+		for _, tag := range r.TagOrder {
+			if val, ok := r.Tags[tag]; ok {
+				fmt.Fprintf(&sb, "\t%s:%c:%s", tag, val.Type, val.Value)
+			}
+		}
+	} else {
+		for tag, val := range r.Tags {
+			fmt.Fprintf(&sb, "\t%s:%c:%s", tag, val.Type, val.Value)
+		}
 	}
 	return sb.String()
 }
@@ -599,10 +609,12 @@ func parseSamLine(line string) (*SamRecord, error) {
 			if len(parts) != 3 {
 				continue
 			}
-			rec.Tags[parts[0]] = SamTag{
+			tag := parts[0]
+			rec.Tags[tag] = SamTag{
 				Type:  parts[1][0],
 				Value: parts[2],
 			}
+			rec.TagOrder = append(rec.TagOrder, tag)
 		}
 	}
 
