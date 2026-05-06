@@ -8,30 +8,28 @@
 
 ### Correctness
 - [x] Validate CRC32 checksums on blocks and container headers
-- [ ] Tag round-trip testing — current tests only compare core fields (first 11 SAM columns), not tags
+- [x] CRAM v2.1 support (no CRC32, itf8 record counter, different EOF)
 - [ ] Verify handling of unmapped/unplaced reads (refID = -1, no reference sequence)
 - [ ] Verify embedded reference sequences in CRAM containers (ref stored in the file itself, not external FASTA)
 
 ### CRAM v3.1 codec support
-- [x] rANS Nx16 (method 5) — order-0, order-1, with PACK, RLE, STRIPE, CAT, NOSIZE transforms
-- [ ] Name tokenizer (method 8) — initial implementation exists but has a bug with DIGITS0/DZLen descriptor mapping; needs debugging against htscodecs reference (DZLen data appears to be stored at a different descriptor index than expected)
-- [ ] fqzcomp (method 7) — quality score compression, not yet implemented
+- [x] rANS Nx16 (method 5) — order-0 and order-1 working, with 4-way and 32-way (X32) interleaving
+- [x] Name tokenizer (method 8) — fixed enum ordering, passes 200-read test
+- [ ] fqzcomp (method 7) — quality score compression, not yet implemented. Note: samtools uses rANS Nx16 (not fqzcomp) for quality scores with synthetic data; fqzcomp may only be used with real sequencing data patterns.
 - [ ] Adaptive arithmetic coder (method 6) — rarely used, low priority
 
-### Writing
+### Not needed for merge
+- [ ] Tag round-trip testing (deferred)
 - [ ] Native CRAM writer (currently CRAM writing goes through samtools)
-
-## Nice to have (not blocking merge)
-- [ ] CRAM v2 support
 - [ ] Performance benchmarks vs samtools
 
-## Debug notes
+## Debug notes (resolved)
 
-### Name tokenizer DZLen issue
-When decoding DIGITS0 tokens, the C code reads the zero-pad width from descriptor `(ntok<<4)|12` (DZLen=12). In the test CRAM 3.1 file (200 reads), token 2 has 109 DIGITS0 entries but no descriptor at type 12. There IS a descriptor at type 4 (DIGITS) with 109 single-byte values, which may be the widths stored under a different type index. Need to check the htscodecs tok3 encoder to understand the actual descriptor numbering.
+### rANS Nx16 order-1 (FIXED)
+Two bugs found:
+1. **Output layout**: Order-1 uses NX-way split (each state decodes 1/NX of output), not round-robin like order-0. Fixed by using quarter/32-way split output indices.
+2. **X32 flag ignored**: The X32 flag (0x04) means 32-way interleaving (32 states, 128 bytes for init). Was hardcoded to 4 states. Fixed by passing NX parameter based on X32 flag.
+3. **Renormalization**: Order-1 was using 8-bit byte-by-byte renorm but Nx16 uses 16-bit LE uint16 renorm. Fixed to match order-0.
 
-Observed descriptor layout for "readXXXX" names:
-- Token 0: type=DDELTA(6), 800 bytes (200×4 uint32)
-- Token 1: type=ALPHA(1)/MATCH(7), 5 bytes ("read")
-- Token 2: type=DIGITS0(3)/END(9), desc[35]=436B, desc[36]=109B, desc[41]=91B
-- Token 3: type=DZLEN(12) for all 200 reads (acts as END via default case)
+### Name tokenizer (FIXED)
+Token type enum values were in wrong order. Corrected to match htscodecs.

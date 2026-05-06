@@ -121,7 +121,7 @@ func decodeRansNx16WithSize(data []byte, expectedSize uint32) ([]byte, error) {
 			}
 			off := n1 + n2 + n3
 			uMetaSize /= 2
-			meta, err := decodeRansNx16Order0(data[off:off+int(cMetaSize)], uMetaSize)
+			meta, err := decodeRansNx16Order0(data[off:off+int(cMetaSize)], uMetaSize, 4)
 			if err != nil {
 				return nil, fmt.Errorf("rans_nx16: decompressing rle meta: %w", err)
 			}
@@ -145,6 +145,12 @@ func decodeRansNx16WithSize(data []byte, expectedSize uint32) ([]byte, error) {
 		outSize = rleLen
 	}
 
+	// Determine interleaving width: 32 if X32 flag, else 4.
+	nx := 4
+	if flags&ransOrderX32 != 0 {
+		nx = 32
+	}
+
 	// Core decode: in -> tmp1
 	var tmp1 []byte
 	if doCat {
@@ -156,9 +162,9 @@ func decodeRansNx16WithSize(data []byte, expectedSize uint32) ([]byte, error) {
 	} else if len(data) > 0 {
 		var err error
 		if order == 0 {
-			tmp1, err = decodeRansNx16Order0(data, outSize)
+			tmp1, err = decodeRansNx16Order0(data, outSize, nx)
 		} else {
-			tmp1, err = decodeRansNx16Order1(data, outSize)
+			tmp1, err = decodeRansNx16Order1(data, outSize, nx)
 		}
 		if err != nil {
 			return nil, err
@@ -267,7 +273,8 @@ func boolToInt(b bool) int {
 }
 
 // decodeRansNx16Order0 decodes order-0 rANS with 16-bit renormalization.
-func decodeRansNx16Order0(data []byte, outSize uint32) ([]byte, error) {
+// nx is the interleaving width (4 or 32).
+func decodeRansNx16Order0(data []byte, outSize uint32, nx int) ([]byte, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("rans_nx16_o0: data too short")
 	}
@@ -301,22 +308,23 @@ func decodeRansNx16Order0(data []byte, outSize uint32) ([]byte, error) {
 		return nil, fmt.Errorf("rans_nx16_o0: frequency sum %d != %d", x, ransNx16TotFreq)
 	}
 
-	// Initialize 4 rANS states.
-	if len(data) < 16 {
-		return nil, fmt.Errorf("rans_nx16_o0: not enough data for states")
+	// Initialize NX rANS states.
+	stateBytes := nx * 4
+	if len(data) < stateBytes {
+		return nil, fmt.Errorf("rans_nx16_o0: not enough data for %d states", nx)
 	}
-	var state [4]uint32
-	for i := 0; i < 4; i++ {
+	state := make([]uint32, nx)
+	for i := 0; i < nx; i++ {
 		state[i] = binary.LittleEndian.Uint32(data[i*4:])
 	}
-	data = data[16:]
+	data = data[stateBytes:]
 
-	// Decode.
+	// Decode with round-robin interleaving.
 	out := make([]byte, outSize)
 	dataPos := 0
 
 	for i := 0; i < int(outSize); i++ {
-		si := i & 3
+		si := i % nx
 		m := state[si] & (ransNx16TotFreq - 1)
 		out[i] = lutSym[m]
 		state[si] = uint32(lutFreq[m])*(state[si]>>ransNx16TFShift) + uint32(lutBase[m])
@@ -332,22 +340,24 @@ func decodeRansNx16Order0(data []byte, outSize uint32) ([]byte, error) {
 }
 
 // decodeRansNx16Order1 decodes order-1 rANS with 16-bit renormalization.
-func decodeRansNx16Order1(data []byte, outSize uint32) ([]byte, error) {
+// nx is the interleaving width (4 or 32).
+func decodeRansNx16Order1(data []byte, outSize uint32, nx int) ([]byte, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("rans_nx16_o1: data too short")
 	}
 
-	// The order-1 frequency table may itself be compressed.
-	// First byte: if bit 0 is set, the freq table is rANS-compressed.
-	compressedFreqTable := false
-	if len(data) > 0 && data[0]&1 != 0 {
-		compressedFreqTable = true
+	// First byte: upper 4 bits = TF_SHIFT, bit 0 = compressed freq table.
+	firstByte := data[0]
+	tfShift := uint(firstByte >> 4)
+	if tfShift < 1 || tfShift > 12 {
+		tfShift = 12
 	}
+	totFreq := uint32(1) << tfShift
+	compressedFreqTable := firstByte&1 != 0
 
 	var freqData []byte
-	pos := 0
+	pos := 1 // skip first byte
 	if compressedFreqTable {
-		pos++ // skip the marker byte
 		n1, uSize := varGetU32(data[pos:])
 		pos += n1
 		n2, cSize := varGetU32(data[pos:])
@@ -356,14 +366,14 @@ func decodeRansNx16Order1(data []byte, outSize uint32) ([]byte, error) {
 			return nil, fmt.Errorf("rans_nx16_o1: truncated compressed freq table")
 		}
 		var err error
-		freqData, err = decodeRansNx16Order0(data[pos:pos+int(cSize)], uSize)
+		freqData, err = decodeRansNx16Order0(data[pos:pos+int(cSize)], uSize, 4)
 		if err != nil {
 			return nil, fmt.Errorf("rans_nx16_o1: decompressing freq table: %w", err)
 		}
 		pos += int(cSize)
 		data = data[pos:]
 	} else {
-		freqData = data
+		freqData = data[pos:]
 	}
 
 	// Read order-0 alphabet (which symbols are present).
@@ -374,18 +384,18 @@ func decodeRansNx16Order1(data []byte, outSize uint32) ([]byte, error) {
 	}
 	freqData = freqData[apos:]
 
-	// Use TF_SHIFT=10 for order-1 (faster, less cache pressure).
-	const tfShift = 10
-	const totFreq = 1 << tfShift
-
 	// Read per-context frequency tables.
-	var syms [256][256]ransDecSymbol
 	type lutEntry struct {
 		sym  byte
 		freq uint16
 		base uint16
 	}
-	var luts [256][totFreq]lutEntry
+	// Use slices since totFreq is determined at runtime.
+	syms := make([][256]ransDecSymbol, 256)
+	luts := make([][]lutEntry, 256)
+	for i := range luts {
+		luts[i] = make([]lutEntry, totFreq)
+	}
 
 	for ctx := 0; ctx < 256; ctx++ {
 		if F0[ctx] == 0 {
@@ -409,7 +419,7 @@ func decodeRansNx16Order1(data []byte, outSize uint32) ([]byte, error) {
 		for j := 0; j < 256; j++ {
 			if F[j] > 0 {
 				syms[ctx][j] = ransDecSymbol{cumFreq: x, freq: F[j]}
-				for y := uint32(0); y < F[j]; y++ {
+				for y := uint32(0); y < F[j] && x+y < totFreq; y++ {
 					luts[ctx][x+y] = lutEntry{
 						sym:  byte(j),
 						freq: uint16(F[j]),
@@ -419,42 +429,71 @@ func decodeRansNx16Order1(data []byte, outSize uint32) ([]byte, error) {
 				x += F[j]
 			}
 		}
+		if x != totFreq {
+			return nil, fmt.Errorf("rans_nx16_o1: ctx %d freq sum %d != %d", ctx, x, totFreq)
+		}
 	}
 
 	if !compressedFreqTable {
 		// If the freq table was inline, advance data past it.
-		consumed := len(data) - len(freqData)
-		data = data[consumed:]
+		consumed := len(data) - 1 - len(freqData) // -1 for the first byte already consumed
+		data = data[1+consumed:]
 	}
 
-	// Initialize 4 rANS states.
-	if len(data) < 16 {
-		return nil, fmt.Errorf("rans_nx16_o1: not enough data for states")
+	// Initialize NX rANS states.
+	stateBytes := nx * 4
+	if len(data) < stateBytes {
+		return nil, fmt.Errorf("rans_nx16_o1: not enough data for %d states", nx)
 	}
-	var state [4]uint32
-	for i := 0; i < 4; i++ {
+	state := make([]uint32, nx)
+	for i := 0; i < nx; i++ {
 		state[i] = binary.LittleEndian.Uint32(data[i*4:])
 	}
-	data = data[16:]
+	data = data[stateBytes:]
 
-	// Decode interleaved.
+	// Decode NX-way split: each state decodes 1/NX of the output.
 	out := make([]byte, outSize)
 	dataPos := 0
-	var lastSym [4]byte
+	iszN := int(outSize) / nx
+	lastSym := make([]byte, nx)
+	iN := make([]int, nx)
+	for z := 0; z < nx; z++ {
+		iN[z] = z * iszN
+	}
 
-	for i := 0; i < int(outSize); i++ {
-		si := i & 3
-		ctx := lastSym[si]
-		m := state[si] & (totFreq - 1)
+	mask := totFreq - 1
+	for iN[0] < iszN {
+		for z := 0; z < nx; z++ {
+			ctx := lastSym[z]
+			m := state[z] & mask
+			entry := luts[ctx][m]
+			out[iN[z]] = entry.sym
+			lastSym[z] = entry.sym
+			iN[z]++
+
+			state[z] = uint32(entry.freq)*(state[z]>>tfShift) + uint32(entry.base)
+
+			// 16-bit renormalization.
+			if state[z] < ransNx16L && dataPos+1 < len(data) {
+				state[z] = (state[z] << 16) | uint32(binary.LittleEndian.Uint16(data[dataPos:]))
+				dataPos += 2
+			}
+		}
+	}
+
+	// Remainder: last state handles any leftover bytes.
+	last := nx - 1
+	for iN[last] < int(outSize) {
+		ctx := lastSym[last]
+		m := state[last] & mask
 		entry := luts[ctx][m]
-		out[i] = entry.sym
-		lastSym[si] = entry.sym
+		out[iN[last]] = entry.sym
+		lastSym[last] = entry.sym
+		iN[last]++
 
-		state[si] = uint32(entry.freq)*(state[si]>>tfShift) + uint32(entry.base)
-
-		// 16-bit renormalization.
-		if state[si] < ransNx16L && dataPos+1 < len(data) {
-			state[si] = (state[si] << 16) | uint32(binary.LittleEndian.Uint16(data[dataPos:]))
+		state[last] = uint32(entry.freq)*(state[last]>>tfShift) + uint32(entry.base)
+		if state[last] < ransNx16L && dataPos+1 < len(data) {
+			state[last] = (state[last] << 16) | uint32(binary.LittleEndian.Uint16(data[dataPos:]))
 			dataPos += 2
 		}
 	}
@@ -593,15 +632,22 @@ func nx16DecodeFreqD(data []byte, F0 *[256]uint32, F *[256]uint32, total *uint32
 }
 
 // nx16NormaliseFreqShift normalises frequencies by shifting up to fill maxTot.
+// This only works when size is a power-of-2 factor of maxTot.
 func nx16NormaliseFreqShift(F *[256]uint32, size, maxTot uint32) {
 	if size == 0 || size == maxTot {
 		return
+	}
+	if size > maxTot {
+		return // already larger, can't shift
 	}
 	shift := uint(0)
 	s := size
 	for s < maxTot {
 		s *= 2
 		shift++
+	}
+	if s != maxTot {
+		return // not an exact power-of-2 ratio, leave as is
 	}
 	for i := 0; i < 256; i++ {
 		F[i] <<= shift
