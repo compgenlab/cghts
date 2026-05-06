@@ -2,10 +2,13 @@ package cram
 
 import (
 	"bytes"
+	"compress/bzip2"
 	"compress/gzip"
 	"fmt"
 	"hash/crc32"
 	"io"
+
+	"github.com/ulikunitz/xz/lzma"
 )
 
 // Block compression methods.
@@ -101,16 +104,36 @@ func readBlock(r io.Reader) (*block, error) {
 	}, nil
 }
 
+var methodNames = map[byte]string{
+	blockMethodRaw:      "raw",
+	blockMethodGzip:     "gzip",
+	blockMethodBzip2:    "bzip2",
+	blockMethodLzma:     "lzma",
+	blockMethodRans4x8:  "rANS 4x8",
+	blockMethodRans4x16: "rANS 4x16",
+	blockMethodAdaptive: "adaptive arithmetic",
+	blockMethodFqzcomp:  "fqzcomp",
+	blockMethodNameTok:  "name tokenizer",
+}
+
 func decompressBlock(method byte, data []byte, rawSize int32) ([]byte, error) {
 	switch method {
 	case blockMethodRaw:
 		return data, nil
 	case blockMethodGzip:
 		return decompressGzip(data)
+	case blockMethodBzip2:
+		return decompressBzip2(data)
+	case blockMethodLzma:
+		return decompressLzma(data)
 	case blockMethodRans4x8:
 		return decodeRans4x8(data)
 	default:
-		return nil, fmt.Errorf("unsupported compression method: %d", method)
+		name, ok := methodNames[method]
+		if !ok {
+			name = fmt.Sprintf("unknown(%d)", method)
+		}
+		return nil, fmt.Errorf("unsupported compression method: %s", name)
 	}
 }
 
@@ -121,6 +144,18 @@ func decompressGzip(data []byte) ([]byte, error) {
 	}
 	defer gr.Close()
 	return io.ReadAll(gr)
+}
+
+func decompressBzip2(data []byte) ([]byte, error) {
+	return io.ReadAll(bzip2.NewReader(bytes.NewReader(data)))
+}
+
+func decompressLzma(data []byte) ([]byte, error) {
+	r, err := lzma.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("lzma reader: %w", err)
+	}
+	return io.ReadAll(r)
 }
 
 // computeCRC32 computes CRC32 using the ITU-T V.42 polynomial (same as ISO 3309).
