@@ -45,49 +45,56 @@ type block struct {
 
 // readBlock reads and decompresses a single CRAM block.
 func readBlock(r io.Reader) (*block, error) {
+	// Tee all reads through a CRC32 hash for validation.
+	h := crc32.NewIEEE()
+	tr := io.TeeReader(r, h)
+
 	// Read method byte.
 	var buf [1]byte
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
+	if _, err := io.ReadFull(tr, buf[:]); err != nil {
 		return nil, err
 	}
 	method := buf[0]
 
 	// Content type.
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
+	if _, err := io.ReadFull(tr, buf[:]); err != nil {
 		return nil, fmt.Errorf("reading content type: %w", err)
 	}
 	contentType := buf[0]
 
 	// Content ID.
-	contentID, err := readITF8(r)
+	contentID, err := readITF8(tr)
 	if err != nil {
 		return nil, fmt.Errorf("reading content ID: %w", err)
 	}
 
 	// Compressed size.
-	compSize, err := readITF8(r)
+	compSize, err := readITF8(tr)
 	if err != nil {
 		return nil, fmt.Errorf("reading compressed size: %w", err)
 	}
 
 	// Raw size.
-	rawSize, err := readITF8(r)
+	rawSize, err := readITF8(tr)
 	if err != nil {
 		return nil, fmt.Errorf("reading raw size: %w", err)
 	}
 
 	// Read compressed data.
 	compData := make([]byte, compSize)
-	if _, err := io.ReadFull(r, compData); err != nil {
+	if _, err := io.ReadFull(tr, compData); err != nil {
 		return nil, fmt.Errorf("reading block data (%d bytes): %w", compSize, err)
 	}
 
-	// Read CRC32.
+	// Read and validate CRC32 (read from original reader, not the tee).
 	var crcBuf [4]byte
 	if _, err := io.ReadFull(r, crcBuf[:]); err != nil {
 		return nil, fmt.Errorf("reading block CRC32: %w", err)
 	}
-	_ = crcBuf // TODO: validate CRC32
+	stored := uint32(crcBuf[0]) | uint32(crcBuf[1])<<8 | uint32(crcBuf[2])<<16 | uint32(crcBuf[3])<<24
+	if computed := h.Sum32(); computed != stored {
+		return nil, fmt.Errorf("block CRC32 mismatch: computed %08x, stored %08x", computed, stored)
+	}
 
 	// Decompress.
 	data, err := decompressBlock(method, compData, rawSize)
@@ -128,6 +135,10 @@ func decompressBlock(method byte, data []byte, rawSize int32) ([]byte, error) {
 		return decompressLzma(data)
 	case blockMethodRans4x8:
 		return decodeRans4x8(data)
+	case blockMethodRans4x16:
+		return decodeRansNx16(data)
+	case blockMethodNameTok:
+		return decodeNameTokenizer(data)
 	default:
 		name, ok := methodNames[method]
 		if !ok {
@@ -158,7 +169,3 @@ func decompressLzma(data []byte) ([]byte, error) {
 	return io.ReadAll(r)
 }
 
-// computeCRC32 computes CRC32 using the ITU-T V.42 polynomial (same as ISO 3309).
-func computeCRC32(data []byte) uint32 {
-	return crc32.ChecksumIEEE(data)
-}
