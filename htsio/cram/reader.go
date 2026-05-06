@@ -20,6 +20,8 @@ type Reader struct {
 	refs     []refInfo
 	refMap   map[string]int // ref name → index
 	refProv  *referenceProvider
+	idx      *craiIndex // lazily loaded CRAI index for Query
+	queryFh  *os.File   // separate file handle for Query seeks
 }
 
 // NewReader creates a CRAM reader from a file path.
@@ -68,15 +70,175 @@ func (cr *Reader) Header() (*htsio.SamHeader, error) {
 
 // Close releases resources.
 func (cr *Reader) Close() error {
+	if cr.queryFh != nil {
+		cr.queryFh.Close()
+	}
 	if cr.src != nil {
 		return cr.src.Close()
 	}
 	return nil
 }
 
-// Query is not yet supported for CRAM files.
+// Query returns an iterator over records overlapping the 0-based half-open
+// region [start, end) on the given reference. Requires a .crai index file.
 func (cr *Reader) Query(ref string, start, end int) (iter.Seq2[*htsio.SamRecord, error], error) {
-	return nil, fmt.Errorf("cram: Query not yet supported")
+	if cr.filename == "" {
+		return nil, fmt.Errorf("cram: Query requires a file-backed reader")
+	}
+
+	seqID, ok := cr.refMap[ref]
+	if !ok {
+		return nil, fmt.Errorf("cram: unknown reference %q", ref)
+	}
+
+	// Lazily load the CRAI index.
+	if cr.idx == nil {
+		craiPath := cr.filename + ".crai"
+		idx, err := loadCRAI(craiPath)
+		if err != nil {
+			return nil, fmt.Errorf("cram: loading CRAI index: %w", err)
+		}
+		cr.idx = idx
+	}
+
+	// Find overlapping slices.
+	entries := cr.idx.query(seqID, start, end)
+	if len(entries) == 0 {
+		return func(yield func(*htsio.SamRecord, error) bool) {}, nil
+	}
+
+	// Lazily open a separate file handle for queries.
+	if cr.queryFh == nil {
+		f, err := os.Open(cr.filename)
+		if err != nil {
+			return nil, err
+		}
+		cr.queryFh = f
+	}
+
+	return cr.iterCraiEntries(entries, seqID, start, end), nil
+}
+
+// iterCraiEntries returns an iterator that reads records from the CRAI entries,
+// filtering to those overlapping [start, end) on seqID.
+func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) iter.Seq2[*htsio.SamRecord, error] {
+	return func(yield func(*htsio.SamRecord, error) bool) {
+		for _, entry := range entries {
+			// Seek to the container.
+			if _, err := cr.queryFh.Seek(entry.containerOffset, io.SeekStart); err != nil {
+				yield(nil, fmt.Errorf("cram: seeking to container: %w", err))
+				return
+			}
+
+			// Read container header.
+			ch, err := readContainerHeader(cr.queryFh)
+			if err != nil {
+				yield(nil, fmt.Errorf("cram: reading container header: %w", err))
+				return
+			}
+			if ch.isEOF() {
+				continue
+			}
+
+			// Read compression header (first block).
+			compHdrBlock, err := readBlock(cr.queryFh)
+			if err != nil {
+				yield(nil, fmt.Errorf("cram: reading compression header: %w", err))
+				return
+			}
+			if compHdrBlock.contentType != blockContentCompressionHeader {
+				yield(nil, fmt.Errorf("cram: expected compression header, got type %d", compHdrBlock.contentType))
+				return
+			}
+			compHdr, err := readCompressionHeader(compHdrBlock.data)
+			if err != nil {
+				yield(nil, fmt.Errorf("cram: parsing compression header: %w", err))
+				return
+			}
+
+			// Read remaining blocks (slices).
+			remainingBlocks := ch.NumBlocks - 1
+			for remainingBlocks > 0 {
+				sliceHdrBlock, err := readBlock(cr.queryFh)
+				if err != nil {
+					yield(nil, fmt.Errorf("cram: reading slice header: %w", err))
+					return
+				}
+				remainingBlocks--
+
+				if sliceHdrBlock.contentType != blockContentSliceHeader {
+					yield(nil, fmt.Errorf("cram: expected slice header, got type %d", sliceHdrBlock.contentType))
+					return
+				}
+
+				sh, err := readSliceHeader(sliceHdrBlock.data)
+				if err != nil {
+					yield(nil, fmt.Errorf("cram: parsing slice header: %w", err))
+					return
+				}
+
+				coreData := []byte{}
+				externalBlocks := make(map[int32][]byte)
+				for i := int32(0); i < sh.numBlocks; i++ {
+					blk, err := readBlock(cr.queryFh)
+					if err != nil {
+						yield(nil, fmt.Errorf("cram: reading slice block %d: %w", i, err))
+						return
+					}
+					remainingBlocks--
+					switch blk.contentType {
+					case blockContentCoreData:
+						coreData = blk.data
+					case blockContentExternalData:
+						externalBlocks[blk.contentID] = blk.data
+					}
+				}
+
+				// Load reference.
+				var refSeq []byte
+				if sh.refSeqID >= 0 && cr.refProv != nil {
+					if int(sh.refSeqID) < len(cr.refs) {
+						if seq, err := cr.refProv.getSequence(cr.refs[sh.refSeqID].name); err == nil {
+							refSeq = seq
+						}
+					}
+				}
+
+				records, err := decodeSliceRecords(sh, compHdr, coreData, externalBlocks, cr.refs, nil)
+				if err != nil {
+					yield(nil, fmt.Errorf("cram: decoding slice records: %w", err))
+					return
+				}
+
+				for i := range records {
+					rec := &records[i]
+					recRefSeq := refSeq
+					if sh.refSeqID == -2 && cr.refProv != nil && rec.refID >= 0 {
+						if int(rec.refID) < len(cr.refs) {
+							if seq, err := cr.refProv.getSequence(cr.refs[rec.refID].name); err == nil {
+								recRefSeq = seq
+							}
+						}
+					}
+
+					// Filter: record must be on the queried reference and overlap [start, end).
+					if int(rec.refID) != seqID {
+						continue
+					}
+					recStart := int(rec.alignPos) - 1 // convert 1-based to 0-based
+					recEnd := recStart + int(rec.readLen)
+					if recStart >= end || recEnd <= start {
+						continue
+					}
+
+					samRec := cr.cramToSam(rec, compHdr, recRefSeq)
+					if !yield(samRec, nil) {
+						return
+					}
+				}
+			}
+		}
+	}
 }
 
 // Records returns an iterator over all records in the CRAM file.

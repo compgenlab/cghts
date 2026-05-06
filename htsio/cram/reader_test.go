@@ -140,6 +140,146 @@ func TestReadCRAMSimple(t *testing.T) {
 	}
 }
 
+func TestCRAMQuery(t *testing.T) {
+	cramFile := "testdata/test_raw.cram"
+	refFile := "testdata/ref.fa"
+
+	reader, err := NewReader(cramFile, refFile)
+	if err != nil {
+		t.Fatalf("NewReader failed: %v", err)
+	}
+	defer reader.Close()
+
+	// Query chr1:100-550 (0-based half-open) — should get read1 (pos=100) and read2 (pos=500).
+	iter, err := reader.Query("chr1", 99, 550)
+	if err != nil {
+		t.Fatalf("Query failed: %v", err)
+	}
+
+	var names []string
+	for rec, err := range iter {
+		if err != nil {
+			t.Fatalf("Query iterator error: %v", err)
+		}
+		names = append(names, rec.ReadName)
+	}
+
+	if len(names) != 2 {
+		t.Fatalf("expected 2 records, got %d: %v", len(names), names)
+	}
+	if names[0] != "read1" || names[1] != "read2" {
+		t.Errorf("unexpected records: %v", names)
+	}
+}
+
+func TestCRAMQuerySingleResult(t *testing.T) {
+	cramFile := "testdata/test_raw.cram"
+	refFile := "testdata/ref.fa"
+
+	reader, err := NewReader(cramFile, refFile)
+	if err != nil {
+		t.Fatalf("NewReader failed: %v", err)
+	}
+	defer reader.Close()
+
+	// Query chr2:199-250 (0-based half-open) — should get read5 only.
+	iter, err := reader.Query("chr2", 199, 250)
+	if err != nil {
+		t.Fatalf("Query failed: %v", err)
+	}
+
+	var names []string
+	for rec, err := range iter {
+		if err != nil {
+			t.Fatalf("Query iterator error: %v", err)
+		}
+		names = append(names, rec.ReadName)
+	}
+
+	if len(names) != 1 || names[0] != "read5" {
+		t.Errorf("expected [read5], got %v", names)
+	}
+}
+
+func TestCRAMQueryNoResults(t *testing.T) {
+	cramFile := "testdata/test_raw.cram"
+	refFile := "testdata/ref.fa"
+
+	reader, err := NewReader(cramFile, refFile)
+	if err != nil {
+		t.Fatalf("NewReader failed: %v", err)
+	}
+	defer reader.Close()
+
+	// Query a region with no reads.
+	iter, err := reader.Query("chr1", 2000, 3000)
+	if err != nil {
+		t.Fatalf("Query failed: %v", err)
+	}
+
+	count := 0
+	for _, err := range iter {
+		if err != nil {
+			t.Fatalf("Query iterator error: %v", err)
+		}
+		count++
+	}
+
+	if count != 0 {
+		t.Errorf("expected 0 records, got %d", count)
+	}
+}
+
+func TestCRAMQueryMatchesSamtools(t *testing.T) {
+	cramFile := "testdata/test_raw.cram"
+	refFile := "testdata/ref.fa"
+
+	// Get expected output from samtools for chr1:100-5050.
+	cmd := exec.Command("samtools", "view", "-T", refFile, cramFile, "chr1:100-5050")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("samtools view failed: %v", err)
+	}
+	expectedLines := strings.Split(strings.TrimSpace(string(out)), "\n")
+
+	reader, err := NewReader(cramFile, refFile)
+	if err != nil {
+		t.Fatalf("NewReader failed: %v", err)
+	}
+	defer reader.Close()
+
+	// samtools region "chr1:100-5050" is 1-based closed, which is [99, 5050) in 0-based half-open.
+	iter, err := reader.Query("chr1", 99, 5050)
+	if err != nil {
+		t.Fatalf("Query failed: %v", err)
+	}
+
+	var gotRecords []string
+	for rec, err := range iter {
+		if err != nil {
+			t.Fatalf("Query iterator error: %v", err)
+		}
+		line := fmt.Sprintf("%s\t%d\t%s\t%d\t%d\t%s\t%s\t%d\t%d\t%s\t%s",
+			rec.ReadName, rec.Flag, rec.RefName, rec.Pos, rec.MapQ,
+			rec.Cigar, rec.RefNext, rec.PosNext, rec.InsertLen, rec.Seq, rec.Qual)
+		gotRecords = append(gotRecords, line)
+	}
+
+	if len(gotRecords) != len(expectedLines) {
+		t.Fatalf("record count mismatch: got %d, expected %d", len(gotRecords), len(expectedLines))
+	}
+
+	for i, expected := range expectedLines {
+		expFields := strings.SplitN(expected, "\t", 12)
+		gotFields := strings.SplitN(gotRecords[i], "\t", 12)
+		expCore := strings.Join(expFields[:11], "\t")
+		gotCore := strings.Join(gotFields[:11], "\t")
+		if expCore != gotCore {
+			t.Errorf("record %d mismatch:\n  got:  %s\n  want: %s", i, gotCore, expCore)
+		}
+	}
+}
+
 func TestReadCRAMHeader(t *testing.T) {
 	cramFile := "testdata/test.cram"
 	refFile := "testdata/ref.fa"
