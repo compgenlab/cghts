@@ -3,6 +3,7 @@ package cram
 import (
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 )
 
@@ -62,64 +63,72 @@ func (c *containerHeader) isEOF() bool {
 }
 
 func readContainerHeader(r io.Reader) (*containerHeader, error) {
+	// Tee all reads through a CRC32 hash for validation.
+	h := crc32.NewIEEE()
+	tr := io.TeeReader(r, h)
+
 	// Length: int32 little-endian
 	var length int32
-	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
+	if err := binary.Read(tr, binary.LittleEndian, &length); err != nil {
 		return nil, err
 	}
 
 	// Ref seq ID: itf8
-	refSeqID, err := readITF8(r)
+	refSeqID, err := readITF8(tr)
 	if err != nil {
 		return nil, fmt.Errorf("reading ref seq ID: %w", err)
 	}
 
 	// Start position: itf8
-	startPos, err := readITF8(r)
+	startPos, err := readITF8(tr)
 	if err != nil {
 		return nil, fmt.Errorf("reading start pos: %w", err)
 	}
 
 	// Alignment span: itf8
-	alignmentSpan, err := readITF8(r)
+	alignmentSpan, err := readITF8(tr)
 	if err != nil {
 		return nil, fmt.Errorf("reading alignment span: %w", err)
 	}
 
 	// Number of records: itf8
-	numRecords, err := readITF8(r)
+	numRecords, err := readITF8(tr)
 	if err != nil {
 		return nil, fmt.Errorf("reading num records: %w", err)
 	}
 
 	// Record counter: ltf8
-	recordCounter, err := readLTF8(r)
+	recordCounter, err := readLTF8(tr)
 	if err != nil {
 		return nil, fmt.Errorf("reading record counter: %w", err)
 	}
 
 	// Bases: ltf8
-	bases, err := readLTF8(r)
+	bases, err := readLTF8(tr)
 	if err != nil {
 		return nil, fmt.Errorf("reading bases: %w", err)
 	}
 
 	// Number of blocks: itf8
-	numBlocks, err := readITF8(r)
+	numBlocks, err := readITF8(tr)
 	if err != nil {
 		return nil, fmt.Errorf("reading num blocks: %w", err)
 	}
 
 	// Landmarks: array<itf8>
-	landmarks, err := readITF8Array(r)
+	landmarks, err := readITF8Array(tr)
 	if err != nil {
 		return nil, fmt.Errorf("reading landmarks: %w", err)
 	}
 
-	// CRC32: 4 bytes
+	// Read and validate CRC32 (read from original reader, not the tee).
 	var crc [4]byte
 	if _, err := io.ReadFull(r, crc[:]); err != nil {
 		return nil, fmt.Errorf("reading container CRC32: %w", err)
+	}
+	stored := uint32(crc[0]) | uint32(crc[1])<<8 | uint32(crc[2])<<16 | uint32(crc[3])<<24
+	if computed := h.Sum32(); computed != stored {
+		return nil, fmt.Errorf("container header CRC32 mismatch: computed %08x, stored %08x", computed, stored)
 	}
 
 	return &containerHeader{
