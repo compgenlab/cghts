@@ -22,24 +22,24 @@ func TestRansDecompress(t *testing.T) {
 	}
 
 	// Header container.
-	hdrCont, err := readContainerHeader(r)
+	hdrCont, err := readContainerHeader(r, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := int32(0); i < hdrCont.NumBlocks; i++ {
-		if _, err := readBlock(r); err != nil {
+		if _, err := readBlock(r, 3); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Data container.
-	dataCont, err := readContainerHeader(r)
+	dataCont, err := readContainerHeader(r, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for i := int32(0); i < dataCont.NumBlocks; i++ {
-		blk, err := readBlock(r)
+		blk, err := readBlock(r, 3)
 		if err != nil {
 			t.Fatalf("reading block %d: %v", i, err)
 		}
@@ -88,7 +88,7 @@ func TestRansDecompressRaw(t *testing.T) {
 
 	// Read all containers and verify no rANS decompression errors.
 	for {
-		ch, err := readContainerHeader(r)
+		ch, err := readContainerHeader(r, 3)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,7 +96,7 @@ func TestRansDecompressRaw(t *testing.T) {
 			break
 		}
 		for i := int32(0); i < ch.NumBlocks; i++ {
-			blk, err := readBlock(r)
+			blk, err := readBlock(r, 3)
 			if err != nil {
 				t.Fatalf("container block %d: %v", i, err)
 			}

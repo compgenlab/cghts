@@ -63,6 +63,11 @@ func NewReader(filename string, refPath string) (*Reader, error) {
 	return cr, nil
 }
 
+// version returns the major version of the CRAM file.
+func (cr *Reader) version() byte {
+	return cr.fileDef.Major
+}
+
 // Header returns the parsed SAM header.
 func (cr *Reader) Header() (*htsio.SamHeader, error) {
 	return cr.hdr, nil
@@ -131,7 +136,7 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 			}
 
 			// Read container header.
-			ch, err := readContainerHeader(cr.queryFh)
+			ch, err := readContainerHeader(cr.queryFh, cr.version())
 			if err != nil {
 				yield(nil, fmt.Errorf("cram: reading container header: %w", err))
 				return
@@ -141,7 +146,7 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 			}
 
 			// Read compression header (first block).
-			compHdrBlock, err := readBlock(cr.queryFh)
+			compHdrBlock, err := readBlock(cr.queryFh, cr.version())
 			if err != nil {
 				yield(nil, fmt.Errorf("cram: reading compression header: %w", err))
 				return
@@ -159,7 +164,7 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 			// Read remaining blocks (slices).
 			remainingBlocks := ch.NumBlocks - 1
 			for remainingBlocks > 0 {
-				sliceHdrBlock, err := readBlock(cr.queryFh)
+				sliceHdrBlock, err := readBlock(cr.queryFh, cr.version())
 				if err != nil {
 					yield(nil, fmt.Errorf("cram: reading slice header: %w", err))
 					return
@@ -180,7 +185,7 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 				coreData := []byte{}
 				externalBlocks := make(map[int32][]byte)
 				for i := int32(0); i < sh.numBlocks; i++ {
-					blk, err := readBlock(cr.queryFh)
+					blk, err := readBlock(cr.queryFh, cr.version())
 					if err != nil {
 						yield(nil, fmt.Errorf("cram: reading slice block %d: %w", i, err))
 						return
@@ -246,7 +251,7 @@ func (cr *Reader) Records() iter.Seq2[*htsio.SamRecord, error] {
 	return func(yield func(*htsio.SamRecord, error) bool) {
 		for {
 			// Read next container header.
-			ch, err := readContainerHeader(cr.r)
+			ch, err := readContainerHeader(cr.r, cr.version())
 			if err != nil {
 				if err == io.EOF || err == io.ErrUnexpectedEOF {
 					return
@@ -271,7 +276,7 @@ func (cr *Reader) Records() iter.Seq2[*htsio.SamRecord, error] {
 // Returns false if yield returned false (caller should stop).
 func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRecord, error) bool) bool {
 	// First block: compression header.
-	compHdrBlock, err := readBlock(cr.r)
+	compHdrBlock, err := readBlock(cr.r, cr.version())
 	if err != nil {
 		return yield(nil, fmt.Errorf("cram: reading compression header block: %w", err))
 	}
@@ -291,7 +296,7 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 
 	for remainingBlocks > 0 {
 		// Slice header block.
-		sliceHdrBlock, err := readBlock(cr.r)
+		sliceHdrBlock, err := readBlock(cr.r, cr.version())
 		if err != nil {
 			return yield(nil, fmt.Errorf("cram: reading slice header block: %w", err))
 		}
@@ -311,7 +316,7 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 		externalBlocks := make(map[int32][]byte)
 
 		for i := int32(0); i < sh.numBlocks; i++ {
-			blk, err := readBlock(cr.r)
+			blk, err := readBlock(cr.r, cr.version())
 			if err != nil {
 				return yield(nil, fmt.Errorf("cram: reading slice block %d: %w", i, err))
 			}
@@ -441,13 +446,13 @@ func (cr *Reader) cramToSam(rec *cramRecord, ch *compressionHeader, refSeq []byt
 
 // readHeaderContainer reads the first (header) container from the CRAM file.
 func (cr *Reader) readHeaderContainer() error {
-	ch, err := readContainerHeader(cr.r)
+	ch, err := readContainerHeader(cr.r, cr.version())
 	if err != nil {
 		return fmt.Errorf("reading header container: %w", err)
 	}
 
 	// The header container should have one block containing the SAM header text.
-	blk, err := readBlock(cr.r)
+	blk, err := readBlock(cr.r, cr.version())
 	if err != nil {
 		return fmt.Errorf("reading header block: %w", err)
 	}
@@ -484,7 +489,7 @@ func (cr *Reader) readHeaderContainer() error {
 
 	// Skip remaining blocks in header container if any.
 	for i := int32(1); i < ch.NumBlocks; i++ {
-		if _, err := readBlock(cr.r); err != nil {
+		if _, err := readBlock(cr.r, cr.version()); err != nil {
 			return fmt.Errorf("skipping header block %d: %w", i, err)
 		}
 	}

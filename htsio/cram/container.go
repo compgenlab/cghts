@@ -37,8 +37,8 @@ func readFileDefinition(r io.Reader) (*fileDefinition, error) {
 		return nil, fmt.Errorf("reading file ID: %w", err)
 	}
 
-	if fd.Major != 3 {
-		return nil, fmt.Errorf("unsupported CRAM version: %d.%d (only v3.x supported)", fd.Major, fd.Minor)
+	if fd.Major != 2 && fd.Major != 3 {
+		return nil, fmt.Errorf("unsupported CRAM version: %d.%d (only v2.x and v3.x supported)", fd.Major, fd.Minor)
 	}
 
 	return fd, nil
@@ -58,14 +58,22 @@ type containerHeader struct {
 }
 
 // isEOF returns true if this is the EOF container.
+// v3: length=15, refSeqID=-1, numRecords=0, numBlocks=1
+// v2: length=11, refSeqID=-1, numRecords=0, numBlocks=1
 func (c *containerHeader) isEOF() bool {
-	return c.Length == 15 && c.RefSeqID == -1 && c.NumRecords == 0 && c.NumBlocks == 1
+	return (c.Length == 15 || c.Length == 11) && c.RefSeqID == -1 && c.NumRecords == 0 && c.NumBlocks == 1
 }
 
-func readContainerHeader(r io.Reader) (*containerHeader, error) {
-	// Tee all reads through a CRC32 hash for validation.
-	h := crc32.NewIEEE()
-	tr := io.TeeReader(r, h)
+func readContainerHeader(r io.Reader, majorVersion byte) (*containerHeader, error) {
+	// v3+ uses CRC32 on container headers.
+	var tr io.Reader
+	var h hash32
+	if majorVersion >= 3 {
+		h = crc32.NewIEEE()
+		tr = io.TeeReader(r, h)
+	} else {
+		tr = r
+	}
 
 	// Length: int32 little-endian
 	var length int32
@@ -97,8 +105,15 @@ func readContainerHeader(r io.Reader) (*containerHeader, error) {
 		return nil, fmt.Errorf("reading num records: %w", err)
 	}
 
-	// Record counter: ltf8
-	recordCounter, err := readLTF8(tr)
+	// Record counter: itf8 in v2, ltf8 in v3+
+	var recordCounter int64
+	if majorVersion >= 3 {
+		recordCounter, err = readLTF8(tr)
+	} else {
+		var rc int32
+		rc, err = readITF8(tr)
+		recordCounter = int64(rc)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reading record counter: %w", err)
 	}
@@ -121,14 +136,16 @@ func readContainerHeader(r io.Reader) (*containerHeader, error) {
 		return nil, fmt.Errorf("reading landmarks: %w", err)
 	}
 
-	// Read and validate CRC32 (read from original reader, not the tee).
-	var crc [4]byte
-	if _, err := io.ReadFull(r, crc[:]); err != nil {
-		return nil, fmt.Errorf("reading container CRC32: %w", err)
-	}
-	stored := uint32(crc[0]) | uint32(crc[1])<<8 | uint32(crc[2])<<16 | uint32(crc[3])<<24
-	if computed := h.Sum32(); computed != stored {
-		return nil, fmt.Errorf("container header CRC32 mismatch: computed %08x, stored %08x", computed, stored)
+	// v3+ has CRC32 after the header.
+	if majorVersion >= 3 {
+		var crc [4]byte
+		if _, err := io.ReadFull(r, crc[:]); err != nil {
+			return nil, fmt.Errorf("reading container CRC32: %w", err)
+		}
+		stored := uint32(crc[0]) | uint32(crc[1])<<8 | uint32(crc[2])<<16 | uint32(crc[3])<<24
+		if computed := h.Sum32(); computed != stored {
+			return nil, fmt.Errorf("container header CRC32 mismatch: computed %08x, stored %08x", computed, stored)
+		}
 	}
 
 	return &containerHeader{
@@ -142,4 +159,10 @@ func readContainerHeader(r io.Reader) (*containerHeader, error) {
 		NumBlocks:     numBlocks,
 		Landmarks:     landmarks,
 	}, nil
+}
+
+// hash32 is the interface satisfied by crc32.Hash.
+type hash32 interface {
+	io.Writer
+	Sum32() uint32
 }

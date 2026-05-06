@@ -44,10 +44,16 @@ type block struct {
 }
 
 // readBlock reads and decompresses a single CRAM block.
-func readBlock(r io.Reader) (*block, error) {
-	// Tee all reads through a CRC32 hash for validation.
-	h := crc32.NewIEEE()
-	tr := io.TeeReader(r, h)
+func readBlock(r io.Reader, majorVersion byte) (*block, error) {
+	// v3+ uses CRC32 on blocks.
+	var tr io.Reader
+	var h hash32
+	if majorVersion >= 3 {
+		h = crc32.NewIEEE()
+		tr = io.TeeReader(r, h)
+	} else {
+		tr = r
+	}
 
 	// Read method byte.
 	var buf [1]byte
@@ -86,14 +92,16 @@ func readBlock(r io.Reader) (*block, error) {
 		return nil, fmt.Errorf("reading block data (%d bytes): %w", compSize, err)
 	}
 
-	// Read and validate CRC32 (read from original reader, not the tee).
-	var crcBuf [4]byte
-	if _, err := io.ReadFull(r, crcBuf[:]); err != nil {
-		return nil, fmt.Errorf("reading block CRC32: %w", err)
-	}
-	stored := uint32(crcBuf[0]) | uint32(crcBuf[1])<<8 | uint32(crcBuf[2])<<16 | uint32(crcBuf[3])<<24
-	if computed := h.Sum32(); computed != stored {
-		return nil, fmt.Errorf("block CRC32 mismatch: computed %08x, stored %08x", computed, stored)
+	// v3+ has CRC32 after the block data.
+	if majorVersion >= 3 {
+		var crcBuf [4]byte
+		if _, err := io.ReadFull(r, crcBuf[:]); err != nil {
+			return nil, fmt.Errorf("reading block CRC32: %w", err)
+		}
+		stored := uint32(crcBuf[0]) | uint32(crcBuf[1])<<8 | uint32(crcBuf[2])<<16 | uint32(crcBuf[3])<<24
+		if computed := h.Sum32(); computed != stored {
+			return nil, fmt.Errorf("block CRC32 mismatch: computed %08x, stored %08x", computed, stored)
+		}
 	}
 
 	// Decompress.
