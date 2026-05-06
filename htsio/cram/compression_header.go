@@ -135,17 +135,18 @@ func (ch *compressionHeader) readPreservationMap(r io.Reader) error {
 // parseSubstitutionMatrix decodes the 5-byte substitution matrix.
 // Each byte encodes 4 substitution bases (2 bits each) for ref base A, C, G, T, N.
 func (ch *compressionHeader) parseSubstitutionMatrix(sm [5]byte) {
+	// Each byte encodes 4 substitution base assignments for one reference base.
+	// The 2-bit fields specify which substitution code (0-3) each alternate base
+	// is assigned to. For ref A, others are C,G,T,N in that order.
+	// htslib: matrix[refIdx][(byte>>6)&3] = first_other, etc.
 	bases := [5]byte{'A', 'C', 'G', 'T', 'N'}
 	for i := 0; i < 5; i++ {
-		refBase := bases[i]
+		others := otherBases(bases[i])
 		b := sm[i]
-		// Each 2-bit field encodes the priority of substitution bases
-		// The order is: bases excluding refBase, indexed by 2-bit code
-		others := otherBases(refBase)
-		ch.substitutionMatrix[i][0] = others[(b>>6)&3]
-		ch.substitutionMatrix[i][1] = others[(b>>4)&3]
-		ch.substitutionMatrix[i][2] = others[(b>>2)&3]
-		ch.substitutionMatrix[i][3] = others[b&3]
+		ch.substitutionMatrix[i][(b>>6)&3] = others[0]
+		ch.substitutionMatrix[i][(b>>4)&3] = others[1]
+		ch.substitutionMatrix[i][(b>>2)&3] = others[2]
+		ch.substitutionMatrix[i][(b>>0)&3] = others[3]
 	}
 }
 

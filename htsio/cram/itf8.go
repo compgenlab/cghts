@@ -48,12 +48,12 @@ func readITF8(r io.Reader) (int32, error) {
 		return int32(first&0x0f)<<24 | int32(buf[0])<<16 | int32(buf[1])<<8 | int32(buf[2]), nil
 	}
 
-	// 11110000 — full 32-bit value
+	// 1111xxxx — 5 bytes: 4 bits from first byte + 8+8+8+4 from next 4 bytes = 32 bits
 	var buf [4]byte
 	if _, err := io.ReadFull(r, buf[:]); err != nil {
 		return 0, err
 	}
-	return int32(buf[0])<<24 | int32(buf[1])<<16 | int32(buf[2])<<8 | int32(buf[3]), nil
+	return int32(first&0x0f)<<28 | int32(buf[0])<<20 | int32(buf[1])<<12 | int32(buf[2])<<4 | int32(buf[3]&0x0f), nil
 }
 
 // readLTF8 reads an LTF8-encoded int64 from a byte stream.
@@ -256,5 +256,5 @@ func (br *bitReader) readITF8() (int32, error) {
 	if err != nil {
 		return 0, err
 	}
-	return int32(b1)<<24 | int32(b2)<<16 | int32(b3)<<8 | int32(b4), nil
+	return int32(first&0x0f)<<28 | int32(b1)<<20 | int32(b2)<<12 | int32(b3)<<4 | int32(b4&0x0f), nil
 }

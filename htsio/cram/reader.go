@@ -187,7 +187,17 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 
 		// Convert to SamRecords and yield.
 		for i := range records {
-			samRec := cr.cramToSam(&records[i], compHdr, refSeq)
+			recRefSeq := refSeq
+			// For multi-ref slices, load the correct reference per record.
+			if sh.refSeqID == -2 && cr.refProv != nil && records[i].refID >= 0 {
+				if int(records[i].refID) < len(cr.refs) {
+					rn := cr.refs[records[i].refID].name
+					if seq, err := cr.refProv.getSequence(rn); err == nil {
+						recRefSeq = seq
+					}
+				}
+			}
+			samRec := cr.cramToSam(&records[i], compHdr, recRefSeq)
 			if !yield(samRec, nil) {
 				return false
 			}

@@ -178,7 +178,7 @@ func readFreqTableOrder0(data []byte) ([256]ransDecSymbol, uint32, int, error) {
 		cumTotal += freq
 
 		// Advance to next symbol.
-		if rle == 0 && pos < len(data) && data[pos] == byte(j+1) {
+		if rle == 0 && j < 255 && pos < len(data) && data[pos] == byte(j+1) {
 			// Consecutive symbol — read run length.
 			j = int(data[pos])
 			pos++
@@ -272,7 +272,7 @@ func decodeRansOrder1(data []byte) ([]byte, error) {
 			syms[ctxI][j] = ransDecSymbol{cumFreq: cumTotal, freq: freq}
 			cumTotal += freq
 
-			if rle == 0 && pos < len(data) && data[pos] == byte(j+1) {
+			if rle == 0 && j < 255 && pos < len(data) && data[pos] == byte(j+1) {
 				j = int(data[pos])
 				pos++
 				if pos >= len(data) {
@@ -299,7 +299,7 @@ func decodeRansOrder1(data []byte) ([]byte, error) {
 		luts[ctxI] = buildCumLUT(syms[ctxI])
 
 		// Advance to next context.
-		if rleCtx == 0 && pos < len(data) && data[pos] == byte(ctxI+1) {
+		if rleCtx == 0 && ctxI < 255 && pos < len(data) && data[pos] == byte(ctxI+1) {
 			ctxI = int(data[pos])
 			pos++
 			if pos >= len(data) {
