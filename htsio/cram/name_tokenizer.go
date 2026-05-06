@@ -10,21 +10,21 @@ import (
 // Decompresses read names that have been tokenized and entropy-coded.
 // Based on the htscodecs tokenise_name3.c reference implementation.
 
-// Token types.
+// Token types — must match the enum order in htscodecs tokenise_name3.c.
 const (
 	tokType    = 0  // token type descriptor
 	tokAlpha   = 1  // alphabetic string
 	tokChar    = 2  // single character
 	tokDigits0 = 3  // zero-padded integer
-	tokDigits  = 4  // variable-width integer
-	tokDDelta0 = 5  // delta of zero-padded integer
-	tokDDelta  = 6  // delta of variable-width integer
-	tokMatch   = 7  // copy token from previous name
-	tokNop     = 8  // no-op
-	tokEnd     = 9  // end of name
-	tokDup     = 10 // duplicate entire previous name
-	tokDiff    = 11 // different from previous
-	tokDZLen   = 12 // zero-pad length for DIGITS0/DDELTA0
+	tokDZLen   = 4  // zero-pad length for DIGITS0/DDELTA0
+	tokDup     = 5  // duplicate entire previous name
+	tokDiff    = 6  // different from previous
+	tokDigits  = 7  // variable-width integer
+	tokDDelta  = 8  // delta of variable-width integer
+	tokDDelta0 = 9  // delta of zero-padded integer
+	tokMatch   = 10 // copy token from previous name
+	tokNop     = 11 // no-op
+	tokEnd     = 12 // end of name
 )
 
 const maxTokens = 128
