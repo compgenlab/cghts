@@ -20,30 +20,30 @@ const (
 	codecGamma        = 9
 )
 
-// codec is the interface for all CRAM encoding codecs.
+// dataCodec is the interface for all CRAM data series encoding codecs.
 // Each codec reads values from either the core bit stream or external blocks.
-type codec interface{}
+type dataCodec interface{}
 
 // intCodec decodes integer values.
 type intCodec interface {
-	codec
+	dataCodec
 	decodeInt(core *bitReader, external map[int32][]byte, extPos map[int32]*int) (int32, error)
 }
 
 // byteCodec decodes single byte values.
 type byteCodec interface {
-	codec
+	dataCodec
 	decodeByte(core *bitReader, external map[int32][]byte, extPos map[int32]*int) (byte, error)
 }
 
 // byteArrayCodec decodes byte array values.
 type byteArrayCodec interface {
-	codec
+	dataCodec
 	decodeByteArray(core *bitReader, external map[int32][]byte, extPos map[int32]*int) ([]byte, error)
 }
 
 // readEncoding reads an encoding descriptor and returns the appropriate codec.
-func readEncoding(r io.Reader) (codec, error) {
+func readEncoding(r io.Reader) (dataCodec, error) {
 	codecID, err := readITF8(r)
 	if err != nil {
 		return nil, fmt.Errorf("reading codec ID: %w", err)
@@ -384,8 +384,8 @@ func (c *gammaCodec) decodeInt(core *bitReader, external map[int32][]byte, extPo
 
 // byteArrayLenCodec: byte array with explicit length.
 type byteArrayLenCodec struct {
-	lenCodec codec
-	valCodec codec
+	lenCodec dataCodec
+	valCodec dataCodec
 }
 
 func readByteArrayLenCodec(r io.Reader) (*byteArrayLenCodec, error) {

@@ -16,10 +16,10 @@ type compressionHeader struct {
 	tagDictionary      [][]tagKey // list of tag combos; each combo is a list of tag keys
 
 	// Data series encoding map
-	dataSeriesEncodings map[string]codec
+	dataSeriesEncodings map[string]dataCodec
 
 	// Tag encoding map
-	tagEncodings map[int32]codec
+	tagEncodings map[int32]dataCodec
 }
 
 // tagKey represents a tag ID (2 chars) and its type (1 char), e.g. "RG" + 'Z'.
@@ -36,8 +36,8 @@ func tagKeyToITF8(tk tagKey) int32 {
 func readCompressionHeader(data []byte) (*compressionHeader, error) {
 	r := bytes.NewReader(data)
 	ch := &compressionHeader{
-		dataSeriesEncodings: make(map[string]codec),
-		tagEncodings:        make(map[int32]codec),
+		dataSeriesEncodings: make(map[string]dataCodec),
+		tagEncodings:        make(map[int32]dataCodec),
 	}
 
 	// Preservation map

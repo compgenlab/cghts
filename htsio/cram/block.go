@@ -8,7 +8,7 @@ import (
 	"hash/crc32"
 	"io"
 
-	htscodec "github.com/compgen-io/cgltk/htsio/codec"
+	"github.com/compgen-io/cgltk/htsio/codec"
 	"github.com/ulikunitz/xz/lzma"
 )
 
@@ -143,15 +143,15 @@ func decompressBlock(method byte, data []byte, rawSize int32) ([]byte, error) {
 	case blockMethodLzma:
 		return decompressLzma(data)
 	case blockMethodRans4x8:
-		return htscodec.DecodeRans4x8(data)
+		return codec.DecodeRans4x8(data)
 	case blockMethodRans4x16:
-		return htscodec.DecodeRansNx16(data)
+		return codec.DecodeRansNx16(data)
 	case blockMethodAdaptive:
-		return htscodec.DecodeArithDynamic(data)
+		return codec.DecodeArithDynamic(data)
 	case blockMethodFqzcomp:
-		return htscodec.DecodeFqzcomp(data)
+		return codec.DecodeFqzcomp(data)
 	case blockMethodNameTok:
-		return htscodec.DecodeNameTokenizer(data)
+		return codec.DecodeNameTokenizer(data)
 	default:
 		name, ok := methodNames[method]
 		if !ok {
