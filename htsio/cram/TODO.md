@@ -15,8 +15,8 @@
 ### CRAM v3.1 codec support
 - [x] rANS Nx16 (method 5) — order-0 and order-1 working, with 4-way and 32-way (X32) interleaving
 - [x] Name tokenizer (method 8) — fixed enum ordering, passes 200-read test
-- [ ] fqzcomp (method 7) — quality score compression, not yet implemented. Note: samtools uses rANS Nx16 (not fqzcomp) for quality scores with synthetic data; fqzcomp may only be used with real sequencing data patterns.
-- [ ] Adaptive arithmetic coder (method 6) — rarely used, low priority
+- [x] fqzcomp (method 7) — quality score compression decoder, verified with htscodecs test vectors
+- [x] Adaptive arithmetic coder (method 6) — order-0, order-1, with RLE/PACK/STRIPE/CAT transforms, verified with htscodecs test vectors
 
 ### Not needed for merge
 - [ ] Tag round-trip testing (deferred)

@@ -145,6 +145,10 @@ func decompressBlock(method byte, data []byte, rawSize int32) ([]byte, error) {
 		return decodeRans4x8(data)
 	case blockMethodRans4x16:
 		return decodeRansNx16(data)
+	case blockMethodAdaptive:
+		return decodeArithDynamic(data)
+	case blockMethodFqzcomp:
+		return decodeFqzcomp(data)
 	case blockMethodNameTok:
 		return decodeNameTokenizer(data)
 	default:
