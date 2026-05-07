@@ -1,13 +1,18 @@
-package htsio
+package htsio_test
 
 import (
 	"testing"
+
+	"github.com/compgen-io/cgltk/htsio"
+	_ "github.com/compgen-io/cgltk/htsio/bam"
+	_ "github.com/compgen-io/cgltk/htsio/cram"
+	_ "github.com/compgen-io/cgltk/htsio/sam"
 )
 
 const testBAMPath = "testdata/test.bam"
 
 func TestBamQuerySingleResult(t *testing.T) {
-	reader, err := NewSamReader(testBAMPath)
+	reader, err := htsio.NewSamReader(testBAMPath)
 	if err != nil {
 		t.Fatalf("NewSamReader: %v", err)
 	}
@@ -32,7 +37,7 @@ func TestBamQuerySingleResult(t *testing.T) {
 }
 
 func TestBamQueryMultipleResults(t *testing.T) {
-	reader, err := NewSamReader(testBAMPath)
+	reader, err := htsio.NewSamReader(testBAMPath)
 	if err != nil {
 		t.Fatalf("NewSamReader: %v", err)
 	}
@@ -57,7 +62,7 @@ func TestBamQueryMultipleResults(t *testing.T) {
 }
 
 func TestBamQueryNoResults(t *testing.T) {
-	reader, err := NewSamReader(testBAMPath)
+	reader, err := htsio.NewSamReader(testBAMPath)
 	if err != nil {
 		t.Fatalf("NewSamReader: %v", err)
 	}
@@ -81,7 +86,7 @@ func TestBamQueryNoResults(t *testing.T) {
 }
 
 func TestBamQueryUnknownRef(t *testing.T) {
-	reader, err := NewSamReader(testBAMPath)
+	reader, err := htsio.NewSamReader(testBAMPath)
 	if err != nil {
 		t.Fatalf("NewSamReader: %v", err)
 	}
@@ -94,7 +99,7 @@ func TestBamQueryUnknownRef(t *testing.T) {
 }
 
 func TestBamQueryMultipleQueries(t *testing.T) {
-	reader, err := NewSamReader(testBAMPath)
+	reader, err := htsio.NewSamReader(testBAMPath)
 	if err != nil {
 		t.Fatalf("NewSamReader: %v", err)
 	}
@@ -135,7 +140,7 @@ func TestBamQueryMultipleQueries(t *testing.T) {
 }
 
 func TestBamQueryChr2(t *testing.T) {
-	reader, err := NewSamReader(testBAMPath)
+	reader, err := htsio.NewSamReader(testBAMPath)
 	if err != nil {
 		t.Fatalf("NewSamReader: %v", err)
 	}
@@ -160,7 +165,7 @@ func TestBamQueryChr2(t *testing.T) {
 }
 
 func TestBamQueryHeader(t *testing.T) {
-	reader, err := NewSamReader(testBAMPath)
+	reader, err := htsio.NewSamReader(testBAMPath)
 	if err != nil {
 		t.Fatalf("NewSamReader: %v", err)
 	}

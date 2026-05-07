@@ -1,4 +1,4 @@
-package htsio
+package bam
 
 import (
 	"container/heap"
@@ -7,39 +7,49 @@ import (
 	"os"
 	"sort"
 	"sync"
+
+	"github.com/compgen-io/cgltk/htsio"
 )
 
 const (
-	// defaultMaxMemory is the maximum memory (in bytes) to buffer before
-	// flushing to a temp file. ~768MB matches samtools sort default.
 	defaultMaxMemory = 768 * 1024 * 1024
 )
 
-// sortedBamWriter buffers SamRecords in memory, sorts them, and writes
+// sortedWriter buffers SamRecords in memory, sorts them, and writes
 // sorted temp BAM files. On Close, temp files are merge-sorted into the
 // final output. Supports coordinate sort and name sort.
-type sortedBamWriter struct {
+type sortedWriter struct {
 	filename  string
-	header    *SamHeader
+	header    *htsio.SamHeader
 	refs      []bamRefInfo
 	refIdx    map[string]int32
-	sortCoord bool // true for coordinate sort, false for name sort
+	sortCoord bool
 
-	tmpPrefix string   // prefix for temp file names
-	tmpFiles  []string // paths of sorted temp BAM files
-	tmpCount  int      // number of temp files created
+	tmpPrefix string
+	tmpFiles  []string
+	tmpCount  int
 
-	buf     []*SamRecord // in-memory buffer
-	bufSize int          // approximate memory usage of buf in bytes
-	maxMem  int          // max memory before flush
+	buf     []*htsio.SamRecord
+	bufSize int
+	maxMem  int
 
 	mu     sync.Mutex
 	closed bool
 	err    error
 }
 
-func newSortedBamWriter(filename string, header *SamHeader, sortCoord bool, tmpPrefix string) (*sortedBamWriter, error) {
-	sw := &sortedBamWriter{
+// NewSortedWriter creates a sorted BAM writer. If sortCoord is true, records
+// are coordinate-sorted; otherwise name-sorted.
+func NewSortedWriter(filename string, header *htsio.SamHeader, sortCoord bool, tmpPrefix ...string) (*sortedWriter, error) {
+	prefix := ""
+	if len(tmpPrefix) > 0 {
+		prefix = tmpPrefix[0]
+	}
+	return newSortedWriter(filename, header, sortCoord, prefix)
+}
+
+func newSortedWriter(filename string, header *htsio.SamHeader, sortCoord bool, tmpPrefix string) (*sortedWriter, error) {
+	sw := &sortedWriter{
 		filename:  filename,
 		header:    header,
 		sortCoord: sortCoord,
@@ -51,7 +61,6 @@ func newSortedBamWriter(filename string, header *SamHeader, sortCoord bool, tmpP
 		sw.tmpPrefix = filename + ".tmp"
 	}
 
-	// Build reference list from header.
 	if header != nil {
 		hrefs := header.References()
 		sw.refs = make([]bamRefInfo, len(hrefs))
@@ -67,9 +76,7 @@ func newSortedBamWriter(filename string, header *SamHeader, sortCoord bool, tmpP
 	return sw, nil
 }
 
-// Write buffers a record. When the buffer exceeds maxMem, it is sorted
-// and flushed to a temp BAM file.
-func (sw *sortedBamWriter) Write(rec *SamRecord) error {
+func (sw *sortedWriter) Write(rec *htsio.SamRecord) error {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
@@ -93,9 +100,7 @@ func (sw *sortedBamWriter) Write(rec *SamRecord) error {
 	return nil
 }
 
-// Close sorts and flushes any remaining buffered records, then merge-sorts
-// all temp files into the final output.
-func (sw *sortedBamWriter) Close() error {
+func (sw *sortedWriter) Close() error {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
@@ -109,7 +114,6 @@ func (sw *sortedBamWriter) Close() error {
 		return sw.err
 	}
 
-	// If everything fits in one buffer (no temp files), write directly.
 	if len(sw.tmpFiles) == 0 {
 		sw.sortBuffer()
 		if err := sw.writeBAM(sw.filename, sw.buf); err != nil {
@@ -118,7 +122,6 @@ func (sw *sortedBamWriter) Close() error {
 		return nil
 	}
 
-	// Flush remaining buffer to a temp file.
 	if len(sw.buf) > 0 {
 		if err := sw.flushBuffer(); err != nil {
 			sw.cleanup()
@@ -126,7 +129,6 @@ func (sw *sortedBamWriter) Close() error {
 		}
 	}
 
-	// Merge-sort temp files into final output.
 	if err := sw.mergeFiles(); err != nil {
 		sw.cleanup()
 		return err
@@ -136,8 +138,7 @@ func (sw *sortedBamWriter) Close() error {
 	return nil
 }
 
-// flushBuffer sorts the current buffer and writes it to a temp BAM file.
-func (sw *sortedBamWriter) flushBuffer() error {
+func (sw *sortedWriter) flushBuffer() error {
 	if len(sw.buf) == 0 {
 		return nil
 	}
@@ -157,8 +158,7 @@ func (sw *sortedBamWriter) flushBuffer() error {
 	return nil
 }
 
-// sortBuffer sorts the buffer using the configured sort order.
-func (sw *sortedBamWriter) sortBuffer() {
+func (sw *sortedWriter) sortBuffer() {
 	if sw.sortCoord {
 		sort.Slice(sw.buf, func(i, j int) bool {
 			return sw.lessCoord(sw.buf[i], sw.buf[j])
@@ -170,17 +170,14 @@ func (sw *sortedBamWriter) sortBuffer() {
 	}
 }
 
-// lessCoord implements samtools coordinate sort order:
-// unmapped (refID -1) at end, then by refID, then by pos.
-func (sw *sortedBamWriter) lessCoord(a, b *SamRecord) bool {
+func (sw *sortedWriter) lessCoord(a, b *htsio.SamRecord) bool {
 	aRef := sw.refID(a)
 	bRef := sw.refID(b)
 
-	// Unmapped reads go at the end.
 	aUnmapped := aRef == -1
 	bUnmapped := bRef == -1
 	if aUnmapped != bUnmapped {
-		return !aUnmapped // mapped before unmapped
+		return !aUnmapped
 	}
 	if aRef != bRef {
 		return aRef < bRef
@@ -188,16 +185,14 @@ func (sw *sortedBamWriter) lessCoord(a, b *SamRecord) bool {
 	return a.Pos < b.Pos
 }
 
-// lessName implements samtools name sort order: plain lexicographic
-// comparison of the read name.
-func (sw *sortedBamWriter) lessName(a, b *SamRecord) bool {
+func (sw *sortedWriter) lessName(a, b *htsio.SamRecord) bool {
 	if a.ReadName != b.ReadName {
 		return a.ReadName < b.ReadName
 	}
 	return a.Flag < b.Flag
 }
 
-func (sw *sortedBamWriter) refID(rec *SamRecord) int32 {
+func (sw *sortedWriter) refID(rec *htsio.SamRecord) int32 {
 	if rec.RefName == "*" {
 		return -1
 	}
@@ -207,9 +202,8 @@ func (sw *sortedBamWriter) refID(rec *SamRecord) int32 {
 	return -1
 }
 
-// writeBAM writes a slice of records to a BAM file.
-func (sw *sortedBamWriter) writeBAM(filename string, records []*SamRecord) error {
-	w, err := newBamWriter(filename, sw.header)
+func (sw *sortedWriter) writeBAM(filename string, records []*htsio.SamRecord) error {
+	w, err := NewWriter(filename, sw.header)
 	if err != nil {
 		return err
 	}
@@ -222,21 +216,17 @@ func (sw *sortedBamWriter) writeBAM(filename string, records []*SamRecord) error
 	return w.Close()
 }
 
-// mergeFiles performs a k-way merge of sorted temp BAM files into the
-// final output file.
-func (sw *sortedBamWriter) mergeFiles() error {
-	// Open all temp files as BAM readers.
-	readers := make([]*BamReader, len(sw.tmpFiles))
+func (sw *sortedWriter) mergeFiles() error {
+	readers := make([]*Reader, len(sw.tmpFiles))
 	for i, path := range sw.tmpFiles {
 		f, err := os.Open(path)
 		if err != nil {
-			// Close already-opened readers.
 			for j := 0; j < i; j++ {
 				readers[j].Close()
 			}
 			return fmt.Errorf("opening temp file %s: %w", path, err)
 		}
-		r, err := NewBamReader(f)
+		r, err := NewReader(f, path, nil)
 		if err != nil {
 			f.Close()
 			for j := 0; j < i; j++ {
@@ -252,16 +242,13 @@ func (sw *sortedBamWriter) mergeFiles() error {
 		}
 	}()
 
-	// Open the final output writer.
-	outWriter, err := newBamWriter(sw.filename, sw.header)
+	outWriter, err := NewWriter(sw.filename, sw.header)
 	if err != nil {
 		return err
 	}
 
-	// Convert each reader's Records() iterator into a pull function
-	// so we can pull one record at a time during the k-way merge.
 	type pullReader struct {
-		next func() (*SamRecord, error, bool)
+		next func() (*htsio.SamRecord, error, bool)
 		stop func()
 	}
 	pullers := make([]pullReader, len(readers))
@@ -275,7 +262,6 @@ func (sw *sortedBamWriter) mergeFiles() error {
 		}
 	}()
 
-	// Initialize the merge heap.
 	h := &mergeHeap{less: sw.lessCoord}
 	if !sw.sortCoord {
 		h.less = sw.lessName
@@ -300,7 +286,6 @@ func (sw *sortedBamWriter) mergeFiles() error {
 			return err
 		}
 
-		// Refill from the same reader.
 		rec, err, ok := pullers[entry.readerIdx].next()
 		if !ok {
 			continue
@@ -315,17 +300,15 @@ func (sw *sortedBamWriter) mergeFiles() error {
 	return outWriter.Close()
 }
 
-// cleanup removes all temp files.
-func (sw *sortedBamWriter) cleanup() {
+func (sw *sortedWriter) cleanup() {
 	for _, path := range sw.tmpFiles {
 		os.Remove(path)
 	}
 	sw.tmpFiles = nil
 }
 
-// estimateRecordSize returns a rough estimate of memory used by a SamRecord.
-func estimateRecordSize(rec *SamRecord) int {
-	size := 200 // base struct overhead
+func estimateRecordSize(rec *htsio.SamRecord) int {
+	size := 200
 	size += len(rec.ReadName)
 	size += len(rec.Cigar)
 	size += len(rec.Seq)
@@ -338,16 +321,14 @@ func estimateRecordSize(rec *SamRecord) int {
 	return size
 }
 
-// mergeEntry holds a record and the index of the reader it came from.
 type mergeEntry struct {
-	rec       *SamRecord
+	rec       *htsio.SamRecord
 	readerIdx int
 }
 
-// mergeHeap implements heap.Interface for k-way merge.
 type mergeHeap struct {
 	entries []*mergeEntry
-	less    func(a, b *SamRecord) bool
+	less    func(a, b *htsio.SamRecord) bool
 }
 
 func (h *mergeHeap) Len() int { return len(h.entries) }

@@ -1,6 +1,7 @@
 package cram
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"iter"
@@ -9,6 +10,20 @@ import (
 
 	"github.com/compgen-io/cgltk/htsio"
 )
+
+func init() {
+	htsio.RegisterReader(htsio.ReaderRegistration{
+		Detect: func(magic []byte) bool {
+			return bytes.HasPrefix(magic, []byte("CRAM"))
+		},
+		NewFromFile: func(filename string, opts *htsio.SamReaderOpts) (htsio.SamReader, error) {
+			return NewReader(filename, "")
+		},
+		NewFromStream: func(r io.ReadCloser, opts *htsio.SamReaderOpts) (htsio.SamReader, error) {
+			return NewReaderFromStream(r, "", "")
+		},
+	})
+}
 
 // Reader reads CRAM files and implements htsio.SamReader.
 type Reader struct {
@@ -32,23 +47,30 @@ func NewReader(filename string, refPath string) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
+	return NewReaderFromStream(f, filename, refPath)
+}
 
+// NewReaderFromStream creates a CRAM reader from an io.ReadCloser.
+// The stream must be positioned at the start of a CRAM file (possibly
+// with peeked bytes prepended). filename is used for index lookups.
+func NewReaderFromStream(rc io.ReadCloser, filename string, refPath string) (*Reader, error) {
 	cr := &Reader{
-		r:        f,
-		src:      f,
+		r:        rc,
+		src:      rc,
 		filename: filename,
 	}
 
 	// Read file definition.
+	var err error
 	cr.fileDef, err = readFileDefinition(cr.r)
 	if err != nil {
-		f.Close()
+		rc.Close()
 		return nil, fmt.Errorf("cram: %w", err)
 	}
 
 	// Read header container.
 	if err := cr.readHeaderContainer(); err != nil {
-		f.Close()
+		rc.Close()
 		return nil, fmt.Errorf("cram: reading header: %w", err)
 	}
 

@@ -4,85 +4,6 @@ import (
 	"testing"
 )
 
-func TestParseSamLine(t *testing.T) {
-	line := "read1\t0\tchr1\t100\t60\t50M\t*\t0\t0\tACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTAC\t*\tNM:i:0\tMD:Z:50"
-	rec, err := parseSamLine(line)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if rec.ReadName != "read1" {
-		t.Errorf("QName = %q, want %q", rec.ReadName, "read1")
-	}
-	if rec.Flag != 0 {
-		t.Errorf("Flag = %d, want 0", rec.Flag)
-	}
-	if rec.RefName != "chr1" {
-		t.Errorf("RName = %q, want %q", rec.RefName, "chr1")
-	}
-	if rec.Pos != 100 {
-		t.Errorf("Pos = %d, want 100", rec.Pos)
-	}
-	if rec.MapQ != 60 {
-		t.Errorf("MapQ = %d, want 60", rec.MapQ)
-	}
-	if rec.Cigar != "50M" {
-		t.Errorf("Cigar = %q, want %q", rec.Cigar, "50M")
-	}
-	if len(rec.Tags) != 2 {
-		t.Errorf("len(Tags) = %d, want 2", len(rec.Tags))
-	}
-	if nm, ok := rec.Tags["NM"]; !ok {
-		t.Error("missing NM tag")
-	} else {
-		if nm.Type != 'i' {
-			t.Errorf("NM.Type = %c, want 'i'", nm.Type)
-		}
-		if v, ok := nm.IntValue(); !ok || v != 0 {
-			t.Errorf("NM.IntValue() = %d, %v; want 0, true", v, ok)
-		}
-	}
-	if md, ok := rec.Tags["MD"]; !ok {
-		t.Error("missing MD tag")
-	} else {
-		if md.Type != 'Z' {
-			t.Errorf("MD.Type = %c, want 'Z'", md.Type)
-		}
-		if md.Value != "50" {
-			t.Errorf("MD.Value = %q, want %q", md.Value, "50")
-		}
-	}
-}
-
-func TestParseSamLineMinimalFields(t *testing.T) {
-	line := "read2\t16\tchr2\t200\t30\t30M\t*\t0\t0\tACGTACGTACGTACGTACGTACGTACGTAC\t*"
-	rec, err := parseSamLine(line)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if rec.ReadName != "read2" {
-		t.Errorf("QName = %q, want %q", rec.ReadName, "read2")
-	}
-	if rec.Flag != 16 {
-		t.Errorf("Flag = %d, want 16", rec.Flag)
-	}
-	if !rec.IsReverse() {
-		t.Error("expected IsReverse() = true")
-	}
-	if len(rec.Tags) != 0 {
-		t.Errorf("len(Tags) = %d, want 0", len(rec.Tags))
-	}
-}
-
-func TestParseSamLineTooFewFields(t *testing.T) {
-	line := "read1\t0\tchr1"
-	_, err := parseSamLine(line)
-	if err == nil {
-		t.Error("expected error for too few fields")
-	}
-}
-
 func TestSamRecordFlags(t *testing.T) {
 	rec := &SamRecord{Flag: 0x4 | 0x10 | 0x100 | 0x400 | 0x800}
 	if !rec.IsUnmapped() {
@@ -114,14 +35,14 @@ func TestSamReaderBuilder(t *testing.T) {
 		FlagFilter(0x4 | 0x100).
 		MinMapQ(20)
 
-	if opts.flagReq != 0x2 {
-		t.Errorf("flagReq = %d, want %d", opts.flagReq, 0x2)
+	if opts.FlagReqValue() != 0x2 {
+		t.Errorf("flagReq = %d, want %d", opts.FlagReqValue(), 0x2)
 	}
-	if opts.flagFilter != 0x104 {
-		t.Errorf("flagFilter = %d, want %d", opts.flagFilter, 0x104)
+	if opts.FlagFilterValue() != 0x104 {
+		t.Errorf("flagFilter = %d, want %d", opts.FlagFilterValue(), 0x104)
 	}
-	if opts.minMapQ != 20 {
-		t.Errorf("minMapQ = %d, want %d", opts.minMapQ, 20)
+	if opts.MinMapQValue() != 20 {
+		t.Errorf("minMapQ = %d, want %d", opts.MinMapQValue(), 20)
 	}
 
 }
@@ -174,29 +95,6 @@ func TestSamRecordString(t *testing.T) {
 	s := rec.String()
 	if s != "read1\t0\tchr1\t100\t60\t50M\t*\t0\t0\tACGT\tIIII" {
 		t.Errorf("String() = %q", s)
-	}
-}
-
-func TestSamWriterBuilder(t *testing.T) {
-	h := NewSamHeader()
-	w, err := NewSamWriter("out.bam", SamWriterOptions(h).CRAM("ref.fa"))
-	if err != nil {
-		t.Fatalf("NewSamWriter: %v", err)
-	}
-
-	// CRAM format goes through samtools, so we get a SamtoolsSamWriter.
-	sw, ok := w.(*SamtoolsSamWriter)
-	if !ok {
-		t.Fatalf("expected *SamtoolsSamWriter, got %T", w)
-	}
-	if sw.filename != "out.bam" {
-		t.Errorf("filename = %q, want %q", sw.filename, "out.bam")
-	}
-	if sw.opts.format != FormatCRAM {
-		t.Errorf("format = %d, want %d", sw.opts.format, FormatCRAM)
-	}
-	if sw.opts.reference != "ref.fa" {
-		t.Errorf("reference = %q, want %q", sw.opts.reference, "ref.fa")
 	}
 }
 
@@ -268,46 +166,3 @@ func TestParseRegion(t *testing.T) {
 	}
 }
 
-func TestBamReaderQuery(t *testing.T) {
-	reader, err := NewSamReader("testdata/test.bam")
-	if err != nil {
-		t.Fatalf("NewSamReader: %v", err)
-	}
-	defer reader.Close()
-
-	// Query chr1 [400, 600) — should get read2 (pos 500).
-	records, err := reader.Query("chr1", 400, 600)
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
-
-	var names []string
-	for rec, err := range records {
-		if err != nil {
-			t.Fatalf("iter: %v", err)
-		}
-		names = append(names, rec.ReadName)
-	}
-
-	if len(names) != 1 || names[0] != "read2" {
-		t.Errorf("expected [read2], got %v", names)
-	}
-
-	// Second query on same reader — should work (tests lazy index loading).
-	records, err = reader.Query("chr2", 0, 1000)
-	if err != nil {
-		t.Fatalf("Query chr2: %v", err)
-	}
-
-	names = nil
-	for rec, err := range records {
-		if err != nil {
-			t.Fatalf("iter: %v", err)
-		}
-		names = append(names, rec.ReadName)
-	}
-
-	if len(names) != 1 || names[0] != "read5" {
-		t.Errorf("expected [read5], got %v", names)
-	}
-}

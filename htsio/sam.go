@@ -1,12 +1,9 @@
 package htsio
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"iter"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -249,19 +246,9 @@ type SamReaderOpts struct {
 	tagFilters []*TagFilter
 }
 
-// SamtoolsSamReader reads SAM/BAM/CRAM files by executing samtools view.
-type SamtoolsSamReader struct {
-	filename string
-	opts     *SamReaderOpts
-	header   *SamHeader
-	cmd      *exec.Cmd
-	stdout   io.ReadCloser
-	stderr   io.ReadCloser
-	scanner  *bufio.Scanner
-	started  bool
-	nextLine string
-}
-
+// NewSamReader opens a SAM/BAM/CRAM file by auto-detecting the format
+// from magic bytes. The file is peeked to detect format, then the matched
+// reader opens its own file handle(s) directly — no nested readers.
 func NewSamReader(filename string, opts ...*SamReaderOpts) (SamReader, error) {
 	var o *SamReaderOpts
 	if len(opts) > 0 {
@@ -270,43 +257,67 @@ func NewSamReader(filename string, opts ...*SamReaderOpts) (SamReader, error) {
 		o = NewSamReaderOpts()
 	}
 
-	// Use native BAM reader for .bam files.
-	if strings.HasSuffix(filename, ".bam") {
-		f, err := os.Open(filename)
-		if err != nil {
-			return nil, err
-		}
-		return NewBamReader(f, o)
-	}
-
-	// Use native SAM text reader for .sam and .sam.gz files.
-	if strings.HasSuffix(filename, ".sam") || strings.HasSuffix(filename, ".sam.gz") {
-		return NewSamTextReader(filename, o)
-	}
-
-	// CRAM and other formats use samtools.
-	return newSamtoolsReader(filename, opts...)
-}
-
-// NewSamtoolsReader creates a SamtoolsSamReader for the given file.
-// Returns an error if samtools is not found in PATH.
-// Use the builder methods to set options before calling Next().
-func newSamtoolsReader(filename string, opts ...*SamReaderOpts) (SamReader, error) {
-	if err := checkSamtools(); err != nil {
+	reg, err := detectFromFile(filename)
+	if err != nil {
 		return nil, err
 	}
-	if len(opts) == 0 {
-		opts = []*SamReaderOpts{NewSamReaderOpts()}
+	return reg.NewFromFile(filename, o)
+}
+
+// NewSamReaderFromReader creates a SamReader from an io.ReadCloser by
+// auto-detecting the format from magic bytes. This is the stream path
+// (e.g., stdin) — peeked bytes are prepended back via MultiReader.
+// Query() is not supported on stream-based readers.
+func NewSamReaderFromReader(r io.ReadCloser, opts ...*SamReaderOpts) (SamReader, error) {
+	var o *SamReaderOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	} else {
+		o = NewSamReaderOpts()
 	}
-	return &SamtoolsSamReader{
-		filename: filename,
-		opts:     opts[0],
-	}, nil
+
+	reg, fullReader, err := detectFromStream(r)
+	if err != nil {
+		return nil, err
+	}
+	return reg.NewFromStream(fullReader, o)
 }
 
 func NewSamReaderOpts() *SamReaderOpts {
 	return &SamReaderOpts{}
 }
+
+// PassesFilters returns true if the record passes all configured filters
+// (flag required, flag filter, min mapq, and tag filters).
+func (r *SamReaderOpts) PassesFilters(rec *SamRecord) bool {
+	if r.flagReq != 0 && rec.Flag&r.flagReq != r.flagReq {
+		return false
+	}
+	if r.flagFilter != 0 && rec.Flag&r.flagFilter != 0 {
+		return false
+	}
+	if r.minMapQ != 0 && rec.MapQ < r.minMapQ {
+		return false
+	}
+	for _, f := range r.tagFilters {
+		if !f.matchesRecord(rec) {
+			return false
+		}
+	}
+	return true
+}
+
+// FlagReqValue returns the required flags value.
+func (r *SamReaderOpts) FlagReqValue() int { return r.flagReq }
+
+// FlagFilterValue returns the filter flags value.
+func (r *SamReaderOpts) FlagFilterValue() int { return r.flagFilter }
+
+// MinMapQValue returns the minimum mapping quality value.
+func (r *SamReaderOpts) MinMapQValue() int { return r.minMapQ }
+
+// ThreadsValue returns the number of threads.
+func (r *SamReaderOpts) ThreadsValue() int { return r.threads }
 
 // FlagRequired sets the required flags filter (-f). Only reads with all of these flags set are returned.
 func (r *SamReaderOpts) FlagRequired(flag int) *SamReaderOpts {
@@ -338,288 +349,6 @@ func (r *SamReaderOpts) AddTagFilter(f *TagFilter) *SamReaderOpts {
 	return r
 }
 
-func checkSamtools() error {
-	_, err := exec.LookPath("samtools")
-	if err != nil {
-		return fmt.Errorf("samtools not found in PATH: %w", err)
-	}
-	return nil
-}
-
-func (r *SamtoolsSamReader) start() error {
-	if r.started {
-		return nil
-	}
-
-	args := []string{"view", "-h"}
-	if r.opts.threads > 0 {
-		args = append(args, "--threads", strconv.Itoa(r.opts.threads))
-	}
-	if r.opts.flagReq != 0 {
-		args = append(args, "-f", strconv.Itoa(r.opts.flagReq))
-	}
-	if r.opts.flagFilter != 0 {
-		args = append(args, "-F", strconv.Itoa(r.opts.flagFilter))
-	}
-	if r.opts.minMapQ != 0 {
-		args = append(args, "-q", strconv.Itoa(r.opts.minMapQ))
-	}
-	args = append(args, r.filename)
-
-	r.cmd = exec.Command("samtools", args...)
-
-	var err error
-	r.stdout, err = r.cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("samtools stdout pipe: %w", err)
-	}
-
-	r.stderr, err = r.cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("samtools stderr pipe: %w", err)
-	}
-
-	if err := r.cmd.Start(); err != nil {
-		return fmt.Errorf("samtools start: %w", err)
-	}
-
-	r.scanner = bufio.NewScanner(r.stdout)
-	r.scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // up to 10MB lines
-	r.started = true
-	r.populateHeader()
-	return nil
-}
-
-// Header returns the parsed SAM header. The header is populated on the first
-// call to Next(), so this will return nil before any records have been read.
-func (r *SamtoolsSamReader) Header() (*SamHeader, error) {
-	if err := r.start(); err != nil {
-		return nil, err
-	}
-	return r.header, nil
-}
-
-func (r *SamtoolsSamReader) populateHeader() {
-	for r.scanner.Scan() {
-		line := r.scanner.Text()
-		if strings.HasPrefix(line, "@") {
-			if r.header == nil {
-				r.header = NewSamHeader()
-			}
-			r.header.AddLine(line)
-			continue
-		}
-		r.nextLine = line
-		return
-	}
-}
-
-// Records returns an iterator over all records from the samtools process.
-func (r *SamtoolsSamReader) Records() iter.Seq2[*SamRecord, error] {
-	return func(yield func(*SamRecord, error) bool) {
-		if err := r.start(); err != nil {
-			yield(nil, err)
-			return
-		}
-
-		if r.nextLine != "" {
-			rec, err := parseSamLine(r.nextLine)
-			r.nextLine = ""
-			if err != nil {
-				yield(nil, fmt.Errorf("parse SAM: %w", err))
-				return
-			}
-			if r.passesTagFilters(rec) {
-				if !yield(rec, nil) {
-					return
-				}
-			}
-		}
-
-		for r.scanner.Scan() {
-			line := r.scanner.Text()
-			if strings.HasPrefix(line, "@") {
-				if r.header == nil {
-					r.header = NewSamHeader()
-				}
-				r.header.AddLine(line)
-				continue
-			}
-			rec, err := parseSamLine(line)
-			if err != nil {
-				yield(nil, fmt.Errorf("parse SAM: %w", err))
-				return
-			}
-			if r.passesTagFilters(rec) {
-				if !yield(rec, nil) {
-					return
-				}
-			}
-		}
-
-		if err := r.scanner.Err(); err != nil {
-			yield(nil, fmt.Errorf("samtools read: %w", err))
-			return
-		}
-	}
-}
-
-// passesTagFilters returns true if the record passes all tag filters.
-func (r *SamtoolsSamReader) passesTagFilters(rec *SamRecord) bool {
-	for _, f := range r.opts.tagFilters {
-		if !f.matchesRecord(rec) {
-			return false
-		}
-	}
-	return true
-}
-
-// Close waits for the samtools process to finish and releases resources.
-func (r *SamtoolsSamReader) Close() error {
-	if !r.started {
-		return nil
-	}
-	if r.stdout != nil {
-		r.stdout.Close()
-	}
-	if r.stderr != nil {
-		io.ReadAll(r.stderr)
-		r.stderr.Close()
-	}
-	if r.cmd != nil {
-		return r.cmd.Wait()
-	}
-	return nil
-}
-
-// Query spawns a new samtools view process with the given region and
-// returns an iterator over matching records. The region is converted
-// from 0-based half-open to the samtools format (1-based inclusive).
-func (r *SamtoolsSamReader) Query(ref string, start, end int) (iter.Seq2[*SamRecord, error], error) {
-	// Convert 0-based half-open [start, end) to samtools 1-based region string.
-	region := fmt.Sprintf("%s:%d-%d", ref, start+1, end)
-
-	opts := &SamReaderOpts{}
-	if r.opts != nil {
-		*opts = *r.opts
-	}
-
-	sr := &SamtoolsSamReader{
-		filename: r.filename,
-		opts:     opts,
-	}
-
-	args := []string{"view", "-h"}
-	if opts.threads > 0 {
-		args = append(args, "--threads", strconv.Itoa(opts.threads))
-	}
-	if opts.flagReq != 0 {
-		args = append(args, "-f", strconv.Itoa(opts.flagReq))
-	}
-	if opts.flagFilter != 0 {
-		args = append(args, "-F", strconv.Itoa(opts.flagFilter))
-	}
-	if opts.minMapQ != 0 {
-		args = append(args, "-q", strconv.Itoa(opts.minMapQ))
-	}
-	args = append(args, r.filename, region)
-
-	sr.cmd = exec.Command("samtools", args...)
-
-	var err error
-	sr.stdout, err = sr.cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("samtools stdout pipe: %w", err)
-	}
-	sr.stderr, err = sr.cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("samtools stderr pipe: %w", err)
-	}
-	if err := sr.cmd.Start(); err != nil {
-		return nil, fmt.Errorf("samtools start: %w", err)
-	}
-
-	sr.scanner = bufio.NewScanner(sr.stdout)
-	sr.scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
-	sr.started = true
-	sr.populateHeader()
-
-	return func(yield func(*SamRecord, error) bool) {
-		defer sr.Close()
-		for rec, err := range sr.Records() {
-			if !yield(rec, err) {
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
-	}, nil
-}
-
-func parseSamLine(line string) (*SamRecord, error) {
-	fields := strings.SplitN(line, "\t", 12)
-	if len(fields) < 11 {
-		return nil, fmt.Errorf("expected at least 11 fields, got %d", len(fields))
-	}
-
-	flag, err := strconv.Atoi(fields[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid flag %q: %w", fields[1], err)
-	}
-
-	pos, err := strconv.Atoi(fields[3])
-	if err != nil {
-		return nil, fmt.Errorf("invalid pos %q: %w", fields[3], err)
-	}
-
-	mapq, err := strconv.Atoi(fields[4])
-	if err != nil {
-		return nil, fmt.Errorf("invalid mapq %q: %w", fields[4], err)
-	}
-
-	pnext, err := strconv.Atoi(fields[7])
-	if err != nil {
-		return nil, fmt.Errorf("invalid pnext %q: %w", fields[7], err)
-	}
-
-	tlen, err := strconv.Atoi(fields[8])
-	if err != nil {
-		return nil, fmt.Errorf("invalid tlen %q: %w", fields[8], err)
-	}
-
-	rec := &SamRecord{
-		ReadName:  fields[0],
-		Flag:      flag,
-		RefName:   fields[2],
-		Pos:       pos,
-		MapQ:      mapq,
-		Cigar:     fields[5],
-		RefNext:   fields[6],
-		PosNext:   pnext,
-		InsertLen: tlen,
-		Seq:       fields[9],
-		Qual:      fields[10],
-		Tags:      make(map[string]SamTag),
-	}
-
-	if len(fields) > 11 {
-		for _, raw := range strings.Split(fields[11], "\t") {
-			parts := strings.SplitN(raw, ":", 3)
-			if len(parts) != 3 {
-				continue
-			}
-			tag := parts[0]
-			rec.Tags[tag] = SamTag{
-				Type:  parts[1][0],
-				Value: parts[2],
-			}
-			rec.TagOrder = append(rec.TagOrder, tag)
-		}
-	}
-
-	return rec, nil
-}
 
 // CigarRefLen returns the number of reference bases consumed by a CIGAR string.
 // Operations M, D, N, =, X consume reference; I, S, H, P do not.
