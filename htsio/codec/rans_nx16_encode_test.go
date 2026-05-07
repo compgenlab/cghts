@@ -1,4 +1,4 @@
-package cram
+package codec
 
 import (
 	"bytes"
@@ -35,8 +35,8 @@ func TestRansNx16Order0Roundtrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			encoded := encodeRansNx16(tt.data)
-			decoded, err := decodeRansNx16(encoded)
+			encoded := EncodeRansNx16(tt.data)
+			decoded, err := DecodeRansNx16(encoded)
 			if err != nil {
 				t.Fatalf("decode error: %v\n  encoded (%d bytes): %v", err, len(encoded), encoded[:min16(50, len(encoded))])
 			}
@@ -64,8 +64,8 @@ func TestRansNx16PackRoundtrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			encoded := encodeRansNx16(tt.data)
-			decoded, err := decodeRansNx16(encoded)
+			encoded := EncodeRansNx16(tt.data)
+			decoded, err := DecodeRansNx16(encoded)
 			if err != nil {
 				t.Fatalf("decode error: %v", err)
 			}

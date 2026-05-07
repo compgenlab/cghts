@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/compgen-io/cgltk/htsio"
+	htscodec "github.com/compgen-io/cgltk/htsio/codec"
 )
 
 // Version identifies a CRAM version for the writer.
@@ -1169,8 +1170,8 @@ func (cw *Writer) encodeBlock(contentType byte, contentID int32, method byte, da
 		}
 	case blockMethodRans4x8:
 		// Try order-0 and order-1, pick the smaller.
-		enc0 := encodeRans4x8(data, 0)
-		enc1 := encodeRans4x8(data, 1)
+		enc0 := htscodec.EncodeRans4x8(data, 0)
+		enc1 := htscodec.EncodeRans4x8(data, 1)
 		if len(enc1) < len(enc0) {
 			compData = enc1
 		} else {
@@ -1181,7 +1182,7 @@ func (cw *Writer) encodeBlock(contentType byte, contentID int32, method byte, da
 			compData = data
 		}
 	case blockMethodRans4x16:
-		compData = encodeRansNx16(data)
+		compData = htscodec.EncodeRansNx16(data)
 		if len(compData) >= len(data) {
 			method = blockMethodRaw
 			compData = data

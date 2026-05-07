@@ -1,4 +1,4 @@
-package cram
+package codec
 
 import (
 	"encoding/binary"
@@ -16,7 +16,7 @@ type ransEncSymbol struct {
 
 // encodeRans4x8 compresses data using rANS 4x8 codec.
 // order is 0 or 1. Returns the compressed data including the order byte prefix.
-func encodeRans4x8(data []byte, order int) []byte {
+func EncodeRans4x8(data []byte, order int) []byte {
 	if order == 1 {
 		return encodeRansOrder1(data)
 	}

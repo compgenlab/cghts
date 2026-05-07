@@ -1,4 +1,4 @@
-package cram
+package codec
 
 import (
 	"encoding/binary"
@@ -41,7 +41,7 @@ func varPutU32Slice(out []byte, val uint32) []byte {
 
 // encodeRansNx16 encodes data using rANS Nx16 codec.
 // Returns compressed data including flags byte prefix.
-func encodeRansNx16(data []byte) []byte {
+func EncodeRansNx16(data []byte) []byte {
 	if len(data) == 0 {
 		return []byte{0, 0}
 	}

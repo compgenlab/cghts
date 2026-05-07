@@ -1,4 +1,4 @@
-package cram
+package codec
 
 import (
 	"encoding/binary"
@@ -27,7 +27,7 @@ const (
 	ransNx16TotFreq = 1 << ransNx16TFShift
 )
 
-func decodeRansNx16(data []byte) ([]byte, error) {
+func DecodeRansNx16(data []byte) ([]byte, error) {
 	return decodeRansNx16WithSize(data, 0)
 }
 

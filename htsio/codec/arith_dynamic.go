@@ -1,7 +1,10 @@
-package cram
+package codec
 
 import (
+	"bytes"
+	"compress/bzip2"
 	"fmt"
+	"io"
 )
 
 // Adaptive arithmetic coder (CRAM v3.1 method 6).
@@ -21,7 +24,7 @@ const (
 
 const arithMaxRun = 4
 
-func decodeArithDynamic(data []byte) ([]byte, error) {
+func DecodeArithDynamic(data []byte) ([]byte, error) {
 	return decodeArithDynamicWithSize(data, 0)
 }
 
@@ -91,7 +94,7 @@ func decodeArithDynamicWithSize(data []byte, expectedSize uint32) ([]byte, error
 	} else if doExt {
 		// External compression (bzip2).
 		var err error
-		tmp1, err = decompressBzip2(data)
+		tmp1, err = io.ReadAll(bzip2.NewReader(bytes.NewReader(data)))
 		if err != nil {
 			return nil, fmt.Errorf("arith: ext decompress: %w", err)
 		}

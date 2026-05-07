@@ -1,4 +1,4 @@
-package cram
+package codec
 
 import (
 	"fmt"
@@ -87,7 +87,7 @@ type fqzModels struct {
 	dup     *simpleModel
 }
 
-func decodeFqzcomp(data []byte) ([]byte, error) {
+func DecodeFqzcomp(data []byte) ([]byte, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("fqzcomp: data too short")
 	}

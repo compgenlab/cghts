@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os"
 	"testing"
+
+	htscodec "github.com/compgen-io/cgltk/htsio/codec"
 )
 
 // stripNewlines removes all 0x0a bytes from data.
@@ -41,9 +43,9 @@ func TestArithDecompress(t *testing.T) {
 			}
 			raw = stripNewlines(raw)
 
-			decoded, err := decodeArithDynamic(comp)
+			decoded, err := htscodec.DecodeArithDynamic(comp)
 			if err != nil {
-				t.Fatalf("decodeArithDynamic failed: %v", err)
+				t.Fatalf("htscodec.DecodeArithDynamic failed: %v", err)
 			}
 
 			if !bytes.Equal(decoded, raw) {
@@ -87,9 +89,9 @@ func TestFqzcompDecompress(t *testing.T) {
 				raw[i] -= 33
 			}
 
-			decoded, err := decodeFqzcomp(comp)
+			decoded, err := htscodec.DecodeFqzcomp(comp)
 			if err != nil {
-				t.Fatalf("decodeFqzcomp failed: %v", err)
+				t.Fatalf("htscodec.DecodeFqzcomp failed: %v", err)
 			}
 
 			if !bytes.Equal(decoded, raw) {

@@ -1,4 +1,4 @@
-package cram
+package codec
 
 import (
 	"encoding/binary"
@@ -21,7 +21,7 @@ type ransDecSymbol struct {
 	freq    uint32 // symbol frequency
 }
 
-func decodeRans4x8(data []byte) ([]byte, error) {
+func DecodeRans4x8(data []byte) ([]byte, error) {
 	if len(data) < 1 {
 		return nil, fmt.Errorf("rans: empty data")
 	}

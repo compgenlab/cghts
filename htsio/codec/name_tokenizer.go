@@ -1,4 +1,4 @@
-package cram
+package codec
 
 import (
 	"encoding/binary"
@@ -54,7 +54,7 @@ type descriptor struct {
 	pos  int
 }
 
-func decodeNameTokenizer(data []byte) ([]byte, error) {
+func DecodeNameTokenizer(data []byte) ([]byte, error) {
 	if len(data) < 9 {
 		return nil, fmt.Errorf("tok3: data too short")
 	}
@@ -157,7 +157,7 @@ func decodeNameTokenizer(data []byte) ([]byte, error) {
 
 		// Decompress using rANS Nx16.
 		compData := data[o : o+int(clen)]
-		decompressed, err := decodeRansNx16(compData)
+		decompressed, err := DecodeRansNx16(compData)
 		if err != nil {
 			return nil, fmt.Errorf("tok3: decompressing descriptor %d: %w", idx, err)
 		}

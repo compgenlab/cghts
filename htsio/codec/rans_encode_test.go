@@ -1,4 +1,4 @@
-package cram
+package codec
 
 import (
 	"bytes"
@@ -60,10 +60,10 @@ func TestRansOrder0Roundtrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			encoded := encodeRans4x8(tt.data, 0)
+			encoded := EncodeRans4x8(tt.data, 0)
 
 			// Decode using existing decoder (skip the order byte prefix).
-			decoded, err := decodeRans4x8(encoded)
+			decoded, err := DecodeRans4x8(encoded)
 			if err != nil {
 				t.Fatalf("decode error: %v", err)
 			}
@@ -113,9 +113,9 @@ func TestRansOrder1Roundtrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			encoded := encodeRans4x8(tt.data, 1)
+			encoded := EncodeRans4x8(tt.data, 1)
 
-			decoded, err := decodeRans4x8(encoded)
+			decoded, err := DecodeRans4x8(encoded)
 			if err != nil {
 				t.Fatalf("decode error: %v", err)
 			}
@@ -134,7 +134,7 @@ func TestRansOrder1Roundtrip(t *testing.T) {
 func TestRansCompression(t *testing.T) {
 	// Test that rANS actually compresses well-suited data.
 	data := bytes.Repeat([]byte("ACGT"), 1000)
-	encoded := encodeRans4x8(data, 0)
+	encoded := EncodeRans4x8(data, 0)
 	ratio := float64(len(encoded)) / float64(len(data))
 	t.Logf("order-0: %d -> %d (%.1f%%)", len(data), len(encoded), ratio*100)
 
@@ -142,7 +142,7 @@ func TestRansCompression(t *testing.T) {
 		t.Errorf("order-0 compression ratio too high: %.1f%%", ratio*100)
 	}
 
-	encoded1 := encodeRans4x8(data, 1)
+	encoded1 := EncodeRans4x8(data, 1)
 	ratio1 := float64(len(encoded1)) / float64(len(data))
 	t.Logf("order-1: %d -> %d (%.1f%%)", len(data), len(encoded1), ratio1*100)
 }

@@ -1,4 +1,4 @@
-package cram
+package codec
 
 // Adaptive simple frequency model for use with the range coder.
 // Based on the htscodecs c_simple_model.h reference implementation.

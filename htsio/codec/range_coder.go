@@ -1,4 +1,4 @@
-package cram
+package codec
 
 // Range coder for adaptive arithmetic coding (used by arith_dynamic and fqzcomp).
 // Based on Eugene Shelwien's public domain range coder, as used in htscodecs.
