@@ -1107,20 +1107,42 @@ func (cw *Writer) serializeSliceHeader(sh *sliceHeader) []byte {
 	return buf.Bytes()
 }
 
-// compressAndEncodeBlock compresses data using the configured methods and picks the best.
+// compressAndEncodeBlock compresses data using multiple methods and picks the smallest.
 func (cw *Writer) compressAndEncodeBlock(contentType byte, contentID int32, data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return cw.encodeBlock(contentType, contentID, blockMethodRaw, data)
 	}
 
-	// For now (Phase 1), just use gzip.
-	return cw.encodeBlock(contentType, contentID, blockMethodGzip, data)
+	// Try raw.
+	best, err := cw.encodeBlock(contentType, contentID, blockMethodRaw, data)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try gzip.
+	if candidate, err := cw.encodeBlock(contentType, contentID, blockMethodGzip, data); err == nil {
+		if len(candidate) < len(best) {
+			best = candidate
+		}
+	}
+
+	// Try rANS 4x8 (v3.0+).
+	if cw.majorVersion() >= 3 {
+		if candidate, err := cw.encodeBlock(contentType, contentID, blockMethodRans4x8, data); err == nil {
+			if len(candidate) < len(best) {
+				best = candidate
+			}
+		}
+	}
+
+	return best, nil
 }
 
 // encodeBlock creates the binary representation of a CRAM block.
 func (cw *Writer) encodeBlock(contentType byte, contentID int32, method byte, data []byte) ([]byte, error) {
 	var compData []byte
-	if method == blockMethodGzip {
+	switch method {
+	case blockMethodGzip:
 		var buf bytes.Buffer
 		gz, err := gzip.NewWriterLevel(&buf, cw.opts.level)
 		if err != nil {
@@ -1132,12 +1154,24 @@ func (cw *Writer) encodeBlock(contentType byte, contentID int32, method byte, da
 		}
 		gz.Close()
 		compData = buf.Bytes()
-		// If gzip is larger, use raw.
 		if len(compData) >= len(data) {
 			method = blockMethodRaw
 			compData = data
 		}
-	} else {
+	case blockMethodRans4x8:
+		// Try order-0 and order-1, pick the smaller.
+		enc0 := encodeRans4x8(data, 0)
+		enc1 := encodeRans4x8(data, 1)
+		if len(enc1) < len(enc0) {
+			compData = enc1
+		} else {
+			compData = enc0
+		}
+		if len(compData) >= len(data) {
+			method = blockMethodRaw
+			compData = data
+		}
+	default:
 		compData = data
 	}
 
