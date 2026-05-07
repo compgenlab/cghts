@@ -1,4 +1,4 @@
-package htsio
+package htsio_test
 
 import (
 	"crypto/sha1"
@@ -8,6 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/compgen-io/cgltk/htsio"
+	"github.com/compgen-io/cgltk/htsio/bam"
+	_ "github.com/compgen-io/cgltk/htsio/cram"
+	_ "github.com/compgen-io/cgltk/htsio/sam"
 )
 
 // samtoolsViewSHA1 returns the SHA1 of `samtools view <file>` output (records only).
@@ -21,10 +26,10 @@ func samtoolsViewSHA1(t *testing.T, filename string) string {
 	return fmt.Sprintf("%x", sha1.Sum(out))
 }
 
-// readAllRecords reads all records from a SamReader.
-func readAllRecords(t *testing.T, reader SamReader) []*SamRecord {
+// readAllRecords reads all records from a htsio.SamReader.
+func readAllRecords(t *testing.T, reader htsio.SamReader) []*htsio.SamRecord {
 	t.Helper()
-	var records []*SamRecord
+	var records []*htsio.SamRecord
 	for rec, err := range reader.Records() {
 		if err != nil {
 			t.Fatalf("Records: %v", err)
@@ -35,7 +40,7 @@ func readAllRecords(t *testing.T, reader SamReader) []*SamRecord {
 }
 
 // writeSAMFile writes records as SAM text (with header) to a file.
-func writeSAMFile(t *testing.T, filename string, header *SamHeader, records []*SamRecord) {
+func writeSAMFile(t *testing.T, filename string, header *htsio.SamHeader, records []*htsio.SamRecord) {
 	t.Helper()
 	f, err := os.Create(filename)
 	if err != nil {
@@ -59,11 +64,11 @@ func writeSAMFile(t *testing.T, filename string, header *SamHeader, records []*S
 }
 
 // writeBAMFile writes records as BAM to a file.
-func writeBAMFile(t *testing.T, filename string, header *SamHeader, records []*SamRecord) {
+func writeBAMFile(t *testing.T, filename string, header *htsio.SamHeader, records []*htsio.SamRecord) {
 	t.Helper()
-	writer, err := NewSamWriter(filename, SamWriterOptions(header).BAM())
+	writer, err := bam.NewWriter(filename, header)
 	if err != nil {
-		t.Fatalf("NewSamWriter: %v", err)
+		t.Fatalf("bam.NewWriter: %v", err)
 	}
 	for _, rec := range records {
 		if err := writer.Write(rec); err != nil {
@@ -84,9 +89,9 @@ func TestRoundTripBAMToSAM(t *testing.T) {
 		t.Run(filepath.Base(input), func(t *testing.T) {
 			expected := samtoolsViewSHA1(t, input)
 
-			reader, err := NewSamReader(input)
+			reader, err := htsio.NewSamReader(input)
 			if err != nil {
-				t.Fatalf("NewSamReader: %v", err)
+				t.Fatalf("htsio.NewSamReader: %v", err)
 			}
 			header, _ := reader.Header()
 			records := readAllRecords(t, reader)
@@ -112,9 +117,9 @@ func TestRoundTripBAMToBAM(t *testing.T) {
 		t.Run(filepath.Base(input), func(t *testing.T) {
 			expected := samtoolsViewSHA1(t, input)
 
-			reader, err := NewSamReader(input)
+			reader, err := htsio.NewSamReader(input)
 			if err != nil {
-				t.Fatalf("NewSamReader: %v", err)
+				t.Fatalf("htsio.NewSamReader: %v", err)
 			}
 			header, _ := reader.Header()
 			records := readAllRecords(t, reader)
@@ -140,9 +145,9 @@ func TestRoundTripSAMToSAM(t *testing.T) {
 		t.Run(filepath.Base(input), func(t *testing.T) {
 			expected := samtoolsViewSHA1(t, input)
 
-			reader, err := NewSamReader(input)
+			reader, err := htsio.NewSamReader(input)
 			if err != nil {
-				t.Fatalf("NewSamReader: %v", err)
+				t.Fatalf("htsio.NewSamReader: %v", err)
 			}
 			header, _ := reader.Header()
 			records := readAllRecords(t, reader)
@@ -168,9 +173,9 @@ func TestRoundTripSAMToBAM(t *testing.T) {
 		t.Run(filepath.Base(input), func(t *testing.T) {
 			expected := samtoolsViewSHA1(t, input)
 
-			reader, err := NewSamReader(input)
+			reader, err := htsio.NewSamReader(input)
 			if err != nil {
-				t.Fatalf("NewSamReader: %v", err)
+				t.Fatalf("htsio.NewSamReader: %v", err)
 			}
 			header, _ := reader.Header()
 			records := readAllRecords(t, reader)
@@ -189,9 +194,9 @@ func TestRoundTripSAMToBAM(t *testing.T) {
 
 func TestRoundTripPreservesTagOrder(t *testing.T) {
 	// Read test_tags.bam, write BAM, read back — TagOrder should be identical.
-	reader, err := NewSamReader("testdata/test_tags.bam")
+	reader, err := htsio.NewSamReader("testdata/test_tags.bam")
 	if err != nil {
-		t.Fatalf("NewSamReader: %v", err)
+		t.Fatalf("htsio.NewSamReader: %v", err)
 	}
 	header, _ := reader.Header()
 	records := readAllRecords(t, reader)
@@ -200,9 +205,9 @@ func TestRoundTripPreservesTagOrder(t *testing.T) {
 	bamFile := filepath.Join(t.TempDir(), "output.bam")
 	writeBAMFile(t, bamFile, header, records)
 
-	reader2, err := NewSamReader(bamFile)
+	reader2, err := htsio.NewSamReader(bamFile)
 	if err != nil {
-		t.Fatalf("NewSamReader (re-read): %v", err)
+		t.Fatalf("htsio.NewSamReader (re-read): %v", err)
 	}
 	records2 := readAllRecords(t, reader2)
 	reader2.Close()
@@ -228,9 +233,9 @@ func TestRoundTripPreservesTagOrder(t *testing.T) {
 
 func TestRoundTripFieldConsistency(t *testing.T) {
 	// Read test_tags.bam, write BAM, read back — all fields should match.
-	reader, err := NewSamReader("testdata/test_tags.bam")
+	reader, err := htsio.NewSamReader("testdata/test_tags.bam")
 	if err != nil {
-		t.Fatalf("NewSamReader: %v", err)
+		t.Fatalf("htsio.NewSamReader: %v", err)
 	}
 	header, _ := reader.Header()
 	records := readAllRecords(t, reader)
@@ -239,9 +244,9 @@ func TestRoundTripFieldConsistency(t *testing.T) {
 	bamFile := filepath.Join(t.TempDir(), "output.bam")
 	writeBAMFile(t, bamFile, header, records)
 
-	reader2, err := NewSamReader(bamFile)
+	reader2, err := htsio.NewSamReader(bamFile)
 	if err != nil {
-		t.Fatalf("NewSamReader (re-read): %v", err)
+		t.Fatalf("htsio.NewSamReader (re-read): %v", err)
 	}
 	records2 := readAllRecords(t, reader2)
 	reader2.Close()

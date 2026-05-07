@@ -1,4 +1,4 @@
-package htsio
+package tabix
 
 import (
 	"encoding/binary"
@@ -19,8 +19,8 @@ type Chunk struct {
 
 // binIndex holds the bins and linear index for one reference sequence.
 type binIndex struct {
-	bins      map[uint32][]Chunk // bin number → chunks
-	linearIdx []bgzf.VirtualOffset   // one entry per 16kb window
+	bins      map[uint32][]Chunk       // bin number → chunks
+	linearIdx []bgzf.VirtualOffset // one entry per 16kb window
 }
 
 // BinIndex is a parsed BAI or TBI index.
@@ -28,13 +28,13 @@ type BinIndex struct {
 	refs []binIndex
 
 	// TBI-specific header fields (zero-valued for BAI).
-	Format    int32  // 0=generic, 1=SAM, 2=VCF
-	ColSeq    int32  // column for sequence name (1-based)
-	ColBeg    int32  // column for region start (1-based)
-	ColEnd    int32  // column for region end (1-based); 0 means same as ColBeg
-	Meta      int32  // comment character (e.g. '#'), or 0
-	Skip      int32  // number of header lines to skip
-	ZeroBased bool   // true if coordinates are 0-based
+	Format    int32    // 0=generic, 1=SAM, 2=VCF
+	ColSeq    int32    // column for sequence name (1-based)
+	ColBeg    int32    // column for region start (1-based)
+	ColEnd    int32    // column for region end (1-based); 0 means same as ColBeg
+	Meta      int32    // comment character (e.g. '#'), or 0
+	Skip      int32    // number of header lines to skip
+	ZeroBased bool     // true if coordinates are 0-based
 	Names     []string // reference sequence names (TBI only)
 }
 
@@ -59,7 +59,6 @@ func LoadBAI(filename string) (*BinIndex, error) {
 
 // LoadTBI reads a TBI (tabix) index file.
 func LoadTBI(filename string) (*BinIndex, error) {
-	// TBI files are BGZF-compressed.
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -76,7 +75,6 @@ func LoadTBI(filename string) (*BinIndex, error) {
 		return nil, fmt.Errorf("tbi: invalid magic: %x", magic)
 	}
 
-	// TBI header
 	var nRef int32
 	if err := binary.Read(r, binary.LittleEndian, &nRef); err != nil {
 		return nil, fmt.Errorf("tbi: reading n_ref: %w", err)
@@ -103,14 +101,11 @@ func LoadTBI(filename string) (*BinIndex, error) {
 		return nil, fmt.Errorf("tbi: reading skip: %w", err)
 	}
 
-	// Bit 16 of the format field indicates 0-based coordinates (TBX_UCSC).
-	// This is set by tabix -p bed or tabix -0.
 	if idx.Format&0x10000 != 0 {
 		idx.ZeroBased = true
 		idx.Format &= 0xFFFF
 	}
 
-	// Read concatenated sequence names.
 	var namesLen int32
 	if err := binary.Read(r, binary.LittleEndian, &namesLen); err != nil {
 		return nil, fmt.Errorf("tbi: reading names length: %w", err)
@@ -120,10 +115,8 @@ func LoadTBI(filename string) (*BinIndex, error) {
 		return nil, fmt.Errorf("tbi: reading names: %w", err)
 	}
 
-	// Names are NUL-separated.
 	idx.Names = splitNulTerminated(namesData)
 
-	// Read the bin index for each reference.
 	idx.refs = make([]binIndex, nRef)
 	for i := int32(0); i < nRef; i++ {
 		if err := readRefBins(r, &idx.refs[i]); err != nil {
@@ -134,8 +127,6 @@ func LoadTBI(filename string) (*BinIndex, error) {
 	return idx, nil
 }
 
-// readBinIndex reads the shared BAI/TBI format: n_ref followed by per-ref
-// bins and linear index.
 func readBinIndex(r io.Reader) (*BinIndex, error) {
 	var nRef int32
 	if err := binary.Read(r, binary.LittleEndian, &nRef); err != nil {
@@ -155,7 +146,6 @@ func readBinIndex(r io.Reader) (*BinIndex, error) {
 	return idx, nil
 }
 
-// readRefBins reads the bins and linear index for one reference sequence.
 func readRefBins(r io.Reader, ref *binIndex) error {
 	var nBins int32
 	if err := binary.Read(r, binary.LittleEndian, &nBins); err != nil {
@@ -191,7 +181,6 @@ func readRefBins(r io.Reader, ref *binIndex) error {
 		ref.bins[binNum] = chunks
 	}
 
-	// Linear index.
 	var nIntervals int32
 	if err := binary.Read(r, binary.LittleEndian, &nIntervals); err != nil {
 		return fmt.Errorf("reading n_intervals: %w", err)
@@ -242,20 +231,17 @@ func (idx *BinIndex) Query(refID int, start, end int) []Chunk {
 	}
 	ref := &idx.refs[refID]
 
-	// Find the minimum virtual offset from the linear index.
-	linearMinIdx := start >> 14 // 16kb windows
+	linearMinIdx := start >> 14
 	var minOffset bgzf.VirtualOffset
 	if linearMinIdx < len(ref.linearIdx) {
 		minOffset = ref.linearIdx[linearMinIdx]
 	}
 
-	// Collect chunks from overlapping bins.
 	bins := reg2bins(start, end)
 	var chunks []Chunk
 	for _, b := range bins {
 		if cs, ok := ref.bins[b]; ok {
 			for _, c := range cs {
-				// Skip chunks that end before the linear index minimum.
 				if c.End <= minOffset {
 					continue
 				}
@@ -268,12 +254,10 @@ func (idx *BinIndex) Query(refID int, start, end int) []Chunk {
 		return nil
 	}
 
-	// Sort by begin offset.
 	sort.Slice(chunks, func(i, j int) bool {
 		return chunks[i].Begin < chunks[j].Begin
 	})
 
-	// Merge overlapping/adjacent chunks.
 	merged := []Chunk{chunks[0]}
 	for i := 1; i < len(chunks); i++ {
 		last := &merged[len(merged)-1]
@@ -290,8 +274,6 @@ func (idx *BinIndex) Query(refID int, start, end int) []Chunk {
 }
 
 // RefID returns the reference sequence index for the given name.
-// For BAI indexes, the caller must provide the mapping from the BAM header.
-// For TBI indexes, the Names field is used.
 // Returns -1 if not found.
 func (idx *BinIndex) RefID(name string) int {
 	for i, n := range idx.Names {
@@ -302,7 +284,28 @@ func (idx *BinIndex) RefID(name string) int {
 	return -1
 }
 
-// splitNulTerminated splits a NUL-terminated byte slice into strings.
+// Reg2Bin calculates the BAM bin for a region [beg, end) using the BAM
+// binning scheme (as defined in the SAM specification).
+func Reg2Bin(beg, end int) uint16 {
+	end--
+	if beg>>14 == end>>14 {
+		return uint16(((1<<15)-1)/7 + beg>>14)
+	}
+	if beg>>17 == end>>17 {
+		return uint16(((1<<12)-1)/7 + beg>>17)
+	}
+	if beg>>20 == end>>20 {
+		return uint16(((1<<9)-1)/7 + beg>>20)
+	}
+	if beg>>23 == end>>23 {
+		return uint16(((1<<6)-1)/7 + beg>>23)
+	}
+	if beg>>26 == end>>26 {
+		return uint16(((1<<3)-1)/7 + beg>>26)
+	}
+	return 0
+}
+
 func splitNulTerminated(data []byte) []string {
 	var result []string
 	start := 0

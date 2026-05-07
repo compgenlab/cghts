@@ -1,6 +1,7 @@
-package htsio
+package bam
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -10,7 +11,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/compgen-io/cgltk/htsio"
 	"github.com/compgen-io/cgltk/htsio/bgzf"
+	"github.com/compgen-io/cgltk/htsio/tabix"
 )
 
 // BAM CIGAR operation codes (4-bit).
@@ -38,40 +41,52 @@ type bamRefInfo struct {
 	length int32
 }
 
-// BamReader reads BAM files natively using the bgzf package.
-// It implements the SamReader interface.
-type BamReader struct {
+// Reader reads BAM files natively using the bgzf package.
+// It implements the htsio.SamReader interface.
+type Reader struct {
 	r        *bgzf.Reader
 	src      io.ReadCloser // underlying file/reader, closed on Close()
 	filename string        // original filename (for finding .bai)
 	refs     []bamRefInfo  // reference sequences from the BAM header
 	refMap   map[string]int // ref name → index
-	hdr      *SamHeader
-	opts     *SamReaderOpts
-	idx      *BinIndex     // BAI index, loaded lazily on first Query()
+	hdr      *htsio.SamHeader
+	opts     *htsio.SamReaderOpts
+	idx      *tabix.BinIndex     // BAI index, loaded lazily on first Query()
 	ir       *bgzf.IndexedReader // created lazily for Query()
-	err      error         // sticky error
+	err      error               // sticky error
 }
 
-// NewBamReader creates a BAM reader from an io.ReadCloser.
-// The reader must be positioned at the start of a BAM file.
-func NewBamReader(rc io.ReadCloser, opts ...*SamReaderOpts) (*BamReader, error) {
-	var o *SamReaderOpts
-	if len(opts) > 0 {
-		o = opts[0]
-	} else {
-		o = NewSamReaderOpts()
+func init() {
+	htsio.RegisterReader(htsio.ReaderRegistration{
+		Detect: func(magic []byte) bool {
+			return bytes.HasPrefix(magic, []byte("BAM\x01"))
+		},
+		NewFromFile: func(filename string, opts *htsio.SamReaderOpts) (htsio.SamReader, error) {
+			f, err := os.Open(filename)
+			if err != nil {
+				return nil, err
+			}
+			return NewReader(f, filename, opts)
+		},
+		NewFromStream: func(r io.ReadCloser, opts *htsio.SamReaderOpts) (htsio.SamReader, error) {
+			return NewReader(r, "", opts)
+		},
+	})
+}
+
+// NewReader creates a BAM reader from an io.ReadCloser.
+// The reader must be positioned at the start of a BAM file (possibly with
+// peeked bytes prepended via io.MultiReader).
+func NewReader(rc io.ReadCloser, filename string, opts *htsio.SamReaderOpts) (*Reader, error) {
+	if opts == nil {
+		opts = htsio.NewSamReaderOpts()
 	}
 
-	br := &BamReader{
-		r:    bgzf.NewReader(rc),
-		src:  rc,
-		opts: o,
-	}
-
-	// Capture filename if the underlying reader is a file.
-	if f, ok := rc.(*os.File); ok {
-		br.filename = f.Name()
+	br := &Reader{
+		r:        bgzf.NewReader(rc),
+		src:      rc,
+		filename: filename,
+		opts:     opts,
 	}
 
 	if err := br.readHeader(); err != nil {
@@ -89,12 +104,12 @@ func NewBamReader(rc io.ReadCloser, opts ...*SamReaderOpts) (*BamReader, error) 
 }
 
 // Header returns the parsed SAM header.
-func (b *BamReader) Header() (*SamHeader, error) {
+func (b *Reader) Header() (*htsio.SamHeader, error) {
 	return b.hdr, nil
 }
 
 // Close releases resources.
-func (b *BamReader) Close() error {
+func (b *Reader) Close() error {
 	if b.src != nil {
 		return b.src.Close()
 	}
@@ -104,7 +119,7 @@ func (b *BamReader) Close() error {
 // Query returns an iterator over records overlapping the 0-based half-open
 // region [start, end) on the given reference. Requires a .bai index file
 // at filename.bai.
-func (b *BamReader) Query(ref string, start, end int) (iter.Seq2[*SamRecord, error], error) {
+func (b *Reader) Query(ref string, start, end int) (iter.Seq2[*htsio.SamRecord, error], error) {
 	if b.filename == "" {
 		return nil, fmt.Errorf("bam: Query requires a file-backed reader")
 	}
@@ -117,7 +132,7 @@ func (b *BamReader) Query(ref string, start, end int) (iter.Seq2[*SamRecord, err
 	// Lazily load the BAI index.
 	if b.idx == nil {
 		baiPath := b.filename + ".bai"
-		idx, err := LoadBAI(baiPath)
+		idx, err := tabix.LoadBAI(baiPath)
 		if err != nil {
 			return nil, fmt.Errorf("bam: loading BAI index: %w", err)
 		}
@@ -135,7 +150,7 @@ func (b *BamReader) Query(ref string, start, end int) (iter.Seq2[*SamRecord, err
 
 	chunks := b.idx.Query(refID, start, end)
 	if len(chunks) == 0 {
-		return func(yield func(*SamRecord, error) bool) {}, nil
+		return func(yield func(*htsio.SamRecord, error) bool) {}, nil
 	}
 
 	return b.iterChunks(chunks, refID, start, end), nil
@@ -143,8 +158,8 @@ func (b *BamReader) Query(ref string, start, end int) (iter.Seq2[*SamRecord, err
 
 // iterChunks returns an iterator that reads BAM records from the given
 // chunks, filtering to those overlapping [start, end) on refID.
-func (b *BamReader) iterChunks(chunks []Chunk, refID, start, end int) iter.Seq2[*SamRecord, error] {
-	return func(yield func(*SamRecord, error) bool) {
+func (b *Reader) iterChunks(chunks []tabix.Chunk, refID, start, end int) iter.Seq2[*htsio.SamRecord, error] {
+	return func(yield func(*htsio.SamRecord, error) bool) {
 		for ci, chunk := range chunks {
 			if err := b.ir.SeekToVirtualOffset(chunk.Begin); err != nil {
 				yield(nil, fmt.Errorf("bam: seeking to chunk: %w", err))
@@ -181,7 +196,7 @@ func (b *BamReader) iterChunks(chunks []Chunk, refID, start, end int) iter.Seq2[
 
 				// Record position (0-based).
 				recStart := rec.Pos - 1
-				recEnd := recStart + CigarRefLen(rec.Cigar)
+				recEnd := recStart + htsio.CigarRefLen(rec.Cigar)
 
 				if recEnd <= start {
 					continue // before query region
@@ -190,27 +205,8 @@ func (b *BamReader) iterChunks(chunks []Chunk, refID, start, end int) iter.Seq2[
 					return // past query region
 				}
 
-				// Apply filters.
-				if b.opts != nil {
-					if b.opts.flagReq != 0 && rec.Flag&b.opts.flagReq != b.opts.flagReq {
-						continue
-					}
-					if b.opts.flagFilter != 0 && rec.Flag&b.opts.flagFilter != 0 {
-						continue
-					}
-					if b.opts.minMapQ != 0 && rec.MapQ < b.opts.minMapQ {
-						continue
-					}
-					skip := false
-					for _, f := range b.opts.tagFilters {
-						if !f.matchesRecord(rec) {
-							skip = true
-							break
-						}
-					}
-					if skip {
-						continue
-					}
+				if !b.opts.PassesFilters(rec) {
+					continue
 				}
 
 				if !yield(rec, nil) {
@@ -222,7 +218,7 @@ func (b *BamReader) iterChunks(chunks []Chunk, refID, start, end int) iter.Seq2[
 }
 
 // readHeader reads the BAM magic, header text, and reference sequence dictionary.
-func (b *BamReader) readHeader() error {
+func (b *Reader) readHeader() error {
 	// Magic: BAM\1
 	var magic [4]byte
 	if _, err := io.ReadFull(b.r, magic[:]); err != nil {
@@ -246,7 +242,7 @@ func (b *BamReader) readHeader() error {
 		return fmt.Errorf("reading header text: %w", err)
 	}
 
-	b.hdr = NewSamHeader()
+	b.hdr = htsio.NewSamHeader()
 	for _, line := range strings.Split(string(headerText), "\n") {
 		line = strings.TrimRight(line, "\r")
 		if line != "" {
@@ -287,14 +283,14 @@ func (b *BamReader) readHeader() error {
 }
 
 // Records returns an iterator over all records in the BAM file.
-func (b *BamReader) Records() iter.Seq2[*SamRecord, error] {
-	return func(yield func(*SamRecord, error) bool) {
+func (b *Reader) Records() iter.Seq2[*htsio.SamRecord, error] {
+	return func(yield func(*htsio.SamRecord, error) bool) {
 		if b.err != nil {
 			yield(nil, b.err)
 			return
 		}
 		for {
-			rec, err := b.readRecord()
+			rec, err := readBamRecord(b.r, b.refs)
 			if err != nil {
 				if err != io.EOF {
 					yield(nil, err)
@@ -302,7 +298,7 @@ func (b *BamReader) Records() iter.Seq2[*SamRecord, error] {
 				b.err = err
 				return
 			}
-			if b.passesFilters(rec) {
+			if b.opts.PassesFilters(rec) {
 				if !yield(rec, nil) {
 					return
 				}
@@ -311,33 +307,9 @@ func (b *BamReader) Records() iter.Seq2[*SamRecord, error] {
 	}
 }
 
-// passesFilters checks flag, mapq, and tag filters.
-func (b *BamReader) passesFilters(rec *SamRecord) bool {
-	if b.opts.flagReq != 0 && rec.Flag&b.opts.flagReq != b.opts.flagReq {
-		return false
-	}
-	if b.opts.flagFilter != 0 && rec.Flag&b.opts.flagFilter != 0 {
-		return false
-	}
-	if b.opts.minMapQ != 0 && rec.MapQ < b.opts.minMapQ {
-		return false
-	}
-	for _, f := range b.opts.tagFilters {
-		if !f.matchesRecord(rec) {
-			return false
-		}
-	}
-	return true
-}
-
-// readRecord is a convenience wrapper for the BamReader.
-func (b *BamReader) readRecord() (*SamRecord, error) {
-	return readBamRecord(b.r, b.refs)
-}
-
 // readBamRecord reads a single BAM alignment record from r and converts it
 // to a SamRecord, using refs to resolve reference IDs to names.
-func readBamRecord(r io.Reader, refs []bamRefInfo) (*SamRecord, error) {
+func readBamRecord(r io.Reader, refs []bamRefInfo) (*htsio.SamRecord, error) {
 	// Block size (excludes the 4-byte block_size field itself).
 	var blockSize int32
 	if err := binary.Read(r, binary.LittleEndian, &blockSize); err != nil {
@@ -421,7 +393,7 @@ func readBamRecord(r io.Reader, refs []bamRefInfo) (*SamRecord, error) {
 		refNext = "="
 	}
 
-	rec := &SamRecord{
+	rec := &htsio.SamRecord{
 		ReadName:  readName,
 		Flag:      int(flag),
 		RefName:   refName,
@@ -498,8 +470,8 @@ func decodeQual(data []byte) string {
 
 // decodeTags parses the auxiliary data section of a BAM record into a tag map
 // and an ordered list of tag keys.
-func decodeTags(data []byte) (map[string]SamTag, []string) {
-	tags := make(map[string]SamTag)
+func decodeTags(data []byte) (map[string]htsio.SamTag, []string) {
+	tags := make(map[string]htsio.SamTag)
 	var order []string
 	pos := 0
 	for pos+3 <= len(data) {
@@ -507,50 +479,50 @@ func decodeTags(data []byte) (map[string]SamTag, []string) {
 		valType := data[pos+2]
 		pos += 3
 
-		var samTag SamTag
+		var samTag htsio.SamTag
 		switch valType {
 		case 'A': // printable character
 			if pos >= len(data) {
 				return tags, order
 			}
-			samTag = SamTag{Type: 'A', Value: string(data[pos : pos+1])}
+			samTag = htsio.SamTag{Type: 'A', Value: string(data[pos : pos+1])}
 			pos++
 
 		case 'c': // int8
 			if pos >= len(data) {
 				return tags, order
 			}
-			samTag = SamTag{Type: 'i', Value: strconv.Itoa(int(int8(data[pos])))}
+			samTag = htsio.SamTag{Type: 'i', Value: strconv.Itoa(int(int8(data[pos])))}
 			pos++
 		case 'C': // uint8
 			if pos >= len(data) {
 				return tags, order
 			}
-			samTag = SamTag{Type: 'i', Value: strconv.Itoa(int(data[pos]))}
+			samTag = htsio.SamTag{Type: 'i', Value: strconv.Itoa(int(data[pos]))}
 			pos++
 		case 's': // int16
 			if pos+2 > len(data) {
 				return tags, order
 			}
-			samTag = SamTag{Type: 'i', Value: strconv.Itoa(int(int16(binary.LittleEndian.Uint16(data[pos:]))))}
+			samTag = htsio.SamTag{Type: 'i', Value: strconv.Itoa(int(int16(binary.LittleEndian.Uint16(data[pos:]))))}
 			pos += 2
 		case 'S': // uint16
 			if pos+2 > len(data) {
 				return tags, order
 			}
-			samTag = SamTag{Type: 'i', Value: strconv.Itoa(int(binary.LittleEndian.Uint16(data[pos:])))}
+			samTag = htsio.SamTag{Type: 'i', Value: strconv.Itoa(int(binary.LittleEndian.Uint16(data[pos:])))}
 			pos += 2
 		case 'i': // int32
 			if pos+4 > len(data) {
 				return tags, order
 			}
-			samTag = SamTag{Type: 'i', Value: strconv.Itoa(int(int32(binary.LittleEndian.Uint32(data[pos:]))))}
+			samTag = htsio.SamTag{Type: 'i', Value: strconv.Itoa(int(int32(binary.LittleEndian.Uint32(data[pos:]))))}
 			pos += 4
 		case 'I': // uint32
 			if pos+4 > len(data) {
 				return tags, order
 			}
-			samTag = SamTag{Type: 'i', Value: strconv.FormatUint(uint64(binary.LittleEndian.Uint32(data[pos:])), 10)}
+			samTag = htsio.SamTag{Type: 'i', Value: strconv.FormatUint(uint64(binary.LittleEndian.Uint32(data[pos:])), 10)}
 			pos += 4
 
 		case 'f': // float32
@@ -558,7 +530,7 @@ func decodeTags(data []byte) (map[string]SamTag, []string) {
 				return tags, order
 			}
 			bits := binary.LittleEndian.Uint32(data[pos:])
-			samTag = SamTag{Type: 'f', Value: strconv.FormatFloat(float64(math.Float32frombits(bits)), 'g', -1, 32)}
+			samTag = htsio.SamTag{Type: 'f', Value: strconv.FormatFloat(float64(math.Float32frombits(bits)), 'g', -1, 32)}
 			pos += 4
 
 		case 'Z': // NUL-terminated string
@@ -566,7 +538,7 @@ func decodeTags(data []byte) (map[string]SamTag, []string) {
 			for end < len(data) && data[end] != 0 {
 				end++
 			}
-			samTag = SamTag{Type: 'Z', Value: string(data[pos:end])}
+			samTag = htsio.SamTag{Type: 'Z', Value: string(data[pos:end])}
 			pos = end + 1 // skip NUL
 
 		case 'H': // hex string, NUL-terminated
@@ -574,7 +546,7 @@ func decodeTags(data []byte) (map[string]SamTag, []string) {
 			for end < len(data) && data[end] != 0 {
 				end++
 			}
-			samTag = SamTag{Type: 'H', Value: string(data[pos:end])}
+			samTag = htsio.SamTag{Type: 'H', Value: string(data[pos:end])}
 			pos = end + 1
 
 		case 'B': // array
@@ -596,11 +568,11 @@ func decodeTags(data []byte) (map[string]SamTag, []string) {
 
 // decodeArrayTag decodes a B-type (array) auxiliary tag.
 // Returns the decoded tag and the new position in data.
-func decodeArrayTag(data []byte, pos int) (SamTag, int) {
+func decodeArrayTag(data []byte, pos int) (htsio.SamTag, int) {
 	elemType := data[pos]
 	pos++
 	if pos+4 > len(data) {
-		return SamTag{Type: 'B'}, pos
+		return htsio.SamTag{Type: 'B'}, pos
 	}
 	count := int(binary.LittleEndian.Uint32(data[pos:]))
 	pos += 4
@@ -613,43 +585,43 @@ func decodeArrayTag(data []byte, pos int) (SamTag, int) {
 		switch elemType {
 		case 'c':
 			if pos >= len(data) {
-				return SamTag{Type: 'B', Value: sb.String()}, pos
+				return htsio.SamTag{Type: 'B', Value: sb.String()}, pos
 			}
 			sb.WriteString(strconv.Itoa(int(int8(data[pos]))))
 			pos++
 		case 'C':
 			if pos >= len(data) {
-				return SamTag{Type: 'B', Value: sb.String()}, pos
+				return htsio.SamTag{Type: 'B', Value: sb.String()}, pos
 			}
 			sb.WriteString(strconv.Itoa(int(data[pos])))
 			pos++
 		case 's':
 			if pos+2 > len(data) {
-				return SamTag{Type: 'B', Value: sb.String()}, pos
+				return htsio.SamTag{Type: 'B', Value: sb.String()}, pos
 			}
 			sb.WriteString(strconv.Itoa(int(int16(binary.LittleEndian.Uint16(data[pos:])))))
 			pos += 2
 		case 'S':
 			if pos+2 > len(data) {
-				return SamTag{Type: 'B', Value: sb.String()}, pos
+				return htsio.SamTag{Type: 'B', Value: sb.String()}, pos
 			}
 			sb.WriteString(strconv.Itoa(int(binary.LittleEndian.Uint16(data[pos:]))))
 			pos += 2
 		case 'i':
 			if pos+4 > len(data) {
-				return SamTag{Type: 'B', Value: sb.String()}, pos
+				return htsio.SamTag{Type: 'B', Value: sb.String()}, pos
 			}
 			sb.WriteString(strconv.Itoa(int(int32(binary.LittleEndian.Uint32(data[pos:])))))
 			pos += 4
 		case 'I':
 			if pos+4 > len(data) {
-				return SamTag{Type: 'B', Value: sb.String()}, pos
+				return htsio.SamTag{Type: 'B', Value: sb.String()}, pos
 			}
 			sb.WriteString(strconv.FormatUint(uint64(binary.LittleEndian.Uint32(data[pos:])), 10))
 			pos += 4
 		case 'f':
 			if pos+4 > len(data) {
-				return SamTag{Type: 'B', Value: sb.String()}, pos
+				return htsio.SamTag{Type: 'B', Value: sb.String()}, pos
 			}
 			bits := binary.LittleEndian.Uint32(data[pos:])
 			sb.WriteString(strconv.FormatFloat(float64(math.Float32frombits(bits)), 'g', -1, 32))
@@ -657,6 +629,5 @@ func decodeArrayTag(data []byte, pos int) (SamTag, int) {
 		}
 	}
 
-	return SamTag{Type: 'B', Value: sb.String()}, pos
+	return htsio.SamTag{Type: 'B', Value: sb.String()}, pos
 }
-

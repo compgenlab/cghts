@@ -8,6 +8,7 @@ import (
 	"os/exec"
 
 	"github.com/compgen-io/cgltk/htsio"
+	"github.com/compgen-io/cgltk/htsio/bam"
 )
 
 func main() {
@@ -30,10 +31,9 @@ func main() {
 		{ReadName: "read5", Flag: 0, RefName: "chr2", Pos: 200, MapQ: 60, Cigar: "50M", RefNext: "*", PosNext: 0, InsertLen: 0, Seq: seq, Qual: "*", Tags: map[string]htsio.SamTag{}},
 	}
 
-	opts := htsio.SamWriterOptions(header).BAM()
-	w, err := htsio.NewSamWriter(unsorted, opts)
+	w, err := bam.NewWriter(unsorted, header)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "NewSamWriter: %v\n", err)
+		fmt.Fprintf(os.Stderr, "bam.NewWriter: %v\n", err)
 		os.Exit(1)
 	}
 	for _, rec := range records {
