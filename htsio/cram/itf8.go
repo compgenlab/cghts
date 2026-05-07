@@ -196,6 +196,140 @@ func (br *bitReader) readByte() (byte, error) {
 	return byte(v), nil
 }
 
+// writeITF8 writes an ITF8-encoded int32 to a byte stream.
+func writeITF8(w io.Writer, val int32) error {
+	v := uint32(val)
+	switch {
+	case v < 0x80:
+		_, err := w.Write([]byte{byte(v)})
+		return err
+	case v < 0x4000:
+		_, err := w.Write([]byte{byte(v>>8) | 0x80, byte(v)})
+		return err
+	case v < 0x200000:
+		_, err := w.Write([]byte{byte(v>>16) | 0xC0, byte(v >> 8), byte(v)})
+		return err
+	case v < 0x10000000:
+		_, err := w.Write([]byte{byte(v>>24) | 0xE0, byte(v >> 16), byte(v >> 8), byte(v)})
+		return err
+	default:
+		_, err := w.Write([]byte{byte(v>>28) | 0xF0, byte(v >> 20), byte(v >> 12), byte(v >> 4), byte(v & 0x0f)})
+		return err
+	}
+}
+
+// writeLTF8 writes an LTF8-encoded int64 to a byte stream.
+func writeLTF8(w io.Writer, val int64) error {
+	v := uint64(val)
+	switch {
+	case v < 0x80:
+		_, err := w.Write([]byte{byte(v)})
+		return err
+	case v < 0x4000:
+		_, err := w.Write([]byte{byte(v>>8) | 0x80, byte(v)})
+		return err
+	case v < 0x200000:
+		_, err := w.Write([]byte{byte(v>>16) | 0xC0, byte(v >> 8), byte(v)})
+		return err
+	case v < 0x10000000:
+		_, err := w.Write([]byte{byte(v>>24) | 0xE0, byte(v >> 16), byte(v >> 8), byte(v)})
+		return err
+	case v < 0x800000000:
+		_, err := w.Write([]byte{byte(v>>32) | 0xF0, byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+		return err
+	case v < 0x40000000000:
+		_, err := w.Write([]byte{byte(v>>40) | 0xF8, byte(v >> 32), byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+		return err
+	case v < 0x2000000000000:
+		_, err := w.Write([]byte{byte(v>>48) | 0xFC, byte(v >> 40), byte(v >> 32), byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+		return err
+	case v < 0x100000000000000:
+		_, err := w.Write([]byte{0xFE, byte(v >> 48), byte(v >> 40), byte(v >> 32), byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+		return err
+	default:
+		_, err := w.Write([]byte{0xFF, byte(v >> 56), byte(v >> 48), byte(v >> 40), byte(v >> 32), byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+		return err
+	}
+}
+
+// writeITF8Array writes an ITF8 length followed by that many ITF8 values.
+func writeITF8Array(w io.Writer, vals []int32) error {
+	if err := writeITF8(w, int32(len(vals))); err != nil {
+		return err
+	}
+	for _, v := range vals {
+		if err := writeITF8(w, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// itf8Size returns the number of bytes needed to encode val as ITF8.
+func itf8Size(val int32) int {
+	v := uint32(val)
+	switch {
+	case v < 0x80:
+		return 1
+	case v < 0x4000:
+		return 2
+	case v < 0x200000:
+		return 3
+	case v < 0x10000000:
+		return 4
+	default:
+		return 5
+	}
+}
+
+// bitWriter writes individual bits to a byte slice, MSB first.
+type bitWriter struct {
+	data []byte
+	pos  int // bit position
+}
+
+func newBitWriter() *bitWriter {
+	return &bitWriter{data: make([]byte, 0, 1024)}
+}
+
+// writeBits writes n bits (up to 32) from val, MSB first.
+func (bw *bitWriter) writeBits(val int32, n int) {
+	for i := n - 1; i >= 0; i-- {
+		byteIdx := bw.pos / 8
+		bitIdx := 7 - (bw.pos % 8)
+		for byteIdx >= len(bw.data) {
+			bw.data = append(bw.data, 0)
+		}
+		if val&(1<<uint(i)) != 0 {
+			bw.data[byteIdx] |= 1 << uint(bitIdx)
+		}
+		bw.pos++
+	}
+}
+
+// writeBit writes a single bit.
+func (bw *bitWriter) writeBit(bit int) {
+	byteIdx := bw.pos / 8
+	bitIdx := 7 - (bw.pos % 8)
+	for byteIdx >= len(bw.data) {
+		bw.data = append(bw.data, 0)
+	}
+	if bit != 0 {
+		bw.data[byteIdx] |= 1 << uint(bitIdx)
+	}
+	bw.pos++
+}
+
+// bytes returns the accumulated bytes (padded with zero bits if needed).
+func (bw *bitWriter) bytes() []byte {
+	// Ensure the last partial byte is included.
+	needed := (bw.pos + 7) / 8
+	for len(bw.data) < needed {
+		bw.data = append(bw.data, 0)
+	}
+	return bw.data[:needed]
+}
+
 // readITF8 reads an ITF8 value from the bit stream.
 func (br *bitReader) readITF8() (int32, error) {
 	first, err := br.readByte()
