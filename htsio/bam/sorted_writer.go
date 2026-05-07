@@ -9,7 +9,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/compgen-io/cgltk/htsio"
+	"github.com/compgen-io/cgkit/htsio"
 )
 
 const (
