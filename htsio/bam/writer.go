@@ -3,6 +3,7 @@ package bam
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"strconv"
@@ -31,19 +32,30 @@ type Writer struct {
 }
 
 // NewWriter creates a native BAM writer for the given output file.
+// If filename is "-", writes to stdout.
 func NewWriter(filename string, header *htsio.SamHeader) (*Writer, error) {
+	if filename == "-" {
+		return NewWriterFromWriter(os.Stdout, header), nil
+	}
 	f, err := os.Create(filename)
 	if err != nil {
 		return nil, err
 	}
+	bw := newWriter(bgzf.NewWriter(f), header)
+	bw.f = f
+	return bw, nil
+}
 
+// NewWriterFromWriter creates a native BAM writer that writes to w.
+func NewWriterFromWriter(w io.Writer, header *htsio.SamHeader) *Writer {
+	return newWriter(bgzf.NewWriter(w), header)
+}
+
+func newWriter(w *bgzf.Writer, header *htsio.SamHeader) *Writer {
 	bw := &Writer{
-		w:      bgzf.NewWriter(f),
-		f:      f,
+		w:      w,
 		header: header,
 	}
-
-	// Build reference list from header @SQ lines.
 	if header != nil {
 		hrefs := header.References()
 		bw.refs = make([]bamRefInfo, len(hrefs))
@@ -55,8 +67,7 @@ func NewWriter(filename string, header *htsio.SamHeader) (*Writer, error) {
 	} else {
 		bw.refIdx = make(map[string]int32)
 	}
-
-	return bw, nil
+	return bw
 }
 
 // start writes the BAM header and starts the async writer goroutine.

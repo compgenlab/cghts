@@ -3,6 +3,7 @@ package bam
 import (
 	"container/heap"
 	"fmt"
+	"io"
 	"iter"
 	"os"
 	"sort"
@@ -20,6 +21,7 @@ const (
 // final output. Supports coordinate sort and name sort.
 type sortedWriter struct {
 	filename  string
+	outWriter io.Writer // non-nil for FromWriter variant
 	header    *htsio.SamHeader
 	refs      []bamRefInfo
 	refIdx    map[string]int32
@@ -45,12 +47,23 @@ func NewSortedWriter(filename string, header *htsio.SamHeader, sortCoord bool, t
 	if len(tmpPrefix) > 0 {
 		prefix = tmpPrefix[0]
 	}
-	return newSortedWriter(filename, header, sortCoord, prefix)
+	return newSortedWriter(filename, nil, header, sortCoord, prefix)
 }
 
-func newSortedWriter(filename string, header *htsio.SamHeader, sortCoord bool, tmpPrefix string) (*sortedWriter, error) {
+// NewSortedWriterFromWriter creates a sorted BAM writer that writes the final
+// output to w. tmpPrefix is optional; if empty, a temp directory is created.
+func NewSortedWriterFromWriter(w io.Writer, header *htsio.SamHeader, sortCoord bool, tmpPrefix ...string) (*sortedWriter, error) {
+	prefix := ""
+	if len(tmpPrefix) > 0 {
+		prefix = tmpPrefix[0]
+	}
+	return newSortedWriter("", w, header, sortCoord, prefix)
+}
+
+func newSortedWriter(filename string, w io.Writer, header *htsio.SamHeader, sortCoord bool, tmpPrefix string) (*sortedWriter, error) {
 	sw := &sortedWriter{
 		filename:  filename,
+		outWriter: w,
 		header:    header,
 		sortCoord: sortCoord,
 		tmpPrefix: tmpPrefix,
@@ -58,7 +71,15 @@ func newSortedWriter(filename string, header *htsio.SamHeader, sortCoord bool, t
 	}
 
 	if sw.tmpPrefix == "" {
-		sw.tmpPrefix = filename + ".tmp"
+		if filename != "" {
+			sw.tmpPrefix = filename + ".tmp"
+		} else {
+			dir, err := os.MkdirTemp("", "bam-sort-*")
+			if err != nil {
+				return nil, fmt.Errorf("creating temp dir: %w", err)
+			}
+			sw.tmpPrefix = dir + "/chunk"
+		}
 	}
 
 	if header != nil {
@@ -116,10 +137,17 @@ func (sw *sortedWriter) Close() error {
 
 	if len(sw.tmpFiles) == 0 {
 		sw.sortBuffer()
-		if err := sw.writeBAM(sw.filename, sw.buf); err != nil {
+		w, err := sw.openOutput()
+		if err != nil {
 			return err
 		}
-		return nil
+		for _, rec := range sw.buf {
+			if err := w.Write(rec); err != nil {
+				w.Close()
+				return err
+			}
+		}
+		return w.Close()
 	}
 
 	if len(sw.buf) > 0 {
@@ -202,6 +230,14 @@ func (sw *sortedWriter) refID(rec *htsio.SamRecord) int32 {
 	return -1
 }
 
+// openOutput creates a BAM writer for the final sorted output.
+func (sw *sortedWriter) openOutput() (*Writer, error) {
+	if sw.outWriter != nil {
+		return NewWriterFromWriter(sw.outWriter, sw.header), nil
+	}
+	return NewWriter(sw.filename, sw.header)
+}
+
 func (sw *sortedWriter) writeBAM(filename string, records []*htsio.SamRecord) error {
 	w, err := NewWriter(filename, sw.header)
 	if err != nil {
@@ -242,7 +278,7 @@ func (sw *sortedWriter) mergeFiles() error {
 		}
 	}()
 
-	outWriter, err := NewWriter(sw.filename, sw.header)
+	outWriter, err := sw.openOutput()
 	if err != nil {
 		return err
 	}
