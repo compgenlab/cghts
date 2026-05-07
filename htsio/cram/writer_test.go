@@ -134,6 +134,7 @@ func TestWriterSamtoolsReadable(t *testing.T) {
 		name string
 		ver  Version
 	}{
+		{"v2.1", V2},
 		{"v3.0", V3},
 		{"v3.1", V31},
 	} {

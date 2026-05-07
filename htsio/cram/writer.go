@@ -1289,23 +1289,14 @@ func (cw *Writer) writeEOF() error {
 		return err
 	}
 
-	// v2 EOF: standard 30-byte sequence.
-	eof := []byte{
-		0x0b, 0x00, 0x00, 0x00, // length = 11 (LE int32)
-		0xff, 0xff, 0xff, 0xff, 0x0f, // refSeqID = -1 (ITF8)
-		0xe0, 0x45, 0x4f, 0x46, // startPos = 4542278 "EOF" (ITF8 4 bytes)
-		0x00,       // alignmentSpan = 0
-		0x00,       // numRecords = 0
-		0x00,       // recordCounter = 0 (ITF8)
-		0x00,       // bases = 0 (LTF8)
-		0x01,       // numBlocks = 1
-		0x00,       // landmarks: array length 0
-		// Empty block.
-		0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, // method=0, type=1, ...
-		0xee, 0x63, 0x01, 0x4b, // EOF block with data
+	// v2 EOF container: matches htslib format.
+	// Block data is a minimal empty compression header: 3 empty maps.
+	minCompHdr := []byte{0x01, 0x00, 0x01, 0x00, 0x01, 0x00}
+	emptyBlock, err := cw.encodeBlock(blockContentCompressionHeader, 0, blockMethodRaw, minCompHdr)
+	if err != nil {
+		return err
 	}
-	_, err := cw.w.Write(eof)
-	return err
+	return cw.writeContainer(-1, 0x454f46, 0, 0, 0, [][]byte{emptyBlock}, nil)
 }
 
 // samTypeToBAMType converts a SAM tag type character to the BAM/CRAM internal type.
