@@ -1,4 +1,4 @@
-package htsio
+package tabix
 
 import (
 	"bufio"
@@ -30,29 +30,27 @@ type tabixMeta struct {
 	ZeroBased bool
 }
 
-// TabixReader reads BGZF-compressed, tabix-indexed text files (BED, VCF, GFF,
-// etc.) with random access by genomic region. Supports both .tbi and .csi
-// indexes, which provide column definitions, the coordinate system (0-based
-// vs 1-based), comment character, and header skip count.
-type TabixReader struct {
+// Reader reads BGZF-compressed, tabix-indexed text files (BED, VCF, GFF,
+// etc.) with random access by genomic region.
+type Reader struct {
 	ir   *bgzf.IndexedReader
 	f    *os.File
 	idx  tabixIndex
 	meta tabixMeta
 }
 
-// TabixRecord holds a single parsed line from a tabix query along with the
+// Record holds a single parsed line from a tabix query along with the
 // extracted genomic coordinates.
-type TabixRecord struct {
+type Record struct {
 	Line  string
 	Ref   string
 	Start int // 0-based
 	End   int // 0-based, exclusive
 }
 
-// NewTabixReader opens a BGZF-compressed file and its tabix index.
+// NewReader opens a BGZF-compressed file and its tabix index.
 // It looks for a .tbi index first, then falls back to .csi.
-func NewTabixReader(filename string) (*TabixReader, error) {
+func NewReader(filename string) (*Reader, error) {
 	var idx tabixIndex
 	var meta tabixMeta
 
@@ -100,7 +98,7 @@ func NewTabixReader(filename string) (*TabixReader, error) {
 
 	ir := bgzf.NewIndexedReader(f)
 
-	return &TabixReader{
+	return &Reader{
 		ir:   ir,
 		f:    f,
 		idx:  idx,
@@ -109,7 +107,7 @@ func NewTabixReader(filename string) (*TabixReader, error) {
 }
 
 // Close releases resources.
-func (tr *TabixReader) Close() error {
+func (tr *Reader) Close() error {
 	if tr.f != nil {
 		return tr.f.Close()
 	}
@@ -117,13 +115,13 @@ func (tr *TabixReader) Close() error {
 }
 
 // Meta returns the tabix metadata (column definitions, coordinate system).
-func (tr *TabixReader) Meta() tabixMeta {
+func (tr *Reader) Meta() tabixMeta {
 	return tr.meta
 }
 
-// Query returns an iterator over TabixRecords overlapping the 0-based
+// Query returns an iterator over Records overlapping the 0-based
 // half-open region [start, end) on the given reference.
-func (tr *TabixReader) Query(ref string, start, end int) (iter.Seq2[*TabixRecord, error], error) {
+func (tr *Reader) Query(ref string, start, end int) (iter.Seq2[*Record, error], error) {
 	refID := tr.idx.RefID(ref)
 	if refID < 0 {
 		return nil, fmt.Errorf("tabix: unknown reference %q", ref)
@@ -131,16 +129,14 @@ func (tr *TabixReader) Query(ref string, start, end int) (iter.Seq2[*TabixRecord
 
 	chunks := tr.idx.Query(refID, start, end)
 	if len(chunks) == 0 {
-		return func(yield func(*TabixRecord, error) bool) {}, nil
+		return func(yield func(*Record, error) bool) {}, nil
 	}
 
 	return tr.iterChunks(chunks, ref, start, end), nil
 }
 
-// iterChunks returns an iterator that reads lines from the given chunks,
-// parses coordinates, and yields records overlapping [start, end).
-func (tr *TabixReader) iterChunks(chunks []Chunk, ref string, start, end int) iter.Seq2[*TabixRecord, error] {
-	return func(yield func(*TabixRecord, error) bool) {
+func (tr *Reader) iterChunks(chunks []Chunk, ref string, start, end int) iter.Seq2[*Record, error] {
+	return func(yield func(*Record, error) bool) {
 		if err := tr.ir.SeekToVirtualOffset(chunks[0].Begin); err != nil {
 			yield(nil, fmt.Errorf("tabix: seeking to chunk: %w", err))
 			return
@@ -165,7 +161,7 @@ func (tr *TabixReader) iterChunks(chunks []Chunk, ref string, start, end int) it
 			}
 
 			if rec.Ref != ref {
-				return // past our reference
+				return
 			}
 			if rec.End <= start {
 				continue
@@ -185,12 +181,10 @@ func (tr *TabixReader) iterChunks(chunks []Chunk, ref string, start, end int) it
 	}
 }
 
-// parseTabulatedLine extracts the reference name and coordinates from a
-// tab-delimited line using the column definitions from the tabix metadata.
-func parseTabulatedLine(line string, meta *tabixMeta) (*TabixRecord, error) {
+func parseTabulatedLine(line string, meta *tabixMeta) (*Record, error) {
 	fields := strings.Split(line, "\t")
 
-	colSeq := int(meta.ColSeq) - 1 // 1-based → 0-based column index
+	colSeq := int(meta.ColSeq) - 1
 	colBeg := int(meta.ColBeg) - 1
 	colEnd := int(meta.ColEnd) - 1
 
@@ -209,13 +203,11 @@ func parseTabulatedLine(line string, meta *tabixMeta) (*TabixRecord, error) {
 		return nil, fmt.Errorf("parsing start: %w", err)
 	}
 
-	// Convert to 0-based if the file uses 1-based coordinates.
 	if !meta.ZeroBased {
 		beg--
 	}
 
-	// End coordinate.
-	end := beg + 1 // default: point feature
+	end := beg + 1
 	if meta.ColEnd != 0 && colEnd >= 0 && colEnd < len(fields) {
 		endStr := fields[colEnd]
 		e, err := strconv.Atoi(endStr)
@@ -224,11 +216,10 @@ func parseTabulatedLine(line string, meta *tabixMeta) (*TabixRecord, error) {
 		}
 	}
 
-	return &TabixRecord{
+	return &Record{
 		Line:  line,
 		Ref:   ref,
 		Start: beg,
 		End:   end,
 	}, nil
 }
-

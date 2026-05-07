@@ -1,4 +1,4 @@
-package htsio
+package tabix
 
 import (
 	"encoding/binary"
@@ -74,9 +74,6 @@ func LoadCSI(filename string) (*CSIIndex, error) {
 		return nil, fmt.Errorf("csi: reading l_aux: %w", err)
 	}
 
-	// Read auxiliary data. For tabix-generated CSI, this contains the
-	// same header as TBI: format, col_seq, col_beg, col_end, meta, skip,
-	// l_nm, then concatenated reference names.
 	if lAux > 0 {
 		auxData := make([]byte, lAux)
 		if _, err := io.ReadFull(r, auxData); err != nil {
@@ -87,7 +84,6 @@ func LoadCSI(filename string) (*CSIIndex, error) {
 		}
 	}
 
-	// Read reference sequences.
 	var nRef int32
 	if err := binary.Read(r, binary.LittleEndian, &nRef); err != nil {
 		return nil, fmt.Errorf("csi: reading n_ref: %w", err)
@@ -103,10 +99,9 @@ func LoadCSI(filename string) (*CSIIndex, error) {
 	return idx, nil
 }
 
-// parseTabixAux parses the tabix-style auxiliary data block from CSI.
 func (idx *CSIIndex) parseTabixAux(data []byte) error {
 	if len(data) < 28 {
-		return nil // not enough data for tabix header
+		return nil
 	}
 
 	idx.Format = int32(binary.LittleEndian.Uint32(data[0:4]))
@@ -117,7 +112,6 @@ func (idx *CSIIndex) parseTabixAux(data []byte) error {
 	idx.Skip = int32(binary.LittleEndian.Uint32(data[20:24]))
 	namesLen := int32(binary.LittleEndian.Uint32(data[24:28]))
 
-	// Zero-based flag is bit 16 of format.
 	if idx.Format&0x10000 != 0 {
 		idx.ZeroBased = true
 		idx.Format &= 0xFFFF
@@ -130,7 +124,6 @@ func (idx *CSIIndex) parseTabixAux(data []byte) error {
 	return nil
 }
 
-// readCSIRef reads the bins for one reference from a CSI index.
 func (idx *CSIIndex) readCSIRef(r io.Reader, ref *csiRefIndex) error {
 	var nBins int32
 	if err := binary.Read(r, binary.LittleEndian, &nBins); err != nil {
@@ -184,11 +177,10 @@ func (idx *CSIIndex) readCSIRef(r io.Reader, ref *csiRefIndex) error {
 func csiReg2bins(beg, end int, minShift, depth int32) []uint32 {
 	end--
 	var bins []uint32
-	// Level 0 is always bin 0.
 	bins = append(bins, 0)
 	for level := int32(1); level <= depth; level++ {
 		shift := minShift + 3*(depth-level)
-		offset := ((1 << (3 * level)) - 1) / 7 // first bin at this level
+		offset := ((1 << (3 * level)) - 1) / 7
 		lo := offset + (beg >> shift)
 		hi := offset + (end >> shift)
 		for k := lo; k <= hi; k++ {
@@ -207,8 +199,6 @@ func (idx *CSIIndex) Query(refID int, start, end int) []Chunk {
 	}
 	ref := &idx.refs[refID]
 
-	// Find the minimum virtual offset from leaf-level bins that overlap
-	// the query start. In CSI, each bin carries its own loffset.
 	var minOffset bgzf.VirtualOffset
 	leafShift := int(idx.minShift)
 	leafOffset := ((1 << (3 * int(idx.depth))) - 1) / 7
@@ -217,7 +207,6 @@ func (idx *CSIIndex) Query(refID int, start, end int) []Chunk {
 		minOffset = b.loffset
 	}
 
-	// Collect chunks from overlapping bins.
 	bins := csiReg2bins(start, end, idx.minShift, idx.depth)
 	var chunks []Chunk
 	for _, binNum := range bins {
@@ -235,12 +224,10 @@ func (idx *CSIIndex) Query(refID int, start, end int) []Chunk {
 		return nil
 	}
 
-	// Sort by begin offset.
 	sort.Slice(chunks, func(i, j int) bool {
 		return chunks[i].Begin < chunks[j].Begin
 	})
 
-	// Merge overlapping/adjacent chunks.
 	merged := []Chunk{chunks[0]}
 	for i := 1; i < len(chunks); i++ {
 		last := &merged[len(merged)-1]

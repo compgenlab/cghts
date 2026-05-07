@@ -1,47 +1,61 @@
-package htsio
+package bam
 
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/compgen-io/cgltk/htsio"
 	"github.com/compgen-io/cgltk/htsio/bgzf"
+	"github.com/compgen-io/cgltk/htsio/tabix"
 )
 
-// BamWriter writes BAM files natively using the bgzf package.
-// It implements the SamWriter interface and is safe for concurrent use.
-type BamWriter struct {
+// Writer writes BAM files natively using the bgzf package.
+// It implements the htsio.SamWriter interface and is safe for concurrent use.
+type Writer struct {
 	w       *bgzf.Writer
 	f       *os.File   // non-nil if we opened the file
-	header  *SamHeader
+	header  *htsio.SamHeader
 	refs    []bamRefInfo
 	refIdx  map[string]int32 // ref name → index
 	started bool
 	closed  bool
-	writeCh chan *SamRecord
+	writeCh chan *htsio.SamRecord
 	writeWg sync.WaitGroup
 	err     error
 	mu      sync.Mutex
 }
 
-// newBamWriter creates a native BAM writer for the given output file.
-func newBamWriter(filename string, header *SamHeader) (*BamWriter, error) {
+// NewWriter creates a native BAM writer for the given output file.
+// If filename is "-", writes to stdout.
+func NewWriter(filename string, header *htsio.SamHeader) (*Writer, error) {
+	if filename == "-" {
+		return NewWriterFromWriter(os.Stdout, header), nil
+	}
 	f, err := os.Create(filename)
 	if err != nil {
 		return nil, err
 	}
+	bw := newWriter(bgzf.NewWriter(f), header)
+	bw.f = f
+	return bw, nil
+}
 
-	bw := &BamWriter{
-		w:      bgzf.NewWriter(f),
-		f:      f,
+// NewWriterFromWriter creates a native BAM writer that writes to w.
+func NewWriterFromWriter(w io.Writer, header *htsio.SamHeader) *Writer {
+	return newWriter(bgzf.NewWriter(w), header)
+}
+
+func newWriter(w *bgzf.Writer, header *htsio.SamHeader) *Writer {
+	bw := &Writer{
+		w:      w,
 		header: header,
 	}
-
-	// Build reference list from header @SQ lines.
 	if header != nil {
 		hrefs := header.References()
 		bw.refs = make([]bamRefInfo, len(hrefs))
@@ -53,12 +67,11 @@ func newBamWriter(filename string, header *SamHeader) (*BamWriter, error) {
 	} else {
 		bw.refIdx = make(map[string]int32)
 	}
-
-	return bw, nil
+	return bw
 }
 
 // start writes the BAM header and starts the async writer goroutine.
-func (bw *BamWriter) start() error {
+func (bw *Writer) start() error {
 	bw.mu.Lock()
 	defer bw.mu.Unlock()
 
@@ -70,7 +83,7 @@ func (bw *BamWriter) start() error {
 		return err
 	}
 
-	bw.writeCh = make(chan *SamRecord, 1024)
+	bw.writeCh = make(chan *htsio.SamRecord, 1024)
 	bw.writeWg.Add(1)
 	go func() {
 		defer bw.writeWg.Done()
@@ -89,7 +102,7 @@ func (bw *BamWriter) start() error {
 }
 
 // writeHeader writes the BAM magic, header text, and reference dictionary.
-func (bw *BamWriter) writeHeader() error {
+func (bw *Writer) writeHeader() error {
 	// Magic
 	if _, err := bw.w.Write([]byte("BAM\x01")); err != nil {
 		return err
@@ -128,7 +141,7 @@ func (bw *BamWriter) writeHeader() error {
 }
 
 // Write sends a SamRecord to the async writer goroutine.
-func (bw *BamWriter) Write(rec *SamRecord) error {
+func (bw *Writer) Write(rec *htsio.SamRecord) error {
 	if err := bw.start(); err != nil {
 		return err
 	}
@@ -140,7 +153,7 @@ func (bw *BamWriter) Write(rec *SamRecord) error {
 }
 
 // Close drains the write buffer, flushes the BGZF stream, and closes the file.
-func (bw *BamWriter) Close() error {
+func (bw *Writer) Close() error {
 	if bw.closed {
 		return nil
 	}
@@ -168,7 +181,7 @@ func (bw *BamWriter) Close() error {
 }
 
 // encodeRecord encodes a SamRecord as a BAM binary record and writes it.
-func (bw *BamWriter) encodeRecord(rec *SamRecord) error {
+func (bw *Writer) encodeRecord(rec *htsio.SamRecord) error {
 	// Resolve reference IDs.
 	refID := int32(-1)
 	if rec.RefName != "*" {
@@ -207,8 +220,8 @@ func (bw *BamWriter) encodeRecord(rec *SamRecord) error {
 
 	// Compute BAM bin
 	pos := int32(rec.Pos - 1) // SAM 1-based → BAM 0-based
-	refLen := CigarRefLen(rec.Cigar)
-	bin := reg2bin(int(pos), int(pos)+refLen)
+	refLen := htsio.CigarRefLen(rec.Cigar)
+	bin := tabix.Reg2Bin(int(pos), int(pos)+refLen)
 
 	// Block size = fixed (32) + name + cigar + seq + qual + aux
 	blockSize := int32(32 + len(nameBytes) + len(cigarOps)*4 + len(seqBytes) + seqLen + len(auxBytes))
@@ -376,7 +389,7 @@ func encodeQualBytes(qual string, seqLen int) []byte {
 }
 
 // encodeAuxTags encodes SAM optional tags into BAM binary format.
-func encodeAuxTags(tags map[string]SamTag, tagOrder []string) []byte {
+func encodeAuxTags(tags map[string]htsio.SamTag, tagOrder []string) []byte {
 	if len(tags) == 0 {
 		return nil
 	}
@@ -398,7 +411,7 @@ func encodeAuxTags(tags map[string]SamTag, tagOrder []string) []byte {
 	return buf
 }
 
-func encodeOneTag(buf []byte, tag string, st SamTag) []byte {
+func encodeOneTag(buf []byte, tag string, st htsio.SamTag) []byte {
 	buf = append(buf, tag[0], tag[1])
 	switch st.Type {
 	case 'A':
@@ -486,24 +499,3 @@ func encodeArrayTagValue(buf []byte, value string) []byte {
 	return buf
 }
 
-// reg2bin calculates the BAM bin for a region [beg, end) using the BAM
-// binning scheme (as defined in the SAM specification).
-func reg2bin(beg, end int) uint16 {
-	end--
-	if beg>>14 == end>>14 {
-		return uint16(((1<<15)-1)/7 + beg>>14)
-	}
-	if beg>>17 == end>>17 {
-		return uint16(((1<<12)-1)/7 + beg>>17)
-	}
-	if beg>>20 == end>>20 {
-		return uint16(((1<<9)-1)/7 + beg>>20)
-	}
-	if beg>>23 == end>>23 {
-		return uint16(((1<<6)-1)/7 + beg>>23)
-	}
-	if beg>>26 == end>>26 {
-		return uint16(((1<<3)-1)/7 + beg>>26)
-	}
-	return 0
-}

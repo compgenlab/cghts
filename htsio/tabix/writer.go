@@ -1,4 +1,4 @@
-package htsio
+package tabix
 
 import (
 	"bufio"
@@ -14,61 +14,58 @@ import (
 	"github.com/compgen-io/cgltk/htsio/bgzf"
 )
 
-// TabixWriterOpts configures a TabixWriter.
-type TabixWriterOpts struct {
-	colSeq    int32 // 1-based column for sequence name
-	colBeg    int32 // 1-based column for region start
-	colEnd    int32 // 1-based column for region end (0 = same as start)
-	meta      int32 // comment character (e.g. '#')
-	skip      int32 // number of header lines to skip
-	zeroBased bool  // true if coordinates are 0-based
-	autoIndex bool  // write .tbi index on Close
+const (
+	defaultMaxMemory = 768 * 1024 * 1024
+)
+
+// WriterOpts configures a Writer.
+type WriterOpts struct {
+	colSeq    int32
+	colBeg    int32
+	colEnd    int32
+	meta      int32
+	skip      int32
+	zeroBased bool
+	autoIndex bool
 }
 
-// NewTabixWriterOpts creates a TabixWriterOpts with default values.
-func NewTabixWriterOpts() *TabixWriterOpts {
-	return &TabixWriterOpts{
+// NewWriterOpts creates a WriterOpts with default values.
+func NewWriterOpts() *WriterOpts {
+	return &WriterOpts{
 		colSeq: 1,
 		colBeg: 2,
 		colEnd: 3,
 	}
 }
 
-// Columns sets the 1-based column numbers for sequence name, start, and end.
-// Set end to 0 if the format has no end column (point features).
-func (o *TabixWriterOpts) Columns(seq, beg, end int) *TabixWriterOpts {
+func (o *WriterOpts) Columns(seq, beg, end int) *WriterOpts {
 	o.colSeq = int32(seq)
 	o.colBeg = int32(beg)
 	o.colEnd = int32(end)
 	return o
 }
 
-// Meta sets the comment character (lines starting with this are skipped).
-func (o *TabixWriterOpts) Meta(ch byte) *TabixWriterOpts {
+func (o *WriterOpts) Meta(ch byte) *WriterOpts {
 	o.meta = int32(ch)
 	return o
 }
 
-// Skip sets the number of header lines to skip.
-func (o *TabixWriterOpts) Skip(n int) *TabixWriterOpts {
+func (o *WriterOpts) Skip(n int) *WriterOpts {
 	o.skip = int32(n)
 	return o
 }
 
-// ZeroBased marks the coordinate system as 0-based half-open (like BED).
-func (o *TabixWriterOpts) ZeroBased() *TabixWriterOpts {
+func (o *WriterOpts) ZeroBased() *WriterOpts {
 	o.zeroBased = true
 	return o
 }
 
-// AutoIndex enables automatic .tbi index generation on Close.
-func (o *TabixWriterOpts) AutoIndex() *TabixWriterOpts {
+func (o *WriterOpts) AutoIndex() *WriterOpts {
 	o.autoIndex = true
 	return o
 }
 
-// BED configures columns and coordinate system for BED format.
-func (o *TabixWriterOpts) BED() *TabixWriterOpts {
+func (o *WriterOpts) BED() *WriterOpts {
 	o.colSeq = 1
 	o.colBeg = 2
 	o.colEnd = 3
@@ -77,8 +74,7 @@ func (o *TabixWriterOpts) BED() *TabixWriterOpts {
 	return o
 }
 
-// VCF configures columns and coordinate system for VCF format.
-func (o *TabixWriterOpts) VCF() *TabixWriterOpts {
+func (o *WriterOpts) VCF() *WriterOpts {
 	o.colSeq = 1
 	o.colBeg = 2
 	o.colEnd = 0
@@ -87,8 +83,7 @@ func (o *TabixWriterOpts) VCF() *TabixWriterOpts {
 	return o
 }
 
-// GFF configures columns and coordinate system for GFF/GTF format.
-func (o *TabixWriterOpts) GFF() *TabixWriterOpts {
+func (o *WriterOpts) GFF() *WriterOpts {
 	o.colSeq = 1
 	o.colBeg = 4
 	o.colEnd = 5
@@ -97,25 +92,20 @@ func (o *TabixWriterOpts) GFF() *TabixWriterOpts {
 	return o
 }
 
-// tabixLine holds a parsed line with extracted sort keys.
 type tabixLine struct {
 	line  string
 	ref   string
-	start int // 0-based for sorting
+	start int
 }
 
-// TabixWriter writes sorted, BGZF-compressed tabular files with optional
-// .tbi index generation. Lines are buffered in memory, sorted by reference
-// and position, and flushed to temp files when the buffer exceeds ~768MB.
-// On Close, temp files are merge-sorted into the final BGZF output.
-type TabixWriter struct {
+// Writer writes sorted, BGZF-compressed tabular files with optional
+// .tbi index generation.
+type Writer struct {
 	filename string
-	opts     *TabixWriterOpts
+	opts     *WriterOpts
 
-	// Header lines (comment/meta lines written before data).
 	headerLines []string
 
-	// Sort state
 	buf     []tabixLine
 	bufSize int
 	maxMem  int
@@ -124,7 +114,6 @@ type TabixWriter struct {
 	tmpFiles  []string
 	tmpCount  int
 
-	// Reference sequence ordering (discovered from data).
 	refOrder []string
 	refIdx   map[string]int
 
@@ -133,9 +122,9 @@ type TabixWriter struct {
 	err    error
 }
 
-// NewTabixWriter creates a sorted BGZF tabular writer.
-func NewTabixWriter(filename string, opts *TabixWriterOpts) *TabixWriter {
-	return &TabixWriter{
+// NewWriter creates a sorted BGZF tabular writer.
+func NewWriter(filename string, opts *WriterOpts) *Writer {
+	return &Writer{
 		filename: filename,
 		opts:     opts,
 		maxMem:   defaultMaxMemory,
@@ -143,16 +132,11 @@ func NewTabixWriter(filename string, opts *TabixWriterOpts) *TabixWriter {
 	}
 }
 
-// WriteHeader writes a header/comment line that will appear before data lines.
-// Header lines are not sorted and are written in the order provided.
-func (tw *TabixWriter) WriteHeader(line string) {
+func (tw *Writer) WriteHeader(line string) {
 	tw.headerLines = append(tw.headerLines, line)
 }
 
-// Write buffers a data line for sorting. The line should be tab-delimited
-// with columns matching the configured column definitions. Do not include
-// a trailing newline.
-func (tw *TabixWriter) Write(line string) error {
+func (tw *Writer) Write(line string) error {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
@@ -168,14 +152,13 @@ func (tw *TabixWriter) Write(line string) error {
 		return err
 	}
 
-	// Track reference ordering.
 	if _, ok := tw.refIdx[parsed.ref]; !ok {
 		tw.refIdx[parsed.ref] = len(tw.refOrder)
 		tw.refOrder = append(tw.refOrder, parsed.ref)
 	}
 
 	tw.buf = append(tw.buf, parsed)
-	tw.bufSize += len(line) + 64 // line + overhead
+	tw.bufSize += len(line) + 64
 
 	if tw.bufSize >= tw.maxMem {
 		if err := tw.flushBuffer(); err != nil {
@@ -187,9 +170,7 @@ func (tw *TabixWriter) Write(line string) error {
 	return nil
 }
 
-// Close sorts remaining records, merge-sorts temp files into the final
-// output, and optionally writes the .tbi index.
-func (tw *TabixWriter) Close() error {
+func (tw *Writer) Close() error {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
@@ -203,13 +184,11 @@ func (tw *TabixWriter) Close() error {
 		return tw.err
 	}
 
-	// Single-buffer case: write directly.
 	if len(tw.tmpFiles) == 0 {
 		tw.sortBuffer()
 		return tw.writeFinal(tw.buf)
 	}
 
-	// Flush remaining buffer.
 	if len(tw.buf) > 0 {
 		if err := tw.flushBuffer(); err != nil {
 			tw.cleanup()
@@ -217,7 +196,6 @@ func (tw *TabixWriter) Close() error {
 		}
 	}
 
-	// Merge sort into final output.
 	if err := tw.mergeFiles(); err != nil {
 		tw.cleanup()
 		return err
@@ -227,7 +205,7 @@ func (tw *TabixWriter) Close() error {
 	return nil
 }
 
-func (tw *TabixWriter) parseLine(line string) (tabixLine, error) {
+func (tw *Writer) parseLine(line string) (tabixLine, error) {
 	fields := strings.Split(line, "\t")
 	colSeq := int(tw.opts.colSeq) - 1
 	colBeg := int(tw.opts.colBeg) - 1
@@ -245,7 +223,6 @@ func (tw *TabixWriter) parseLine(line string) (tabixLine, error) {
 		return tabixLine{}, fmt.Errorf("tabix: parsing start: %w", err)
 	}
 
-	// Normalize to 0-based for sorting.
 	if !tw.opts.zeroBased {
 		beg--
 	}
@@ -253,13 +230,13 @@ func (tw *TabixWriter) parseLine(line string) (tabixLine, error) {
 	return tabixLine{line: line, ref: ref, start: beg}, nil
 }
 
-func (tw *TabixWriter) sortBuffer() {
+func (tw *Writer) sortBuffer() {
 	sort.Slice(tw.buf, func(i, j int) bool {
 		return tw.less(tw.buf[i], tw.buf[j])
 	})
 }
 
-func (tw *TabixWriter) less(a, b tabixLine) bool {
+func (tw *Writer) less(a, b tabixLine) bool {
 	ai, aok := tw.refIdx[a.ref]
 	bi, bok := tw.refIdx[b.ref]
 	if !aok {
@@ -274,7 +251,7 @@ func (tw *TabixWriter) less(a, b tabixLine) bool {
 	return a.start < b.start
 }
 
-func (tw *TabixWriter) flushBuffer() error {
+func (tw *Writer) flushBuffer() error {
 	if len(tw.buf) == 0 {
 		return nil
 	}
@@ -298,9 +275,7 @@ func (tw *TabixWriter) flushBuffer() error {
 	return nil
 }
 
-// writeBGZFSimple writes header lines and data lines to a BGZF file
-// without index tracking (used for temp files).
-func (tw *TabixWriter) writeBGZFSimple(filename string, lines []tabixLine) error {
+func (tw *Writer) writeBGZFSimple(filename string, lines []tabixLine) error {
 	w, err := bgzf.NewBGZipFile(filename)
 	if err != nil {
 		return err
@@ -316,9 +291,7 @@ func (tw *TabixWriter) writeBGZFSimple(filename string, lines []tabixLine) error
 	return w.Close()
 }
 
-// writeFinal writes header lines and sorted data lines to the final output
-// BGZF file, building the TBI index inline if autoIndex is enabled.
-func (tw *TabixWriter) writeFinal(lines []tabixLine) error {
+func (tw *Writer) writeFinal(lines []tabixLine) error {
 	w, err := bgzf.NewBGZipFile(tw.filename)
 	if err != nil {
 		return err
@@ -356,9 +329,7 @@ func (tw *TabixWriter) writeFinal(lines []tabixLine) error {
 	return nil
 }
 
-// mergeFiles performs a k-way merge of sorted temp BGZF files.
-func (tw *TabixWriter) mergeFiles() error {
-	// Open all temp files as line readers.
+func (tw *Writer) mergeFiles() error {
 	type lineReader struct {
 		r       *bgzf.Reader
 		f       *os.File
@@ -385,13 +356,11 @@ func (tw *TabixWriter) mergeFiles() error {
 		}
 	}()
 
-	// Open output.
 	outFile, err := bgzf.NewBGZipFile(tw.filename)
 	if err != nil {
 		return err
 	}
 
-	// Write header lines.
 	for _, h := range tw.headerLines {
 		if _, err := io.WriteString(outFile, h+"\n"); err != nil {
 			outFile.Close()
@@ -404,7 +373,6 @@ func (tw *TabixWriter) mergeFiles() error {
 		ib = newTBIIndexBuilder(tw.opts, tw.refOrder)
 	}
 
-	// Initialize merge heap.
 	h := &tabixMergeHeap{less: tw.less}
 
 	for i, r := range readers {
@@ -449,22 +417,20 @@ func (tw *TabixWriter) mergeFiles() error {
 	return nil
 }
 
-// tbiRefBuilder tracks bins and linear index for one reference during index building.
 type tbiRefBuilder struct {
 	bins      map[uint32][]Chunk
 	linearIdx map[int]bgzf.VirtualOffset
-	lastVO    bgzf.VirtualOffset // end of last record (for extending chunks)
+	lastVO    bgzf.VirtualOffset
 }
 
-// tbiIndexBuilder accumulates index data as records are written.
 type tbiIndexBuilder struct {
-	opts     *TabixWriterOpts
+	opts     *WriterOpts
 	refOrder []string
 	refIdx   map[string]int
 	refs     map[string]*tbiRefBuilder
 }
 
-func newTBIIndexBuilder(opts *TabixWriterOpts, refOrder []string) *tbiIndexBuilder {
+func newTBIIndexBuilder(opts *WriterOpts, refOrder []string) *tbiIndexBuilder {
 	refIdx := make(map[string]int, len(refOrder))
 	for i, name := range refOrder {
 		refIdx[name] = i
@@ -477,8 +443,6 @@ func newTBIIndexBuilder(opts *TabixWriterOpts, refOrder []string) *tbiIndexBuild
 	}
 }
 
-// addRecord records a line's position in the index. vo is the virtual offset
-// where the line starts in the BGZF output.
 func (ib *tbiIndexBuilder) addRecord(l tabixLine, vo bgzf.VirtualOffset) {
 	rb, ok := ib.refs[l.ref]
 	if !ok {
@@ -489,30 +453,21 @@ func (ib *tbiIndexBuilder) addRecord(l tabixLine, vo bgzf.VirtualOffset) {
 		ib.refs[l.ref] = rb
 	}
 
-	// Determine end position for binning.
 	end := l.start + 1
 	fields := strings.Split(l.line, "\t")
 	colEnd := int(ib.opts.colEnd) - 1
 	if ib.opts.colEnd != 0 && colEnd >= 0 && colEnd < len(fields) {
 		if e, err := strconv.Atoi(fields[colEnd]); err == nil {
-			if !ib.opts.zeroBased {
-				end = e
-			} else {
-				end = e
-			}
+			end = e
 		}
 	}
 
-	bin := reg2bin(l.start, end)
+	bin := Reg2Bin(l.start, end)
 
-	// Extend the last chunk in this bin if it's contiguous, otherwise start new.
 	chunks := rb.bins[uint32(bin)]
 	if len(chunks) > 0 {
 		last := &chunks[len(chunks)-1]
-		// If this record starts where the last one's block was, extend.
 		if vo.BlockOffset() == last.End.BlockOffset() || vo == last.End {
-			// We'll update End after the record is written (approximation:
-			// use vo + 1 within block for now; will be updated by next call).
 			last.End = vo
 		} else {
 			chunks = append(chunks, Chunk{Begin: vo, End: vo})
@@ -523,14 +478,12 @@ func (ib *tbiIndexBuilder) addRecord(l tabixLine, vo bgzf.VirtualOffset) {
 	rb.bins[uint32(bin)] = chunks
 	rb.lastVO = vo
 
-	// Linear index.
 	window := l.start >> 14
 	if existing, ok := rb.linearIdx[window]; !ok || vo < existing {
 		rb.linearIdx[window] = vo
 	}
 }
 
-// writeTBI writes the .tbi index file.
 func (ib *tbiIndexBuilder) writeTBI(path string) error {
 	tbiFile, err := os.Create(path)
 	if err != nil {
@@ -569,7 +522,6 @@ func (ib *tbiIndexBuilder) writeTBI(path string) error {
 			continue
 		}
 
-		// Merge adjacent chunks within each bin.
 		mergedBins := make(map[uint32][]Chunk)
 		for bin, chunks := range rb.bins {
 			if len(chunks) == 0 {
@@ -589,10 +541,6 @@ func (ib *tbiIndexBuilder) writeTBI(path string) error {
 					merged = append(merged, chunks[i])
 				}
 			}
-			// Extend the last chunk's End to cover the full data.
-			// Since we recorded Begin=vo for each record but couldn't
-			// know End until the next record, the last chunk may need
-			// extension. Use lastVO as an approximation.
 			if rb.lastVO > merged[len(merged)-1].End {
 				merged[len(merged)-1].End = rb.lastVO
 			}
@@ -633,20 +581,18 @@ func (ib *tbiIndexBuilder) writeTBI(path string) error {
 	return tbiFile.Close()
 }
 
-func (tw *TabixWriter) cleanup() {
+func (tw *Writer) cleanup() {
 	for _, path := range tw.tmpFiles {
 		os.Remove(path)
 	}
 	tw.tmpFiles = nil
 }
 
-// tabixMergeItem holds a line and the index of the reader it came from.
 type tabixMergeItem struct {
 	line      tabixLine
 	readerIdx int
 }
 
-// tabixMergeHeap is a simple min-heap for k-way merge of tabix lines.
 type tabixMergeHeap struct {
 	items []*tabixMergeItem
 	less  func(a, b tabixLine) bool
@@ -656,7 +602,6 @@ func (h *tabixMergeHeap) Len() int { return len(h.items) }
 
 func (h *tabixMergeHeap) push(item *tabixMergeItem) {
 	h.items = append(h.items, item)
-	// Sift up.
 	i := len(h.items) - 1
 	for i > 0 {
 		parent := (i - 1) / 2
@@ -674,7 +619,6 @@ func (h *tabixMergeHeap) pop() *tabixMergeItem {
 	h.items[0] = h.items[n-1]
 	h.items[n-1] = nil
 	h.items = h.items[:n-1]
-	// Sift down.
 	i := 0
 	for {
 		left := 2*i + 1
