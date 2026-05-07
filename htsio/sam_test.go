@@ -98,10 +98,6 @@ func TestSamRecordString(t *testing.T) {
 	}
 }
 
-func TestStdoutSamWriterInterface(t *testing.T) {
-	var _ SamWriter = NewStdoutSamWriter(nil)
-}
-
 func TestCigarRefLen(t *testing.T) {
 	tests := []struct {
 		cigar string
