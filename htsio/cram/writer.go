@@ -1135,6 +1135,15 @@ func (cw *Writer) compressAndEncodeBlock(contentType byte, contentID int32, data
 		}
 	}
 
+	// Try rANS Nx16 (v3.1+).
+	if cw.majorVersion() >= 3 && cw.opts.version.minor >= 1 {
+		if candidate, err := cw.encodeBlock(contentType, contentID, blockMethodRans4x16, data); err == nil {
+			if len(candidate) < len(best) {
+				best = candidate
+			}
+		}
+	}
+
 	return best, nil
 }
 
@@ -1167,6 +1176,12 @@ func (cw *Writer) encodeBlock(contentType byte, contentID int32, method byte, da
 		} else {
 			compData = enc0
 		}
+		if len(compData) >= len(data) {
+			method = blockMethodRaw
+			compData = data
+		}
+	case blockMethodRans4x16:
+		compData = encodeRansNx16(data)
 		if len(compData) >= len(data) {
 			method = blockMethodRaw
 			compData = data
