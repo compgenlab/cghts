@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgen-io/cgltk/htsio"
+	"github.com/compgen-io/cgkit/htsio"
 )
 
 // SamtoolsReader reads SAM/BAM/CRAM files by executing samtools view.
