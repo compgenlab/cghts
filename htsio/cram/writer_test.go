@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/compgen-io/cgltk/htsio"
+	"github.com/compgen-io/cgkit/htsio"
 )
 
 func TestWriterRoundtrip(t *testing.T) {

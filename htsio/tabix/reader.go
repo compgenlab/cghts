@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgen-io/cgltk/htsio/bgzf"
+	"github.com/compgen-io/cgkit/htsio/bgzf"
 )
 
 // tabixIndex is the interface shared by TBI (BinIndex) and CSI (CSIIndex)

@@ -12,8 +12,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/compgen-io/cgltk/htsio"
-	"github.com/compgen-io/cgltk/htsio/codec"
+	"github.com/compgen-io/cgkit/htsio"
+	"github.com/compgen-io/cgkit/htsio/codec"
 )
 
 // Version identifies a CRAM version for the writer.

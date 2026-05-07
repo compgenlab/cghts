@@ -8,7 +8,7 @@ import (
 	"hash/crc32"
 	"io"
 
-	"github.com/compgen-io/cgltk/htsio/codec"
+	"github.com/compgen-io/cgkit/htsio/codec"
 	"github.com/ulikunitz/xz/lzma"
 )
 

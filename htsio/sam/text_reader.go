@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgen-io/cgltk/htsio"
+	"github.com/compgen-io/cgkit/htsio"
 )
 
 func init() {

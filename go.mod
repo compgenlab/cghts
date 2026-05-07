@@ -1,4 +1,4 @@
-module github.com/compgen-io/cgltk
+module github.com/compgen-io/cgkit
 
 go 1.23
 
