@@ -56,29 +56,299 @@ func EncodeRansNx16(data []byte) []byte {
 		}
 	}
 
+	// Try multiple strategies and pick the smallest.
+	best := encodeRansNx16Order0(data)
+
+	// Try order-1.
+	if len(data) > 16 {
+		o1 := encodeRansNx16Order1(data)
+		if len(o1) < len(best) {
+			best = o1
+		}
+	}
+
 	// Try PACK transform if few symbols.
 	if nsyms <= 16 {
 		packed, packMeta := packNx16Encode(data, nsyms)
-		// Encode packed data with order-0.
 		encoded := encodeRansNx16Order0Core(packed)
 		flags := byte(ransOrderPack)
 
 		var out []byte
 		out = append(out, flags)
-		out = varPutU32Slice(out, uint32(len(data))) // uncompressed size
+		out = varPutU32Slice(out, uint32(len(data)))
 		out = append(out, packMeta...)
-		out = varPutU32Slice(out, uint32(len(packed))) // packed size
+		out = varPutU32Slice(out, uint32(len(packed)))
 		out = append(out, encoded...)
 
-		// Also try without PACK and pick the smaller.
-		nopack := encodeRansNx16Order0(data)
-		if len(nopack) < len(out) {
-			return nopack
+		if len(out) < len(best) {
+			best = out
 		}
-		return out
 	}
 
-	return encodeRansNx16Order0(data)
+	return best
+}
+
+// encodeRansNx16Order1 encodes data with order-1 rANS Nx16.
+func encodeRansNx16Order1(data []byte) []byte {
+	flags := byte(ransOrderMask) // order-1
+	encoded := encodeRansNx16Order1Core(data)
+
+	var out []byte
+	out = append(out, flags)
+	out = varPutU32Slice(out, uint32(len(data)))
+	out = append(out, encoded...)
+	return out
+}
+
+// encodeRansNx16Order1Core performs the core rANS Nx16 order-1 encoding.
+// Returns freq tables + states + encoded data (no flags/size prefix).
+func encodeRansNx16Order1Core(data []byte) []byte {
+	if len(data) == 0 {
+		return nil
+	}
+
+	nx := 4
+	n := len(data)
+	tfShift := uint(ransNx16TFShift)
+
+	// Count per-context frequencies using NX-way split contexts (matching decoder).
+	var freqs [256][256]uint32
+	var totals [256]uint32
+
+	// The decoder uses NX-way split: state z processes positions z*iszN .. (z+1)*iszN-1,
+	// with the last state handling the remainder.
+	iszN := n / nx
+	for z := 0; z < nx; z++ {
+		start := z * iszN
+		end := start + iszN
+		if z == nx-1 {
+			end = n
+		}
+		prev := byte(0)
+		for i := start; i < end; i++ {
+			freqs[prev][data[i]]++
+			totals[prev]++
+			prev = data[i]
+		}
+	}
+
+	// Build the alphabet (F0): includes all byte values that appear as EITHER
+	// contexts or symbols, since the decoder uses F0 for both.
+	var alpha [256]uint32
+	for i := 0; i < 256; i++ {
+		if totals[i] > 0 {
+			alpha[i] = 1
+		}
+	}
+	for ctx := 0; ctx < 256; ctx++ {
+		if totals[ctx] == 0 {
+			continue
+		}
+		for j := 0; j < 256; j++ {
+			if freqs[ctx][j] > 0 {
+				alpha[j] = 1
+			}
+		}
+	}
+
+	// Ensure every symbol in the alphabet also has a context entry (even if empty).
+	// The decoder reads a freq table for every ctx where alpha[ctx] > 0.
+	// For contexts that have no real data, we need a valid (all-zero) freq table
+	// that sums to totFreq — give them a uniform distribution.
+	for i := 0; i < 256; i++ {
+		if alpha[i] > 0 && totals[i] == 0 {
+			// This symbol appears in data but never as a context.
+			// Give it a trivial frequency table (uniform over all alpha symbols).
+			totals[i] = 0 // will be handled below
+		}
+	}
+
+	// Normalize each context's frequencies.
+	var normFreqs [256][256]uint32
+	var cumFreqs [256][256]uint32
+	for ctx := 0; ctx < 256; ctx++ {
+		if alpha[ctx] == 0 {
+			continue
+		}
+		if totals[ctx] > 0 {
+			// Real context: normalize using only symbols in the alphabet.
+			var filteredFreqs [256]uint32
+			var filteredTotal uint32
+			for j := 0; j < 256; j++ {
+				if alpha[j] > 0 && freqs[ctx][j] > 0 {
+					filteredFreqs[j] = freqs[ctx][j]
+					filteredTotal += freqs[ctx][j]
+				}
+			}
+			normFreqs[ctx] = nx16NormalizeFreqs(filteredFreqs[:], filteredTotal)
+		} else {
+			// Synthetic context: uniform distribution over all alpha symbols.
+			var synthFreqs [256]uint32
+			count := uint32(0)
+			for j := 0; j < 256; j++ {
+				if alpha[j] > 0 {
+					synthFreqs[j] = 1
+					count++
+				}
+			}
+			normFreqs[ctx] = nx16NormalizeFreqs(synthFreqs[:], count)
+		}
+		cum := uint32(0)
+		for j := 0; j < 256; j++ {
+			cumFreqs[ctx][j] = cum
+			cum += normFreqs[ctx][j]
+		}
+	}
+
+	// Build the frequency table.
+	freqTable := nx16EncodeFreqOrder1(normFreqs[:], alpha[:])
+
+	// First byte: upper nibble = TF_SHIFT, bit 0 = compressed freq table flag.
+	firstByte := byte(tfShift<<4) | 0 // uncompressed for now
+
+	// Encode with NX-way split, in reverse.
+	var state [4]uint32
+	for i := 0; i < nx; i++ {
+		state[i] = ransNx16L
+	}
+
+	var outBuf []byte
+
+	// Build context arrays for reverse traversal per split.
+	type posCtx struct {
+		sym byte
+		ctx byte
+	}
+	splits := make([][]posCtx, nx)
+	for z := 0; z < nx; z++ {
+		start := z * iszN
+		end := start + iszN
+		if z == nx-1 {
+			end = n
+		}
+		s := make([]posCtx, end-start)
+		prev := byte(0)
+		for i := start; i < end; i++ {
+			s[i-start] = posCtx{sym: data[i], ctx: prev}
+			prev = data[i]
+		}
+		splits[z] = s
+	}
+
+	// Encode in reverse. The decoder processes: outer loop over positions,
+	// inner loop over z from 0..nx-1. So the encoder must reverse that.
+	// The last state handles the remainder first (in reverse).
+
+	// First encode the remainder (last state, positions beyond iszN).
+	lastSplit := splits[nx-1]
+	for i := len(lastSplit) - 1; i >= iszN; i-- {
+		sym := lastSplit[i].sym
+		ctx := lastSplit[i].ctx
+		freq := normFreqs[ctx][sym]
+		cf := cumFreqs[ctx][sym]
+		if freq == 0 {
+			continue
+		}
+		maxState := freq << (31 - tfShift)
+		for state[nx-1] >= maxState {
+			outBuf = append(outBuf, byte((state[nx-1]>>8)&0xff), byte(state[nx-1]&0xff))
+			state[nx-1] >>= 16
+		}
+		state[nx-1] = ((state[nx-1] / freq) << tfShift) + (state[nx-1] % freq) + cf
+	}
+
+	// Then encode the main body: positions iszN-1 down to 0, inner z from nx-1 to 0.
+	for i := iszN - 1; i >= 0; i-- {
+		for z := nx - 1; z >= 0; z-- {
+			if i >= len(splits[z]) {
+				continue
+			}
+			sym := splits[z][i].sym
+			ctx := splits[z][i].ctx
+			freq := normFreqs[ctx][sym]
+			cf := cumFreqs[ctx][sym]
+			if freq == 0 {
+				continue
+			}
+			maxState := freq << (31 - tfShift)
+			for state[z] >= maxState {
+				outBuf = append(outBuf, byte((state[z]>>8)&0xff), byte(state[z]&0xff))
+				state[z] >>= 16
+			}
+			state[z] = ((state[z] / freq) << tfShift) + (state[z] % freq) + cf
+		}
+	}
+
+	// Write final states.
+	stateBytes := make([]byte, nx*4)
+	for i := 0; i < nx; i++ {
+		binary.LittleEndian.PutUint32(stateBytes[i*4:], state[i])
+	}
+
+	// Reverse output buffer.
+	for i, j := 0, len(outBuf)-1; i < j; i, j = i+1, j-1 {
+		outBuf[i], outBuf[j] = outBuf[j], outBuf[i]
+	}
+
+	var result []byte
+	result = append(result, firstByte)
+	result = append(result, freqTable...)
+	result = append(result, stateBytes...)
+	result = append(result, outBuf...)
+	return result
+}
+
+// nx16EncodeFreqOrder1 writes order-1 frequency tables in the freqD format.
+func nx16EncodeFreqOrder1(normFreqs [][256]uint32, totals []uint32) []byte {
+	// Write the alphabet (which contexts are present).
+	var alphaFreqs [256]uint32
+	for ctx := 0; ctx < 256; ctx++ {
+		if totals[ctx] > 0 {
+			alphaFreqs[ctx] = 1
+		}
+	}
+	out := nx16EncodeAlphabet(nil, alphaFreqs[:])
+
+	// For each context, write freqD format.
+	for ctx := 0; ctx < 256; ctx++ {
+		if totals[ctx] == 0 {
+			continue
+		}
+		out = nx16EncodeFreqD(out, normFreqs[ctx][:], alphaFreqs[:])
+	}
+	return out
+}
+
+// nx16EncodeFreqD writes a per-context frequency table in delta/zero-run format.
+func nx16EncodeFreqD(out []byte, freqs []uint32, F0 []uint32) []byte {
+	dz := 0
+	for j := 0; j < 256; j++ {
+		if F0[j] == 0 {
+			continue
+		}
+		if dz > 0 {
+			dz--
+			continue
+		}
+		f := freqs[j]
+		out = varPutU32Slice(out, f)
+		if f == 0 {
+			// Count consecutive zeros.
+			run := 0
+			for k := j + 1; k < 256; k++ {
+				if F0[k] == 0 {
+					continue
+				}
+				if freqs[k] != 0 {
+					break
+				}
+				run++
+			}
+			out = append(out, byte(run))
+			dz = run
+		}
+	}
+	return out
 }
 
 // encodeRansNx16Order0 encodes data with order-0 rANS Nx16 (no transforms).
