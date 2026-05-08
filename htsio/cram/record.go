@@ -533,6 +533,9 @@ type refInfo struct {
 func reconstructSequence(rec *cramRecord, ch *compressionHeader, refSeq []byte) string {
 	if rec.bamFlags&0x4 != 0 {
 		// Unmapped
+		if rec.readLen == 0 {
+			return "*"
+		}
 		return string(rec.bases)
 	}
 
