@@ -3,14 +3,14 @@
 ## Must complete before merge
 
 ### Integration
-- [ ] Wire `cram.Reader` into `NewSamReader()` so `.cram` files use the native reader instead of `SamtoolsSamReader`
+- [x] Wire `cram.Reader` into `NewSamReader()` so `.cram` files use the native reader instead of `SamtoolsSamReader`
 - [ ] Verify that all existing callers of `NewSamReader()` with CRAM files work with the native reader
 
 ### Correctness
 - [x] Validate CRC32 checksums on blocks and container headers
 - [x] CRAM v2.1 support (no CRC32, itf8 record counter, different EOF)
-- [ ] Verify handling of unmapped/unplaced reads (refID = -1, no reference sequence)
-- [ ] Verify embedded reference sequences in CRAM containers (ref stored in the file itself, not external FASTA)
+- [x] Verify handling of unmapped/unplaced reads (refID = -1, no reference sequence)
+- [x] Verify embedded reference sequences in CRAM containers (ref stored in the file itself, not external FASTA)
 
 ### CRAM v3.1 codec support
 - [x] rANS Nx16 (method 5) — order-0 and order-1 working, with 4-way and 32-way (X32) interleaving
@@ -19,9 +19,19 @@
 - [x] Adaptive arithmetic coder (method 6) — order-0, order-1, with RLE/PACK/STRIPE/CAT transforms, verified with htscodecs test vectors
 
 ### Not needed for merge
-- [ ] Tag round-trip testing (deferred)
-- [ ] Native CRAM writer (currently CRAM writing goes through samtools)
+- [x] Tag round-trip testing — verified all tag types (A, i, f, Z) survive write→read roundtrip across v2.1/v3.0/v3.1
+- [x] Native CRAM writer (v2.1, v3.0, v3.1 with gzip, rANS 4x8, and rANS Nx16 competitive compression)
 - [ ] Performance benchmarks vs samtools
+
+## Bugs fixed
+
+### Writer: tag block ID assignment (FIXED)
+Tag block IDs were re-assigned by iterating a map (non-deterministic order), causing
+misalignment with the compression header. Fixed to extract block IDs from encoding
+descriptor params.
+
+### Reader: unmapped zero-length reads (FIXED)
+`reconstructSequence` returned `""` instead of `"*"` for unmapped reads with no sequence.
 
 ## Debug notes (resolved)
 
