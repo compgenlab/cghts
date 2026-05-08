@@ -882,12 +882,16 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 		return b
 	}
 
-	// Tag block ID map: tag key → block ID.
+	// Tag block ID map: extract actual block IDs from the encoding descriptors
+	// to ensure consistency with the compression header.
 	tagBlockIDs := make(map[int32]int32)
-	nextTagBlockID := int32(blockIDTagBase)
-	for key := range ch.tagEncodings {
-		tagBlockIDs[key] = nextTagBlockID
-		nextTagBlockID++
+	for key, enc := range ch.tagEncodings {
+		// params layout: lenCodecID(ITF8) lenParamsSize(ITF8) blockID(ITF8) ...
+		pr := newByteReader(enc.params)
+		readITF8(pr) // len codec ID
+		readITF8(pr) // len params size
+		blockID, _ := readITF8(pr)
+		tagBlockIDs[key] = blockID
 	}
 
 	prevAlignPos := startPos
