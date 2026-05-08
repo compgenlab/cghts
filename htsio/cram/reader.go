@@ -223,7 +223,11 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 
 				// Load reference.
 				var refSeq []byte
-				if sh.refSeqID >= 0 && cr.refProv != nil {
+				if sh.embeddedRefID >= 0 {
+					if embData, ok := externalBlocks[sh.embeddedRefID]; ok {
+						refSeq = embData
+					}
+				} else if sh.refSeqID >= 0 && cr.refProv != nil {
 					if int(sh.refSeqID) < len(cr.refs) {
 						if seq, err := cr.refProv.getSequence(cr.refs[sh.refSeqID].name); err == nil {
 							refSeq = seq
@@ -354,7 +358,12 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 
 		// Load reference sequence for this slice.
 		var refSeq []byte
-		if sh.refSeqID >= 0 && cr.refProv != nil {
+		if sh.embeddedRefID >= 0 {
+			// Embedded reference: the reference bases are stored in an external block.
+			if embData, ok := externalBlocks[sh.embeddedRefID]; ok {
+				refSeq = embData
+			}
+		} else if sh.refSeqID >= 0 && cr.refProv != nil {
 			refName := ""
 			if int(sh.refSeqID) < len(cr.refs) {
 				refName = cr.refs[sh.refSeqID].name
