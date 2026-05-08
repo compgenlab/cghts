@@ -33,6 +33,7 @@ type WriterOpts struct {
 	refPath         string
 	level           int // compression level 0-9
 	recordsPerSlice int
+	embedRef        bool // store reference bases in the CRAM file
 }
 
 // NewWriterOpts returns default writer options (v3.1, level 6, 10000 records/slice).
@@ -48,6 +49,7 @@ func (o *WriterOpts) SetVersion(v Version) *WriterOpts         { o.version = v; 
 func (o *WriterOpts) Reference(path string) *WriterOpts        { o.refPath = path; return o }
 func (o *WriterOpts) Level(n int) *WriterOpts                  { o.level = n; return o }
 func (o *WriterOpts) RecordsPerSlice(n int) *WriterOpts        { o.recordsPerSlice = n; return o }
+func (o *WriterOpts) EmbedRef(v bool) *WriterOpts              { o.embedRef = v; return o }
 
 // Writer writes CRAM files. Implements htsio.SamWriter.
 type Writer struct {
@@ -645,7 +647,8 @@ const (
 	blockIDFP = 26
 	blockIDBB = 27
 	blockIDQQ = 28
-	blockIDTagBase = 100 // tags start at 100+
+	blockIDEmbeddedRef = 99 // embedded reference block
+	blockIDTagBase     = 100 // tags start at 100+
 )
 
 type writerCompressionHeader struct {
@@ -1048,6 +1051,25 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 		}
 	}
 
+	// Embed reference sequence if requested.
+	embeddedRefID := int32(-1)
+	if cw.opts.embedRef && refID >= 0 && cw.refProv != nil && int(refID) < len(cw.refs) {
+		if refSeq, err := cw.refProv.getSequence(cw.refs[refID].name); err == nil {
+			start := int(startPos) - 1
+			end := start + int(alignmentSpan)
+			if start < 0 {
+				start = 0
+			}
+			if end > len(refSeq) {
+				end = len(refSeq)
+			}
+			if start < end {
+				embeddedRefID = blockIDEmbeddedRef
+				externals[embeddedRefID] = bytes.NewBuffer(refSeq[start:end])
+			}
+		}
+	}
+
 	// Build external block content IDs.
 	var contentIDs []int32
 	for id := range externals {
@@ -1063,7 +1085,7 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 		recordCounter:   cw.recordCounter,
 		numBlocks:       int32(1 + len(contentIDs)), // core block + external blocks
 		blockContentIDs: contentIDs,
-		embeddedRefID:   -1,
+		embeddedRefID:   embeddedRefID,
 		referenceMD5:    refMD5,
 	}
 

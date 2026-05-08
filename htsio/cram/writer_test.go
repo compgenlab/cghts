@@ -511,6 +511,89 @@ func TestTagRoundtrip(t *testing.T) {
 	}
 }
 
+func TestEmbeddedRefRoundtrip(t *testing.T) {
+	refFile := "testdata/ref.fa"
+
+	header := htsio.NewSamHeader()
+	header.AddLine("@HD\tVN:1.6\tSO:coordinate")
+	header.AddLine("@SQ\tSN:chr1\tLN:100000")
+
+	records := []*htsio.SamRecord{
+		{
+			ReadName: "read1", Flag: 0, RefName: "chr1", Pos: 100, MapQ: 60,
+			Cigar: "10M", RefNext: "*", PosNext: 0, InsertLen: 0,
+			Seq: "ACGTACGTAC", Qual: "IIIIIIIIII",
+			Tags: map[string]htsio.SamTag{}, TagOrder: []string{},
+		},
+		{
+			ReadName: "read2", Flag: 0, RefName: "chr1", Pos: 200, MapQ: 30,
+			Cigar: "10M", RefNext: "*", PosNext: 0, InsertLen: 0,
+			Seq: "TGCATGCATG", Qual: "IIIIIIIIII",
+			Tags: map[string]htsio.SamTag{}, TagOrder: []string{},
+		},
+	}
+
+	for _, version := range []struct {
+		name string
+		ver  Version
+	}{
+		{"v3.0", V3},
+		{"v3.1", V31},
+	} {
+		t.Run(version.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cramFile := filepath.Join(tmpDir, "embedded.cram")
+
+			// Write with embedded reference enabled.
+			opts := NewWriterOpts().SetVersion(version.ver).Reference(refFile).EmbedRef(true)
+			w, err := NewWriter(cramFile, header, opts)
+			if err != nil {
+				t.Fatalf("NewWriter: %v", err)
+			}
+			for _, rec := range records {
+				if err := w.Write(rec); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			if err := w.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			// Read back WITHOUT an external reference — the embedded ref should suffice.
+			reader, err := NewReader(cramFile, "")
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+			defer reader.Close()
+
+			var got []*htsio.SamRecord
+			for rec, err := range reader.Records() {
+				if err != nil {
+					t.Fatalf("Records: %v", err)
+				}
+				got = append(got, rec)
+			}
+
+			if len(got) != len(records) {
+				t.Fatalf("record count: got %d, want %d", len(got), len(records))
+			}
+
+			for i, want := range records {
+				g := got[i]
+				if g.ReadName != want.ReadName {
+					t.Errorf("record %d ReadName: got %q, want %q", i, g.ReadName, want.ReadName)
+				}
+				if g.Seq != want.Seq {
+					t.Errorf("record %d Seq: got %q, want %q", i, g.Seq, want.Seq)
+				}
+				if g.Cigar != want.Cigar {
+					t.Errorf("record %d Cigar: got %q, want %q", i, g.Cigar, want.Cigar)
+				}
+			}
+		})
+	}
+}
+
 func TestWriterSamtoolsReadable(t *testing.T) {
 	// Skip if samtools not available.
 	if _, err := exec.LookPath("samtools"); err != nil {
