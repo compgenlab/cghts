@@ -223,9 +223,11 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 
 				// Load reference.
 				var refSeq []byte
+				refOffset := 0
 				if sh.embeddedRefID >= 0 {
 					if embData, ok := externalBlocks[sh.embeddedRefID]; ok {
 						refSeq = embData
+						refOffset = int(sh.alignmentStart) - 1
 					}
 				} else if sh.refSeqID >= 0 && cr.refProv != nil {
 					if int(sh.refSeqID) < len(cr.refs) {
@@ -244,10 +246,12 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 				for i := range records {
 					rec := &records[i]
 					recRefSeq := refSeq
+					recRefOffset := refOffset
 					if sh.refSeqID == -2 && cr.refProv != nil && rec.refID >= 0 {
 						if int(rec.refID) < len(cr.refs) {
 							if seq, err := cr.refProv.getSequence(cr.refs[rec.refID].name); err == nil {
 								recRefSeq = seq
+								recRefOffset = 0
 							}
 						}
 					}
@@ -262,7 +266,7 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 						continue
 					}
 
-					samRec := cr.cramToSam(rec, compHdr, recRefSeq)
+					samRec := cr.cramToSam(rec, compHdr, recRefSeq, recRefOffset)
 					if !yield(samRec, nil) {
 						return
 					}
@@ -358,10 +362,12 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 
 		// Load reference sequence for this slice.
 		var refSeq []byte
+		refOffset := 0
 		if sh.embeddedRefID >= 0 {
 			// Embedded reference: the reference bases are stored in an external block.
 			if embData, ok := externalBlocks[sh.embeddedRefID]; ok {
 				refSeq = embData
+				refOffset = int(sh.alignmentStart) - 1
 			}
 		} else if sh.refSeqID >= 0 && cr.refProv != nil {
 			refName := ""
@@ -386,16 +392,18 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 		// Convert to SamRecords and yield.
 		for i := range records {
 			recRefSeq := refSeq
+			recRefOffset := refOffset
 			// For multi-ref slices, load the correct reference per record.
 			if sh.refSeqID == -2 && cr.refProv != nil && records[i].refID >= 0 {
 				if int(records[i].refID) < len(cr.refs) {
 					rn := cr.refs[records[i].refID].name
 					if seq, err := cr.refProv.getSequence(rn); err == nil {
 						recRefSeq = seq
+						recRefOffset = 0
 					}
 				}
 			}
-			samRec := cr.cramToSam(&records[i], compHdr, recRefSeq)
+			samRec := cr.cramToSam(&records[i], compHdr, recRefSeq, recRefOffset)
 			if !yield(samRec, nil) {
 				return false
 			}
@@ -406,7 +414,8 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 }
 
 // cramToSam converts a CRAM record to a SamRecord.
-func (cr *Reader) cramToSam(rec *cramRecord, ch *compressionHeader, refSeq []byte) *htsio.SamRecord {
+// refOffset is the 0-based offset subtracted from reference positions (non-zero for embedded refs).
+func (cr *Reader) cramToSam(rec *cramRecord, ch *compressionHeader, refSeq []byte, refOffset int) *htsio.SamRecord {
 	// Reference name
 	refName := "*"
 	if rec.refID >= 0 && int(rec.refID) < len(cr.refs) {
@@ -425,7 +434,7 @@ func (cr *Reader) cramToSam(rec *cramRecord, ch *compressionHeader, refSeq []byt
 	}
 
 	// Sequence
-	seq := reconstructSequence(rec, ch, refSeq)
+	seq := reconstructSequence(rec, ch, refSeq, refOffset)
 
 	// CIGAR
 	cigar := reconstructCigar(rec)
