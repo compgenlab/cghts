@@ -99,9 +99,9 @@ func NewWriter(filename string, header *htsio.SamHeader, opts ...*WriterOpts) (*
 - [x] Order-0 with 4-way interleaving + 16-bit LE renormalization
 - [x] Order-1 with NX-way split output + freqD frequency table format
 - [x] PACK transform (symbol remapping + bit packing for ≤16 symbols)
-- [ ] RLE transform (run-length encoding for repeated symbols)
-- [ ] STRIPE transform (byte-interleaving into N sub-streams)
-- [ ] CAT passthrough
+- [x] RLE transform (run-length encoding for repeated symbols)
+- [x] STRIPE transform (byte-interleaving into N sub-streams) — encoder works but excluded from competitive selection due to htslib compat issue
+- [x] CAT passthrough
 
 ### fqzcomp encoder (quality scores)
 - [ ] Context model parameter selection
@@ -124,7 +124,7 @@ func NewWriter(filename string, header *htsio.SamHeader, opts ...*WriterOpts) (*
 - [x] Method selection based on version:
   - v2.1: raw + gzip
   - v3.0: raw + gzip + rANS 4x8
-  - v3.1: raw + gzip + rANS 4x8 + rANS Nx16 (order-0, order-1, PACK)
+  - v3.1: raw + gzip + rANS 4x8 + rANS Nx16 (order-0, order-1, PACK, RLE, CAT)
 - [ ] Quality scores: prefer fqzcomp at higher levels (v3.1)
 - [ ] Read names: prefer name tokenizer (v3.1), exclude rANS
 - [ ] Stats/metrics tracking to avoid re-trying methods that consistently lose

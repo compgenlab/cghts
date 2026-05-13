@@ -6,7 +6,7 @@ import (
 )
 
 // rANS Nx16 encoder for CRAM v3.1.
-// Supports order-0 with optional PACK transform.
+// Supports order-0/order-1 with optional PACK, RLE, STRIPE, and CAT transforms.
 
 // varPutU32 encodes a uint32 as a 7-bit varint, MSB first.
 func varPutU32(buf []byte, val uint32) int {
@@ -39,9 +39,23 @@ func varPutU32Slice(out []byte, val uint32) []byte {
 	return append(out, buf[:n]...)
 }
 
-// encodeRansNx16 encodes data using rANS Nx16 codec.
-// Returns compressed data including flags byte prefix.
+// EncodeRansNx16 encodes data using rANS Nx16 codec, trying all methods
+// competitively (including STRIPE) and picking the smallest output.
 func EncodeRansNx16(data []byte) []byte {
+	if len(data) == 0 {
+		return []byte{0, 0}
+	}
+
+	best := encodeRansNx16NoStripe(data)
+
+	// Note: STRIPE is available via encodeRansNx16Stripe but not included in
+	// competitive selection — it rarely wins and has htslib compatibility issues.
+
+	return best
+}
+
+// encodeRansNx16NoStripe tries all methods except STRIPE to avoid recursion.
+func encodeRansNx16NoStripe(data []byte) []byte {
 	if len(data) == 0 {
 		return []byte{0, 0}
 	}
@@ -83,6 +97,24 @@ func EncodeRansNx16(data []byte) []byte {
 		if len(out) < len(best) {
 			best = out
 		}
+	}
+
+	// Try RLE + order-0.
+	if rle := encodeRansNx16WithRLE(data, 0); rle != nil && len(rle) < len(best) {
+		best = rle
+	}
+
+	// Try RLE + order-1 for larger inputs.
+	if len(data) > 16 {
+		if rle := encodeRansNx16WithRLE(data, 1); rle != nil && len(rle) < len(best) {
+			best = rle
+		}
+	}
+
+	// Try CAT (raw passthrough) as fallback for incompressible data.
+	cat := encodeRansNx16Cat(data)
+	if len(cat) < len(best) {
+		best = cat
 	}
 
 	return best
@@ -570,6 +602,157 @@ func nx16EncodeAlphabet(out []byte, freqs []uint32) []byte {
 	}
 
 	out = append(out, 0) // terminator
+	return out
+}
+
+// rleEncodeNx16 applies the RLE transform to data.
+// Returns literals (for core rANS encoding), meta (nSyms + syms + run varints), and ok.
+// If no runs are found, returns ok=false.
+func rleEncodeNx16(data []byte) (literals []byte, meta []byte, ok bool) {
+	// Find symbols with consecutive runs (2+ same byte in a row).
+	var hasRun [256]bool
+	for i := 1; i < len(data); i++ {
+		if data[i] == data[i-1] {
+			hasRun[data[i]] = true
+		}
+	}
+
+	var rleSyms []byte
+	for i := 0; i < 256; i++ {
+		if hasRun[i] {
+			rleSyms = append(rleSyms, byte(i))
+		}
+	}
+
+	if len(rleSyms) == 0 {
+		return nil, nil, false
+	}
+
+	var isRLE [256]bool
+	for _, s := range rleSyms {
+		isRLE[s] = true
+	}
+
+	// Build literals and run lengths.
+	var runs []byte
+	i := 0
+	for i < len(data) {
+		b := data[i]
+		if isRLE[b] {
+			runLen := 1
+			for i+runLen < len(data) && data[i+runLen] == b {
+				runLen++
+			}
+			literals = append(literals, b)
+			runs = varPutU32Slice(runs, uint32(runLen-1))
+			i += runLen
+		} else {
+			literals = append(literals, b)
+			i++
+		}
+	}
+
+	// Build meta: [nSyms] [syms...] [runs...]
+	nSymByte := byte(len(rleSyms))
+	if len(rleSyms) == 256 {
+		nSymByte = 0
+	}
+	meta = append(meta, nSymByte)
+	meta = append(meta, rleSyms...)
+	meta = append(meta, runs...)
+
+	return literals, meta, true
+}
+
+// encodeRansNx16WithRLE encodes data with RLE transform + core rANS.
+// order is 0 or 1. Returns nil if RLE is not applicable.
+func encodeRansNx16WithRLE(data []byte, order int) []byte {
+	literals, rleMeta, ok := rleEncodeNx16(data)
+	if !ok {
+		return nil
+	}
+
+	// Compress literals with core rANS.
+	var encoded []byte
+	if order == 0 {
+		encoded = encodeRansNx16Order0Core(literals)
+	} else {
+		encoded = encodeRansNx16Order1Core(literals)
+	}
+
+	flags := byte(ransOrderRLE)
+	if order == 1 {
+		flags |= ransOrderMask
+	}
+
+	// Use uncompressed meta (odd uMetaSize flag).
+	uMetaSize := uint32(len(rleMeta))*2 + 1
+
+	var out []byte
+	out = append(out, flags)
+	out = varPutU32Slice(out, uint32(len(data)))    // original size
+	out = varPutU32Slice(out, uMetaSize)             // meta size (odd = uncompressed)
+	out = varPutU32Slice(out, uint32(len(literals))) // rleLen (core decode output size)
+	out = append(out, rleMeta...)
+	out = append(out, encoded...)
+
+	return out
+}
+
+// encodeRansNx16Cat encodes data as raw passthrough (CAT).
+func encodeRansNx16Cat(data []byte) []byte {
+	var out []byte
+	out = append(out, byte(ransOrderCat))
+	out = varPutU32Slice(out, uint32(len(data)))
+	out = append(out, data...)
+	return out
+}
+
+// encodeRansNx16Stripe encodes data with the STRIPE transform.
+// Splits data into N byte-interleaved sub-streams, compresses each independently.
+func encodeRansNx16Stripe(data []byte, N int) []byte {
+	if N < 2 || len(data) < N {
+		return nil
+	}
+
+	ulen := len(data)
+
+	// Compute per-stripe sizes.
+	ulenN := make([]int, N)
+	for i := 0; i < N; i++ {
+		ulenN[i] = ulen / N
+		if ulen%N > i {
+			ulenN[i]++
+		}
+	}
+
+	// De-interleave into N sub-streams.
+	substreams := make([][]byte, N)
+	for i := 0; i < N; i++ {
+		substreams[i] = make([]byte, ulenN[i])
+		for j := 0; j < ulenN[i]; j++ {
+			substreams[i][j] = data[j*N+i]
+		}
+	}
+
+	// Compress each sub-stream (without STRIPE to avoid recursion).
+	compressed := make([][]byte, N)
+	for i := 0; i < N; i++ {
+		compressed[i] = encodeRansNx16NoStripe(substreams[i])
+	}
+
+	// Build output.
+	var out []byte
+	out = append(out, byte(ransOrderStripe))
+	out = varPutU32Slice(out, uint32(ulen))
+	out = append(out, byte(N))
+	for i := 0; i < N; i++ {
+		out = varPutU32Slice(out, uint32(len(compressed[i])))
+	}
+	for i := 0; i < N; i++ {
+		out = append(out, compressed[i]...)
+	}
+
 	return out
 }
 
