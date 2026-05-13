@@ -18,6 +18,15 @@
 - [x] fqzcomp (method 7) — quality score compression decoder, verified with htscodecs test vectors
 - [x] Adaptive arithmetic coder (method 6) — order-0, order-1, with RLE/PACK/STRIPE/CAT transforms, verified with htscodecs test vectors
 
+### Reference providers (seqio.ReferenceReader)
+- [x] Indexed FASTA (.fai) with 10MB chunk cache, LRU (1GB max)
+- [x] Bgzip-compressed FASTA (.fa.gz + .gzi) via bgzf.IndexedReader
+- [x] In-memory FASTA fallback (no .fai, for small refs / tests)
+- [x] Auto-detection factory: seqio.OpenReference(path)
+- [ ] Remote HTTP/HTTPS reference (range requests for .fai-indexed refs)
+- [ ] GA4GH refget API (sequence retrieval by MD5/refget accession)
+- [ ] htslib REF_CACHE / REF_PATH directory layout
+
 ### Not needed for merge
 - [x] Tag round-trip testing — verified all tag types (A, i, f, Z) survive write→read roundtrip across v2.1/v3.0/v3.1
 - [x] Native CRAM writer (v2.1, v3.0, v3.1 with gzip, rANS 4x8, and rANS Nx16 competitive compression)

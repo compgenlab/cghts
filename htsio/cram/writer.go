@@ -14,6 +14,7 @@ import (
 
 	"github.com/compgen-io/cgkit/htsio"
 	"github.com/compgen-io/cgkit/htsio/codec"
+	"github.com/compgen-io/cgkit/seqio"
 )
 
 // Version identifies a CRAM version for the writer.
@@ -60,7 +61,7 @@ type Writer struct {
 	refs           []refInfo
 	refMap         map[string]int32
 	readGroupMap   map[string]int32
-	refProv        *referenceProvider
+	ref            seqio.ReferenceReader
 	recordBuf      []*htsio.SamRecord
 	recordCounter  int64
 	headerWritten  bool
@@ -125,10 +126,10 @@ func newWriter(w io.Writer, closer io.Closer, header *htsio.SamHeader, opts *Wri
 		cw.readGroupMap[rg] = int32(i)
 	}
 
-	// Set up reference provider.
+	// Set up reference.
 	if opts.refPath != "" {
 		var err error
-		cw.refProv, err = newReferenceProvider(opts.refPath)
+		cw.ref, err = seqio.OpenReference(opts.refPath)
 		if err != nil {
 			return nil, fmt.Errorf("cram: %w", err)
 		}
@@ -417,8 +418,8 @@ func (cw *Writer) buildFeatures(rec *htsio.SamRecord, cr *cramRecord) []cramFeat
 
 	// Get reference sequence for substitution detection.
 	var refSeq []byte
-	if cr.refID >= 0 && cw.refProv != nil && int(cr.refID) < len(cw.refs) {
-		refSeq, _ = cw.refProv.getSequence(cw.refs[cr.refID].name)
+	if cr.refID >= 0 && cw.ref != nil && int(cr.refID) < len(cw.refs) {
+		refSeq, _ = cw.ref.GetSequence(cw.refs[cr.refID].name)
 	}
 
 	var features []cramFeature
@@ -672,7 +673,7 @@ func (cw *Writer) buildCompressionHeader(subMatrix [5][4]byte, tagDict [][]tagKe
 	ch := &writerCompressionHeader{
 		readNamesPreserved: true,
 		apDelta:            true,
-		refRequired:        cw.refProv != nil,
+		refRequired:        cw.ref != nil,
 		dataSeriesEncodings: make(map[string]encodingDescriptor),
 		tagEncodings:       make(map[int32]encodingDescriptor),
 	}
@@ -1038,8 +1039,8 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 
 	// Compute reference MD5 for slice header.
 	var refMD5 [16]byte
-	if refID >= 0 && cw.refProv != nil && int(refID) < len(cw.refs) {
-		if refSeq, err := cw.refProv.getSequence(cw.refs[refID].name); err == nil {
+	if refID >= 0 && cw.ref != nil && int(refID) < len(cw.refs) {
+		if refSeq, err := cw.ref.GetSequence(cw.refs[refID].name); err == nil {
 			// MD5 of the reference region covered by this slice.
 			start := int(startPos) - 1
 			end := start + int(alignmentSpan)
@@ -1057,8 +1058,8 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 
 	// Embed reference sequence if requested.
 	embeddedRefID := int32(-1)
-	if cw.opts.embedRef && refID >= 0 && cw.refProv != nil && int(refID) < len(cw.refs) {
-		if refSeq, err := cw.refProv.getSequence(cw.refs[refID].name); err == nil {
+	if cw.opts.embedRef && refID >= 0 && cw.ref != nil && int(refID) < len(cw.refs) {
+		if refSeq, err := cw.ref.GetSequence(cw.refs[refID].name); err == nil {
 			start := int(startPos) - 1
 			end := start + int(alignmentSpan)
 			if start < 0 {

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/compgen-io/cgkit/htsio"
+	"github.com/compgen-io/cgkit/seqio"
 )
 
 func init() {
@@ -40,7 +41,7 @@ type Reader struct {
 	hdr      *htsio.SamHeader
 	refs     []refInfo
 	refMap   map[string]int // ref name → index
-	refProv  *referenceProvider
+	ref      seqio.ReferenceReader
 	opts     *htsio.SamReaderOpts
 	idx      *craiIndex // lazily loaded CRAI index for Query
 	queryFh  *os.File   // separate file handle for Query seeks
@@ -91,19 +92,23 @@ func NewReaderFromStream(rc io.ReadCloser, filename string, refPath string, opts
 		return nil, fmt.Errorf("cram: reading header: %w", err)
 	}
 
-	// Set up reference provider.
-	if refPath == "" {
-		refPath, err = cr.findReferenceFromHeader()
-		if err != nil {
-			rc.Close()
-			return nil, err
+	// Set up reference: prefer pre-opened ReferenceReader, then refPath, then header UR.
+	if opts.RefReaderValue() != nil {
+		cr.ref = opts.RefReaderValue()
+	} else {
+		if refPath == "" {
+			refPath, err = cr.findReferenceFromHeader()
+			if err != nil {
+				rc.Close()
+				return nil, err
+			}
 		}
-	}
-	if refPath != "" {
-		cr.refProv, err = newReferenceProvider(refPath)
-		if err != nil {
-			rc.Close()
-			return nil, fmt.Errorf("cram: %w", err)
+		if refPath != "" {
+			cr.ref, err = seqio.OpenReference(refPath)
+			if err != nil {
+				rc.Close()
+				return nil, fmt.Errorf("cram: %w", err)
+			}
 		}
 	}
 
@@ -122,8 +127,8 @@ func (cr *Reader) Header() (*htsio.SamHeader, error) {
 
 // Close releases resources.
 func (cr *Reader) Close() error {
-	if cr.refProv != nil {
-		cr.refProv.Close()
+	if cr.ref != nil {
+		cr.ref.Close()
 	}
 	if cr.queryFh != nil {
 		cr.queryFh.Close()
@@ -258,7 +263,7 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 						refOffset = int(sh.alignmentStart) - 1
 					}
 				} else if sh.refSeqID >= 0 {
-					if cr.refProv == nil {
+					if cr.ref == nil {
 						refName := "?"
 						if int(sh.refSeqID) < len(cr.refs) {
 							refName = cr.refs[sh.refSeqID].name
@@ -269,7 +274,7 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 					if int(sh.refSeqID) < len(cr.refs) {
 						rStart := int(sh.alignmentStart) - 1
 						rEnd := rStart + int(sh.alignmentSpan)
-						seq, err := cr.refProv.getSequenceRange(cr.refs[sh.refSeqID].name, rStart, rEnd)
+						seq, err := cr.ref.GetSequenceRange(cr.refs[sh.refSeqID].name, rStart, rEnd)
 						if err != nil {
 							yield(nil, fmt.Errorf("cram: %w", err))
 							return
@@ -289,9 +294,9 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 					rec := &records[i]
 					recRefSeq := refSeq
 					recRefOffset := refOffset
-					if sh.refSeqID == -2 && cr.refProv != nil && rec.refID >= 0 {
+					if sh.refSeqID == -2 && cr.ref != nil && rec.refID >= 0 {
 						if int(rec.refID) < len(cr.refs) {
-							seq, err := cr.refProv.getSequence(cr.refs[rec.refID].name)
+							seq, err := cr.ref.GetSequence(cr.refs[rec.refID].name)
 							if err == nil {
 								recRefSeq = seq
 								recRefOffset = 0
@@ -416,7 +421,7 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 				refOffset = int(sh.alignmentStart) - 1
 			}
 		} else if sh.refSeqID >= 0 {
-			if cr.refProv == nil {
+			if cr.ref == nil {
 				refName := "?"
 				if int(sh.refSeqID) < len(cr.refs) {
 					refName = cr.refs[sh.refSeqID].name
@@ -430,7 +435,7 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 			if refName != "" {
 				start := int(sh.alignmentStart) - 1
 				end := start + int(sh.alignmentSpan)
-				refSeq, err = cr.refProv.getSequenceRange(refName, start, end)
+				refSeq, err = cr.ref.GetSequenceRange(refName, start, end)
 				if err != nil {
 					return yield(nil, fmt.Errorf("cram: %w", err))
 				}
@@ -449,10 +454,10 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 			recRefSeq := refSeq
 			recRefOffset := refOffset
 			// For multi-ref slices, load the correct reference per record.
-			if sh.refSeqID == -2 && cr.refProv != nil && records[i].refID >= 0 {
+			if sh.refSeqID == -2 && cr.ref != nil && records[i].refID >= 0 {
 				if int(records[i].refID) < len(cr.refs) {
 					rn := cr.refs[records[i].refID].name
-					recRefSeq, err = cr.refProv.getSequence(rn)
+					recRefSeq, err = cr.ref.GetSequence(rn)
 					if err != nil {
 						return yield(nil, fmt.Errorf("cram: %w", err))
 					}
