@@ -34,20 +34,41 @@ type Writer struct {
 // NewWriter creates a native BAM writer for the given output file.
 // If filename is "-", writes to stdout.
 func NewWriter(filename string, header *htsio.SamHeader) (*Writer, error) {
+	return NewWriterWithThreads(filename, header, 1)
+}
+
+// NewWriterWithThreads creates a native BAM writer with parallel BGZF
+// compression using the given number of threads. If threads <= 1, compression
+// is single-threaded.
+func NewWriterWithThreads(filename string, header *htsio.SamHeader, threads int) (*Writer, error) {
 	if filename == "-" {
-		return NewWriterFromWriter(os.Stdout, header), nil
+		return NewWriterFromWriterWithThreads(os.Stdout, header, threads), nil
 	}
 	f, err := os.Create(filename)
 	if err != nil {
 		return nil, err
 	}
-	bw := newWriter(bgzf.NewWriter(f), header)
+	var bw *Writer
+	if threads > 1 {
+		bw = newWriter(bgzf.NewParallelWriter(f, threads), header)
+	} else {
+		bw = newWriter(bgzf.NewWriter(f), header)
+	}
 	bw.f = f
 	return bw, nil
 }
 
 // NewWriterFromWriter creates a native BAM writer that writes to w.
 func NewWriterFromWriter(w io.Writer, header *htsio.SamHeader) *Writer {
+	return newWriter(bgzf.NewWriter(w), header)
+}
+
+// NewWriterFromWriterWithThreads creates a native BAM writer that writes to w
+// with parallel BGZF compression.
+func NewWriterFromWriterWithThreads(w io.Writer, header *htsio.SamHeader, threads int) *Writer {
+	if threads > 1 {
+		return newWriter(bgzf.NewParallelWriter(w, threads), header)
+	}
 	return newWriter(bgzf.NewWriter(w), header)
 }
 
@@ -141,13 +162,17 @@ func (bw *Writer) writeHeader() error {
 }
 
 // Write sends a SamRecord to the async writer goroutine.
+// It is safe for concurrent use by multiple goroutines.
 func (bw *Writer) Write(rec *htsio.SamRecord) error {
 	if err := bw.start(); err != nil {
 		return err
 	}
+	bw.mu.Lock()
 	if bw.err != nil {
+		bw.mu.Unlock()
 		return bw.err
 	}
+	bw.mu.Unlock()
 	bw.writeCh <- rec
 	return nil
 }

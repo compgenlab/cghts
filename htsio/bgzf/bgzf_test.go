@@ -80,6 +80,139 @@ func TestRoundTripRandom(t *testing.T) {
 	}
 }
 
+func TestParallelRoundTrip(t *testing.T) {
+	original := make([]byte, MaxUncompressedSize*5+999)
+	for i := range original {
+		original[i] = byte(i % 251)
+	}
+
+	var buf bytes.Buffer
+	w := NewParallelWriter(&buf, 4)
+	if _, err := w.Write(original); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r := NewReader(&buf)
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Errorf("parallel round-trip mismatch: got %d bytes, want %d", len(got), len(original))
+	}
+}
+
+func TestParallelRoundTripRandom(t *testing.T) {
+	original := make([]byte, 200000)
+	if _, err := rand.Read(original); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+
+	var buf bytes.Buffer
+	w := NewParallelWriter(&buf, 4)
+	if _, err := w.Write(original); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r := NewReader(&buf)
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Errorf("parallel round-trip mismatch for random data")
+	}
+}
+
+func TestParallelEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewParallelWriter(&buf, 4)
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r := NewReader(&buf)
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty output, got %d bytes", len(got))
+	}
+}
+
+func TestParallelSmallWrites(t *testing.T) {
+	original := []byte("ACGTACGTACGTACGT")
+
+	var buf bytes.Buffer
+	w := NewParallelWriter(&buf, 2)
+	for _, b := range original {
+		if _, err := w.Write([]byte{b}); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r := NewReader(&buf)
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Errorf("got %q, want %q", got, original)
+	}
+}
+
+func TestParallelThreadsZero(t *testing.T) {
+	// threads=0 should use runtime.NumCPU() and not panic.
+	var buf bytes.Buffer
+	w := NewParallelWriter(&buf, 0)
+	if _, err := w.Write([]byte("test")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r := NewReader(&buf)
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "test" {
+		t.Errorf("got %q, want %q", got, "test")
+	}
+}
+
+func TestParallelThreadsOne(t *testing.T) {
+	// threads=1 should fall back to single-threaded mode.
+	var buf bytes.Buffer
+	w := NewParallelWriter(&buf, 1)
+	if _, err := w.Write([]byte("single")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r := NewReader(&buf)
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "single" {
+		t.Errorf("got %q, want %q", got, "single")
+	}
+}
+
 func TestEmptyFile(t *testing.T) {
 	// A valid BGZF file with no data is just the EOF block.
 	var buf bytes.Buffer

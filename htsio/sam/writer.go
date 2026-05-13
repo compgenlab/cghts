@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/compgen-io/cgkit/htsio"
 )
 
 // Writer writes SAM text files. Implements htsio.SamWriter.
+// It is safe for concurrent use by multiple goroutines.
 type Writer struct {
+	mu            sync.Mutex
 	w             *bufio.Writer
 	f             *os.File // non-nil if we opened the file
 	header        *htsio.SamHeader
@@ -43,7 +46,11 @@ func NewWriterFromWriter(w io.Writer, header *htsio.SamHeader) *Writer {
 }
 
 // Write writes a SamRecord as SAM text.
+// It is safe for concurrent use by multiple goroutines.
 func (w *Writer) Write(rec *htsio.SamRecord) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	if !w.headerWritten {
 		if w.header != nil {
 			headerText := w.header.Text()
@@ -63,6 +70,9 @@ func (w *Writer) Write(rec *htsio.SamRecord) error {
 
 // Close flushes the buffer and closes the file (if not stdout).
 func (w *Writer) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	if err := w.w.Flush(); err != nil {
 		return err
 	}
