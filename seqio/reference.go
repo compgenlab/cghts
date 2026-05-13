@@ -3,9 +3,11 @@ package seqio
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 )
 
 // ReferenceReader provides random access to named reference sequences.
@@ -56,12 +58,16 @@ func OpenReference(path string) (ReferenceReader, error) {
 	return newInMemoryFasta(path)
 }
 
-// inMemoryFasta loads the entire FASTA into memory. Used as a fallback
-// when no .fai index is available (e.g., small test references).
+// inMemoryFasta reads a FASTA file and stores sequences as compressed chunks.
+// Chunks are decompressed on demand with an LRU cache, keeping memory usage
+// bounded even for large genomes without a .fai index.
 type inMemoryFasta struct {
-	path  string
-	names []string
-	seqs  map[string][]byte
+	path    string
+	names   []string
+	lengths map[string]int
+	chunks  map[faiCacheKey][]byte // gzip-compressed chunks
+	cache   *faiChunkCache         // decompressed chunk LRU
+	mu      sync.Mutex
 }
 
 func newInMemoryFasta(path string) (*inMemoryFasta, error) {
@@ -72,8 +78,10 @@ func newInMemoryFasta(path string) (*inMemoryFasta, error) {
 	defer f.Close()
 
 	r := &inMemoryFasta{
-		path: path,
-		seqs: make(map[string][]byte),
+		path:    path,
+		lengths: make(map[string]int),
+		chunks:  make(map[faiCacheKey][]byte),
+		cache:   newFaiChunkCache(faiCacheMaxSize),
 	}
 
 	scanner := bufio.NewScanner(f)
@@ -86,7 +94,7 @@ func newInMemoryFasta(path string) (*inMemoryFasta, error) {
 		line := scanner.Text()
 		if strings.HasPrefix(line, ">") {
 			if name != "" {
-				r.seqs[name] = bytes.ToUpper(seq.Bytes())
+				r.storeSequence(name, bytes.ToUpper(seq.Bytes()))
 			}
 			fields := strings.Fields(line[1:])
 			if len(fields) > 0 {
@@ -99,7 +107,7 @@ func newInMemoryFasta(path string) (*inMemoryFasta, error) {
 		}
 	}
 	if name != "" {
-		r.seqs[name] = bytes.ToUpper(seq.Bytes())
+		r.storeSequence(name, bytes.ToUpper(seq.Bytes()))
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
@@ -108,44 +116,114 @@ func newInMemoryFasta(path string) (*inMemoryFasta, error) {
 	return r, nil
 }
 
+// storeSequence breaks a sequence into chunks and compresses each one.
+func (r *inMemoryFasta) storeSequence(name string, seq []byte) {
+	r.lengths[name] = len(seq)
+	for i := 0; i < len(seq); i += faiChunkSize {
+		end := i + faiChunkSize
+		if end > len(seq) {
+			end = len(seq)
+		}
+		chunkIdx := i / faiChunkSize
+		compressed := gzipCompress(seq[i:end])
+		r.chunks[faiCacheKey{name: name, chunkIdx: chunkIdx}] = compressed
+	}
+}
+
 func (r *inMemoryFasta) Names() []string { return r.names }
 
 func (r *inMemoryFasta) SequenceLength(name string) (int, bool) {
-	seq, ok := r.seqs[name]
-	if !ok {
-		return 0, false
-	}
-	return len(seq), true
+	l, ok := r.lengths[name]
+	return l, ok
 }
 
 func (r *inMemoryFasta) GetSequenceRange(name string, start, end int) ([]byte, error) {
-	seq, ok := r.seqs[name]
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	length, ok := r.lengths[name]
 	if !ok {
 		return nil, fmt.Errorf("reference %q not found in %s", name, r.path)
 	}
 	if start < 0 {
 		start = 0
 	}
-	if end > len(seq) {
-		end = len(seq)
+	if end > length {
+		end = length
 	}
 	if start >= end {
 		return nil, nil
 	}
-	// Return a copy to avoid callers mutating internal state.
-	out := make([]byte, end-start)
-	copy(out, seq[start:end])
-	return out, nil
+
+	firstChunk := start / faiChunkSize
+	lastChunk := (end - 1) / faiChunkSize
+
+	result := make([]byte, 0, end-start)
+	for ci := firstChunk; ci <= lastChunk; ci++ {
+		chunk, err := r.decompressChunk(name, ci)
+		if err != nil {
+			return nil, err
+		}
+		chunkStart := ci * faiChunkSize
+		lo := start - chunkStart
+		if lo < 0 {
+			lo = 0
+		}
+		hi := end - chunkStart
+		if hi > len(chunk) {
+			hi = len(chunk)
+		}
+		result = append(result, chunk[lo:hi]...)
+	}
+
+	return result, nil
 }
 
 func (r *inMemoryFasta) GetSequence(name string) ([]byte, error) {
-	seq, ok := r.seqs[name]
+	length, ok := r.lengths[name]
 	if !ok {
 		return nil, fmt.Errorf("reference %q not found in %s", name, r.path)
 	}
-	out := make([]byte, len(seq))
-	copy(out, seq)
-	return out, nil
+	return r.GetSequenceRange(name, 0, length)
 }
 
 func (r *inMemoryFasta) Close() error { return nil }
+
+// decompressChunk returns decompressed chunk data, using the LRU cache.
+// Must be called with r.mu held.
+func (r *inMemoryFasta) decompressChunk(name string, chunkIdx int) ([]byte, error) {
+	key := faiCacheKey{name: name, chunkIdx: chunkIdx}
+
+	if data := r.cache.get(key); data != nil {
+		return data, nil
+	}
+
+	compressed, ok := r.chunks[key]
+	if !ok {
+		return nil, fmt.Errorf("chunk %s:%d not found", name, chunkIdx)
+	}
+
+	gz, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, fmt.Errorf("decompressing chunk %s:%d: %w", name, chunkIdx, err)
+	}
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(gz); err != nil {
+		gz.Close()
+		return nil, fmt.Errorf("decompressing chunk %s:%d: %w", name, chunkIdx, err)
+	}
+	gz.Close()
+
+	data := buf.Bytes()
+	r.cache.put(key, data)
+	return data, nil
+}
+
+// gzipCompress compresses data with gzip at BestSpeed.
+func gzipCompress(data []byte) []byte {
+	var buf bytes.Buffer
+	gz, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	gz.Write(data)
+	gz.Close()
+	return buf.Bytes()
+}
