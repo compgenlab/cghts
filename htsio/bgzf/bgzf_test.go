@@ -147,6 +147,37 @@ func TestParallelEmpty(t *testing.T) {
 	}
 }
 
+func TestParallelIdenticalOutput(t *testing.T) {
+	// Verify that parallel and single-threaded writers produce byte-identical output.
+	original := make([]byte, MaxUncompressedSize*3+1234)
+	for i := range original {
+		original[i] = byte(i % 251)
+	}
+
+	var singleBuf bytes.Buffer
+	sw := NewWriter(&singleBuf)
+	if _, err := sw.Write(original); err != nil {
+		t.Fatalf("single Write: %v", err)
+	}
+	if err := sw.Close(); err != nil {
+		t.Fatalf("single Close: %v", err)
+	}
+
+	var parallelBuf bytes.Buffer
+	pw := NewParallelWriter(&parallelBuf, 4)
+	if _, err := pw.Write(original); err != nil {
+		t.Fatalf("parallel Write: %v", err)
+	}
+	if err := pw.Close(); err != nil {
+		t.Fatalf("parallel Close: %v", err)
+	}
+
+	if !bytes.Equal(singleBuf.Bytes(), parallelBuf.Bytes()) {
+		t.Errorf("output mismatch: single=%d bytes, parallel=%d bytes",
+			singleBuf.Len(), parallelBuf.Len())
+	}
+}
+
 func TestParallelSmallWrites(t *testing.T) {
 	original := []byte("ACGTACGTACGTACGT")
 
