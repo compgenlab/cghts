@@ -122,6 +122,9 @@ func (cr *Reader) Header() (*htsio.SamHeader, error) {
 
 // Close releases resources.
 func (cr *Reader) Close() error {
+	if cr.refProv != nil {
+		cr.refProv.Close()
+	}
 	if cr.queryFh != nil {
 		cr.queryFh.Close()
 	}
@@ -264,12 +267,15 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 						return
 					}
 					if int(sh.refSeqID) < len(cr.refs) {
-						seq, err := cr.refProv.getSequence(cr.refs[sh.refSeqID].name)
+						rStart := int(sh.alignmentStart) - 1
+						rEnd := rStart + int(sh.alignmentSpan)
+						seq, err := cr.refProv.getSequenceRange(cr.refs[sh.refSeqID].name, rStart, rEnd)
 						if err != nil {
 							yield(nil, fmt.Errorf("cram: %w", err))
 							return
 						}
 						refSeq = seq
+						refOffset = rStart
 					}
 				}
 
@@ -285,7 +291,8 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 					recRefOffset := refOffset
 					if sh.refSeqID == -2 && cr.refProv != nil && rec.refID >= 0 {
 						if int(rec.refID) < len(cr.refs) {
-							if seq, err := cr.refProv.getSequence(cr.refs[rec.refID].name); err == nil {
+							seq, err := cr.refProv.getSequence(cr.refs[rec.refID].name)
+							if err == nil {
 								recRefSeq = seq
 								recRefOffset = 0
 							}
@@ -421,10 +428,13 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 				refName = cr.refs[sh.refSeqID].name
 			}
 			if refName != "" {
-				refSeq, err = cr.refProv.getSequence(refName)
+				start := int(sh.alignmentStart) - 1
+				end := start + int(sh.alignmentSpan)
+				refSeq, err = cr.refProv.getSequenceRange(refName, start, end)
 				if err != nil {
 					return yield(nil, fmt.Errorf("cram: %w", err))
 				}
+				refOffset = start
 			}
 		}
 
@@ -442,10 +452,11 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 			if sh.refSeqID == -2 && cr.refProv != nil && records[i].refID >= 0 {
 				if int(records[i].refID) < len(cr.refs) {
 					rn := cr.refs[records[i].refID].name
-					if seq, err := cr.refProv.getSequence(rn); err == nil {
-						recRefSeq = seq
-						recRefOffset = 0
+					recRefSeq, err = cr.refProv.getSequence(rn)
+					if err != nil {
+						return yield(nil, fmt.Errorf("cram: %w", err))
 					}
+					recRefOffset = 0
 				}
 			}
 			samRec := cr.cramToSam(&records[i], compHdr, recRefSeq, recRefOffset)

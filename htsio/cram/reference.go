@@ -6,30 +6,75 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/compgen-io/cgkit/seqio"
 )
 
-// referenceProvider loads reference sequences for CRAM decoding.
+// referenceProvider loads reference sequences for CRAM encoding/decoding.
+// Uses seqio.IndexedFastaReader when a .fai index is available (chunk-based,
+// LRU-cached). Falls back to loading the full FASTA into memory otherwise.
 type referenceProvider struct {
 	fastaPath string
-	seqs      map[string][]byte // name → uppercase sequence
+	indexed   *seqio.IndexedFastaReader // used when .fai exists
+	seqs      map[string][]byte         // fallback: full FASTA in memory
 }
 
 // newReferenceProvider creates a reference provider from a FASTA file path.
-// The FASTA is loaded lazily on first access. Returns an error if the file
-// does not exist.
+// Returns an error if the file does not exist.
 func newReferenceProvider(fastaPath string) (*referenceProvider, error) {
 	if _, err := os.Stat(fastaPath); err != nil {
 		return nil, fmt.Errorf("reference FASTA not found: %s", fastaPath)
 	}
-	return &referenceProvider{
-		fastaPath: fastaPath,
-	}, nil
+
+	rp := &referenceProvider{fastaPath: fastaPath}
+
+	// Try indexed mode (requires .fai).
+	if r, err := seqio.NewIndexedFastaReader(fastaPath); err == nil {
+		rp.indexed = r
+	}
+	// If no .fai, fall back to full load on first access.
+
+	return rp, nil
 }
 
-// getSequence returns the reference sequence for the given name, uppercased.
+// Close releases resources.
+func (rp *referenceProvider) Close() error {
+	if rp.indexed != nil {
+		return rp.indexed.Close()
+	}
+	return nil
+}
+
+// getSequenceRange returns reference bases for [start, end) (0-based).
+func (rp *referenceProvider) getSequenceRange(name string, start, end int) ([]byte, error) {
+	if rp.indexed != nil {
+		return rp.indexed.GetSequenceRange(name, start, end)
+	}
+	// Fallback: load full FASTA, return slice.
+	seq, err := rp.getSequence(name)
+	if err != nil {
+		return nil, err
+	}
+	if end > len(seq) {
+		end = len(seq)
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start >= end {
+		return nil, nil
+	}
+	return seq[start:end], nil
+}
+
+// getSequence returns the full reference sequence for the given name.
 func (rp *referenceProvider) getSequence(name string) ([]byte, error) {
+	if rp.indexed != nil {
+		return rp.indexed.GetSequence(name)
+	}
+	// Fallback: load full FASTA.
 	if rp.seqs == nil {
-		if err := rp.load(); err != nil {
+		if err := rp.loadFullFasta(); err != nil {
 			return nil, err
 		}
 	}
@@ -40,7 +85,8 @@ func (rp *referenceProvider) getSequence(name string) ([]byte, error) {
 	return seq, nil
 }
 
-func (rp *referenceProvider) load() error {
+// loadFullFasta reads the entire FASTA into memory (fallback when no .fai).
+func (rp *referenceProvider) loadFullFasta() error {
 	f, err := os.Open(rp.fastaPath)
 	if err != nil {
 		return fmt.Errorf("opening reference FASTA: %w", err)
@@ -60,7 +106,6 @@ func (rp *referenceProvider) load() error {
 			if name != "" {
 				rp.seqs[name] = bytes.ToUpper(seq.Bytes())
 			}
-			// Parse name: first word after >
 			fields := strings.Fields(line[1:])
 			if len(fields) > 0 {
 				name = fields[0]
