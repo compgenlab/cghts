@@ -15,11 +15,15 @@ type referenceProvider struct {
 }
 
 // newReferenceProvider creates a reference provider from a FASTA file path.
-// The FASTA is loaded lazily on first access.
-func newReferenceProvider(fastaPath string) *referenceProvider {
+// The FASTA is loaded lazily on first access. Returns an error if the file
+// does not exist.
+func newReferenceProvider(fastaPath string) (*referenceProvider, error) {
+	if _, err := os.Stat(fastaPath); err != nil {
+		return nil, fmt.Errorf("reference FASTA not found: %s", fastaPath)
+	}
 	return &referenceProvider{
 		fastaPath: fastaPath,
-	}
+	}, nil
 }
 
 // getSequence returns the reference sequence for the given name, uppercased.

@@ -4,7 +4,7 @@
 
 ### Integration
 - [x] Wire `cram.Reader` into `NewSamReader()` so `.cram` files use the native reader instead of `SamtoolsSamReader`
-- [ ] Verify that all existing callers of `NewSamReader()` with CRAM files work with the native reader
+- [x] Verify that all existing callers of `NewSamReader()` with CRAM files work with the native reader
 
 ### Correctness
 - [x] Validate CRC32 checksums on blocks and container headers

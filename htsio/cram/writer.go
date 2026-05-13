@@ -127,7 +127,11 @@ func newWriter(w io.Writer, closer io.Closer, header *htsio.SamHeader, opts *Wri
 
 	// Set up reference provider.
 	if opts.refPath != "" {
-		cw.refProv = newReferenceProvider(opts.refPath)
+		var err error
+		cw.refProv, err = newReferenceProvider(opts.refPath)
+		if err != nil {
+			return nil, fmt.Errorf("cram: %w", err)
+		}
 	}
 
 	return cw, nil

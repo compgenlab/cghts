@@ -17,10 +17,16 @@ func init() {
 			return bytes.HasPrefix(magic, []byte("CRAM"))
 		},
 		NewFromFile: func(filename string, opts *htsio.SamReaderOpts) (htsio.SamReader, error) {
-			return NewReader(filename, "")
+			if opts == nil {
+				opts = htsio.NewSamReaderOpts()
+			}
+			return NewReader(filename, opts.RefPathValue(), opts)
 		},
 		NewFromStream: func(r io.ReadCloser, opts *htsio.SamReaderOpts) (htsio.SamReader, error) {
-			return NewReaderFromStream(r, "", "")
+			if opts == nil {
+				opts = htsio.NewSamReaderOpts()
+			}
+			return NewReaderFromStream(r, "", opts.RefPathValue(), opts)
 		},
 	})
 }
@@ -35,6 +41,7 @@ type Reader struct {
 	refs     []refInfo
 	refMap   map[string]int // ref name → index
 	refProv  *referenceProvider
+	opts     *htsio.SamReaderOpts
 	idx      *craiIndex // lazily loaded CRAI index for Query
 	queryFh  *os.File   // separate file handle for Query seeks
 }
@@ -42,22 +49,32 @@ type Reader struct {
 // NewReader creates a CRAM reader from a file path.
 // refPath is the path to the reference FASTA. If empty, the reader
 // will attempt to find the reference from the UR field in @SQ header lines.
-func NewReader(filename string, refPath string) (*Reader, error) {
+// opts may be nil for default options.
+func NewReader(filename string, refPath string, opts ...*htsio.SamReaderOpts) (*Reader, error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err
 	}
-	return NewReaderFromStream(f, filename, refPath)
+	var o *htsio.SamReaderOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	return NewReaderFromStream(f, filename, refPath, o)
 }
 
 // NewReaderFromStream creates a CRAM reader from an io.ReadCloser.
 // The stream must be positioned at the start of a CRAM file (possibly
 // with peeked bytes prepended). filename is used for index lookups.
-func NewReaderFromStream(rc io.ReadCloser, filename string, refPath string) (*Reader, error) {
+// opts may be nil for default options.
+func NewReaderFromStream(rc io.ReadCloser, filename string, refPath string, opts *htsio.SamReaderOpts) (*Reader, error) {
+	if opts == nil {
+		opts = htsio.NewSamReaderOpts()
+	}
 	cr := &Reader{
 		r:        rc,
 		src:      rc,
 		filename: filename,
+		opts:     opts,
 	}
 
 	// Read file definition.
@@ -76,10 +93,18 @@ func NewReaderFromStream(rc io.ReadCloser, filename string, refPath string) (*Re
 
 	// Set up reference provider.
 	if refPath == "" {
-		refPath = cr.findReferenceFromHeader()
+		refPath, err = cr.findReferenceFromHeader()
+		if err != nil {
+			rc.Close()
+			return nil, err
+		}
 	}
 	if refPath != "" {
-		cr.refProv = newReferenceProvider(refPath)
+		cr.refProv, err = newReferenceProvider(refPath)
+		if err != nil {
+			rc.Close()
+			return nil, fmt.Errorf("cram: %w", err)
+		}
 	}
 
 	return cr, nil
@@ -229,11 +254,22 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 						refSeq = embData
 						refOffset = int(sh.alignmentStart) - 1
 					}
-				} else if sh.refSeqID >= 0 && cr.refProv != nil {
-					if int(sh.refSeqID) < len(cr.refs) {
-						if seq, err := cr.refProv.getSequence(cr.refs[sh.refSeqID].name); err == nil {
-							refSeq = seq
+				} else if sh.refSeqID >= 0 {
+					if cr.refProv == nil {
+						refName := "?"
+						if int(sh.refSeqID) < len(cr.refs) {
+							refName = cr.refs[sh.refSeqID].name
 						}
+						yield(nil, fmt.Errorf("cram: reference sequence %q required but no reference FASTA provided (use --cram-ref)", refName))
+						return
+					}
+					if int(sh.refSeqID) < len(cr.refs) {
+						seq, err := cr.refProv.getSequence(cr.refs[sh.refSeqID].name)
+						if err != nil {
+							yield(nil, fmt.Errorf("cram: %w", err))
+							return
+						}
+						refSeq = seq
 					}
 				}
 
@@ -267,6 +303,9 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 					}
 
 					samRec := cr.cramToSam(rec, compHdr, recRefSeq, recRefOffset)
+					if !cr.opts.PassesFilters(samRec) {
+						continue
+					}
 					if !yield(samRec, nil) {
 						return
 					}
@@ -369,7 +408,14 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 				refSeq = embData
 				refOffset = int(sh.alignmentStart) - 1
 			}
-		} else if sh.refSeqID >= 0 && cr.refProv != nil {
+		} else if sh.refSeqID >= 0 {
+			if cr.refProv == nil {
+				refName := "?"
+				if int(sh.refSeqID) < len(cr.refs) {
+					refName = cr.refs[sh.refSeqID].name
+				}
+				return yield(nil, fmt.Errorf("cram: reference sequence %q required but no reference FASTA provided (use --cram-ref)", refName))
+			}
 			refName := ""
 			if int(sh.refSeqID) < len(cr.refs) {
 				refName = cr.refs[sh.refSeqID].name
@@ -377,8 +423,7 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 			if refName != "" {
 				refSeq, err = cr.refProv.getSequence(refName)
 				if err != nil {
-					// Non-fatal: sequence reconstruction will use 'N' for missing ref bases
-					refSeq = nil
+					return yield(nil, fmt.Errorf("cram: %w", err))
 				}
 			}
 		}
@@ -404,6 +449,9 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 				}
 			}
 			samRec := cr.cramToSam(&records[i], compHdr, recRefSeq, recRefOffset)
+			if !cr.opts.PassesFilters(samRec) {
+				continue
+			}
 			if !yield(samRec, nil) {
 				return false
 			}
@@ -538,8 +586,9 @@ func (cr *Reader) readHeaderContainer() error {
 }
 
 // findReferenceFromHeader looks for a UR field in the first @SQ line
-// and returns it if it looks like a local file path.
-func (cr *Reader) findReferenceFromHeader() string {
+// and returns it if it looks like a local file path. Returns an error
+// if a UR field is found but the file does not exist.
+func (cr *Reader) findReferenceFromHeader() (string, error) {
 	for _, line := range cr.hdr.Lines {
 		if !strings.HasPrefix(line, "@SQ\t") {
 			continue
@@ -551,12 +600,13 @@ func (cr *Reader) findReferenceFromHeader() string {
 				if strings.HasPrefix(uri, "/") || strings.HasPrefix(uri, "file://") {
 					path := strings.TrimPrefix(uri, "file://")
 					if _, err := os.Stat(path); err == nil {
-						return path
+						return path, nil
 					}
+					return "", fmt.Errorf("cram: reference FASTA from header UR field not found: %s (use --cram-ref to specify)", path)
 				}
 			}
 		}
 		break // only check first @SQ
 	}
-	return ""
+	return "", nil
 }
