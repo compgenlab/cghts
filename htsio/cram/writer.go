@@ -892,6 +892,8 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 
 	// Track per-read quality lengths for fqzcomp.
 	var qsReadLengths []int
+	// Track read names for name tokenizer.
+	var readNames []string
 
 	// Tag block ID map: extract actual block IDs from the encoding descriptors
 	// to ensure consistency with the compression header.
@@ -933,6 +935,7 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 			rnBuf := getExt(blockIDRN)
 			rnBuf.WriteString(rec.readName)
 			rnBuf.WriteByte(0) // NUL stop
+			readNames = append(readNames, rec.readName)
 		}
 
 		// Mate info.
@@ -1123,6 +1126,8 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 		var err error
 		if id == blockIDQS && len(qsReadLengths) > 0 {
 			blk, err = cw.compressAndEncodeQualBlock(data, qsReadLengths)
+		} else if id == blockIDRN && len(readNames) > 0 {
+			blk, err = cw.compressAndEncodeNameBlock(data, readNames)
 		} else {
 			blk, err = cw.compressAndEncodeBlock(blockContentExternalData, id, data)
 		}
@@ -1163,6 +1168,29 @@ func (cw *Writer) compressAndEncodeQualBlock(data []byte, readLengths []int) ([]
 		fqzData := codec.EncodeFqzcomp(data, readLengths)
 		if fqzData != nil {
 			if candidate, err := cw.encodeBlock(blockContentExternalData, blockIDQS, blockMethodFqzcomp, fqzData); err == nil {
+				if len(candidate) < len(best) {
+					best = candidate
+				}
+			}
+		}
+	}
+
+	return best, nil
+}
+
+// compressAndEncodeNameBlock compresses read names using all methods including name tokenizer.
+func (cw *Writer) compressAndEncodeNameBlock(data []byte, names []string) ([]byte, error) {
+	// Try all standard methods first.
+	best, err := cw.compressAndEncodeBlock(blockContentExternalData, blockIDRN, data)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try name tokenizer (v3.1+ only).
+	if cw.majorVersion() >= 3 && cw.opts.version.minor >= 1 && len(names) > 0 {
+		tokData := codec.EncodeNameTokenizer(names)
+		if tokData != nil {
+			if candidate, err := cw.encodeBlock(blockContentExternalData, blockIDRN, blockMethodNameTok, tokData); err == nil {
 				if len(candidate) < len(best) {
 					best = candidate
 				}
@@ -1254,6 +1282,9 @@ func (cw *Writer) encodeBlock(contentType byte, contentID int32, method byte, da
 		}
 	case blockMethodFqzcomp:
 		// Data is already fqzcomp-encoded (by EncodeFqzcomp).
+		compData = data
+	case blockMethodNameTok:
+		// Data is already name-tokenizer-encoded (by EncodeNameTokenizer).
 		compData = data
 	default:
 		compData = data

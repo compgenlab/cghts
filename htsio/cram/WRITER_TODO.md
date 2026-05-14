@@ -111,9 +111,9 @@ func NewWriter(filename string, header *htsio.SamHeader, opts ...*WriterOpts) (*
 - [ ] Multiple parameter sets (selector table)
 
 ### Name tokenizer encoder (read names)
-- [ ] Tokenize read names into typed tokens
-- [ ] Encode token streams
-- [ ] Try name tokenizer vs gzip/bzip2 for name blocks
+- [x] Tokenize read names into typed tokens (alpha/digit/char boundaries)
+- [x] Encode token streams (MATCH, DDELTA, DUP, literal)
+- [x] Try name tokenizer vs other methods for name blocks (wired into CRAM writer)
 
 ### Adaptive arithmetic encoder
 - [ ] Simple model encoder (reverse of decoder)
@@ -127,7 +127,7 @@ func NewWriter(filename string, header *htsio.SamHeader, opts ...*WriterOpts) (*
   - v3.0: raw + gzip + rANS 4x8
   - v3.1: raw + gzip + rANS 4x8 + rANS Nx16 (order-0, order-1, PACK, RLE, CAT)
 - [x] Quality scores: try fqzcomp competitively (v3.1)
-- [ ] Read names: prefer name tokenizer (v3.1), exclude rANS
+- [x] Read names: try name tokenizer competitively (v3.1)
 - [ ] Stats/metrics tracking to avoid re-trying methods that consistently lose
 
 ## Notes
