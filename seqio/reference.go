@@ -35,15 +35,21 @@ type ReferenceReader interface {
 	Close() error
 }
 
-// OpenReference opens a reference sequence file, auto-detecting the format.
+// OpenReference opens a reference sequence, auto-detecting the format.
 //
 // Supported formats:
+//   - HTTP/HTTPS URL: fetches .fai index, uses Range requests for chunks
 //   - Indexed FASTA (.fa/.fasta with .fai index, plain or bgzip-compressed)
-//   - Plain FASTA without index (loaded fully into memory)
+//   - Plain FASTA without index (loaded fully into memory as compressed chunks)
 //
-// For indexed FASTA, sequences are loaded in 10MB chunks with LRU caching.
-// For bgzip-compressed FASTA (.fa.gz), a .gzi index is loaded automatically.
+// For indexed FASTA and remote references, sequences are loaded in 10MB
+// chunks with LRU caching (1GB max).
 func OpenReference(path string) (ReferenceReader, error) {
+	// Detect HTTP/HTTPS URLs.
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return NewRemoteFastaReader(path)
+	}
+
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("reference not found: %s", path)
 	}

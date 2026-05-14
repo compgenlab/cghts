@@ -23,7 +23,7 @@
 - [x] Bgzip-compressed FASTA (.fa.gz + .gzi) via bgzf.IndexedReader
 - [x] In-memory FASTA fallback (no .fai, for small refs / tests)
 - [x] Auto-detection factory: seqio.OpenReference(path)
-- [ ] Remote HTTP/HTTPS reference (range requests for .fai-indexed refs)
+- [x] Remote HTTP/HTTPS reference (range requests for .fai-indexed refs)
 - [ ] GA4GH refget API (sequence retrieval by MD5/refget accession)
 - [ ] htslib REF_CACHE / REF_PATH directory layout
 
