@@ -84,3 +84,30 @@ func (m *simpleModel) decodeSymbol(rc *rangeCoder) uint16 {
 
 	return m.f[i].symbol
 }
+
+func (m *simpleModel) encodeSymbol(re *rangeEncoder, sym uint16) {
+	// Find the symbol in the frequency list and compute cumulative freq.
+	var accFreq uint32
+	i := 0
+	for i < len(m.f) && m.f[i].symbol != sym {
+		accFreq += uint32(m.f[i].freq)
+		i++
+	}
+	if i >= len(m.f) || m.f[i].freq == 0 {
+		// Symbol not found or zero freq — shouldn't happen with proper initialization.
+		return
+	}
+
+	re.encode(accFreq, uint32(m.f[i].freq), m.totFreq)
+	m.f[i].freq += modelStep
+	m.totFreq += modelStep
+
+	if m.totFreq > modelMaxFreq {
+		m.normalize()
+	}
+
+	// Keep approximately sorted: swap with predecessor if needed.
+	if i > 0 && m.f[i].freq > m.f[i-1].freq {
+		m.f[i], m.f[i-1] = m.f[i-1], m.f[i]
+	}
+}
