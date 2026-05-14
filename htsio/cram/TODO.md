@@ -24,8 +24,8 @@
 - [x] In-memory FASTA fallback (no .fai, for small refs / tests)
 - [x] Auto-detection factory: seqio.OpenReference(path)
 - [x] Remote HTTP/HTTPS reference (range requests for .fai-indexed refs)
-- [ ] GA4GH refget API (sequence retrieval by MD5/refget accession)
-- [ ] htslib REF_CACHE / REF_PATH directory layout
+- [x] GA4GH refget API (sequence retrieval by MD5/refget accession)
+- [x] htslib REF_CACHE / REF_PATH directory layout
 
 ### Not needed for merge
 - [x] Tag round-trip testing — verified all tag types (A, i, f, Z) survive write→read roundtrip across v2.1/v3.0/v3.1
