@@ -92,7 +92,8 @@ func NewReaderFromStream(rc io.ReadCloser, filename string, refPath string, opts
 		return nil, fmt.Errorf("cram: reading header: %w", err)
 	}
 
-	// Set up reference: prefer pre-opened ReferenceReader, then refPath, then header UR.
+	// Set up reference: prefer pre-opened ReferenceReader, then refPath, then header UR,
+	// then REF_CACHE/REF_PATH env vars, then refget API.
 	if opts.RefReaderValue() != nil {
 		cr.ref = opts.RefReaderValue()
 	} else {
@@ -109,6 +110,9 @@ func NewReaderFromStream(rc io.ReadCloser, filename string, refPath string, opts
 				rc.Close()
 				return nil, fmt.Errorf("cram: %w", err)
 			}
+		} else {
+			// Try MD5-based reference providers as fallback.
+			cr.ref = cr.tryMD5ReferenceProviders()
 		}
 	}
 
@@ -596,6 +600,37 @@ func (cr *Reader) readHeaderContainer() error {
 		if _, err := readBlock(cr.r, cr.version()); err != nil {
 			return fmt.Errorf("skipping header block %d: %w", i, err)
 		}
+	}
+
+	return nil
+}
+
+// tryMD5ReferenceProviders attempts to create a reference reader from MD5-based
+// providers (REF_CACHE/REF_PATH env vars, then refget API). Returns nil if
+// no M5 tags are found in the header or if no provider can be created.
+func (cr *Reader) tryMD5ReferenceProviders() seqio.ReferenceReader {
+	md5s := cr.hdr.ReferenceMD5s()
+	if len(md5s) == 0 {
+		return nil
+	}
+
+	// Build lengths and names from header.
+	refs := cr.hdr.References()
+	lengths := make(map[string]int, len(refs))
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		lengths[ref.Name] = ref.Length
+		names = append(names, ref.Name)
+	}
+
+	// Try REF_CACHE/REF_PATH first.
+	if r, err := seqio.NewRefCacheReader(md5s, lengths, names); err == nil {
+		return r
+	}
+
+	// Try refget API.
+	if r, err := seqio.NewRefgetReader(md5s, lengths, names); err == nil {
+		return r
 	}
 
 	return nil
