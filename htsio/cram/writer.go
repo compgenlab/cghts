@@ -890,6 +890,9 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 		return b
 	}
 
+	// Track per-read quality lengths for fqzcomp.
+	var qsReadLengths []int
+
 	// Tag block ID map: extract actual block IDs from the encoding descriptors
 	// to ensure consistency with the compression header.
 	tagBlockIDs := make(map[int32]int32)
@@ -1019,6 +1022,7 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 				for _, q := range rec.qualScores {
 					qsBuf.WriteByte(q)
 				}
+				qsReadLengths = append(qsReadLengths, len(rec.qualScores))
 			}
 		} else {
 			// BA (unmapped bases)
@@ -1033,6 +1037,7 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 				for _, q := range rec.qualScores {
 					qsBuf.WriteByte(q)
 				}
+				qsReadLengths = append(qsReadLengths, len(rec.qualScores))
 			}
 		}
 	}
@@ -1114,7 +1119,13 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 
 	for _, id := range contentIDs {
 		data := externals[id].Bytes()
-		blk, err := cw.compressAndEncodeBlock(blockContentExternalData, id, data)
+		var blk []byte
+		var err error
+		if id == blockIDQS && len(qsReadLengths) > 0 {
+			blk, err = cw.compressAndEncodeQualBlock(data, qsReadLengths)
+		} else {
+			blk, err = cw.compressAndEncodeBlock(blockContentExternalData, id, data)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1137,6 +1148,29 @@ func (cw *Writer) serializeSliceHeader(sh *sliceHeader) []byte {
 	writeITF8(&buf, sh.embeddedRefID)
 	buf.Write(sh.referenceMD5[:])
 	return buf.Bytes()
+}
+
+// compressAndEncodeQualBlock compresses quality scores using all methods including fqzcomp.
+func (cw *Writer) compressAndEncodeQualBlock(data []byte, readLengths []int) ([]byte, error) {
+	// Try all standard methods first.
+	best, err := cw.compressAndEncodeBlock(blockContentExternalData, blockIDQS, data)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try fqzcomp (v3.1+ only).
+	if cw.majorVersion() >= 3 && cw.opts.version.minor >= 1 && len(readLengths) > 0 {
+		fqzData := codec.EncodeFqzcomp(data, readLengths)
+		if fqzData != nil {
+			if candidate, err := cw.encodeBlock(blockContentExternalData, blockIDQS, blockMethodFqzcomp, fqzData); err == nil {
+				if len(candidate) < len(best) {
+					best = candidate
+				}
+			}
+		}
+	}
+
+	return best, nil
 }
 
 // compressAndEncodeBlock compresses data using multiple methods and picks the smallest.
@@ -1218,6 +1252,9 @@ func (cw *Writer) encodeBlock(contentType byte, contentID int32, method byte, da
 			method = blockMethodRaw
 			compData = data
 		}
+	case blockMethodFqzcomp:
+		// Data is already fqzcomp-encoded (by EncodeFqzcomp).
+		compData = data
 	default:
 		compData = data
 	}
