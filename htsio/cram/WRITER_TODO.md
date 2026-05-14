@@ -104,10 +104,11 @@ func NewWriter(filename string, header *htsio.SamHeader, opts ...*WriterOpts) (*
 - [x] CAT passthrough
 
 ### fqzcomp encoder (quality scores)
-- [ ] Context model parameter selection
-- [ ] Range coder encoder (reverse of decoder)
+- [x] Range coder encoder (reverse of decoder)
+- [x] Single-parameter-set encoding with quality-only context
+- [x] Try fqzcomp vs other methods for quality blocks (wired into CRAM writer)
+- [ ] Context model parameter selection (position/delta context for better ratios)
 - [ ] Multiple parameter sets (selector table)
-- [ ] Try fqzcomp vs other methods for quality blocks
 
 ### Name tokenizer encoder (read names)
 - [ ] Tokenize read names into typed tokens
@@ -125,7 +126,7 @@ func NewWriter(filename string, header *htsio.SamHeader, opts ...*WriterOpts) (*
   - v2.1: raw + gzip
   - v3.0: raw + gzip + rANS 4x8
   - v3.1: raw + gzip + rANS 4x8 + rANS Nx16 (order-0, order-1, PACK, RLE, CAT)
-- [ ] Quality scores: prefer fqzcomp at higher levels (v3.1)
+- [x] Quality scores: try fqzcomp competitively (v3.1)
 - [ ] Read names: prefer name tokenizer (v3.1), exclude rANS
 - [ ] Stats/metrics tracking to avoid re-trying methods that consistently lose
 
