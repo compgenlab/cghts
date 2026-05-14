@@ -2,9 +2,11 @@ package cram
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -240,6 +242,352 @@ func TestWriterFileRoundtrip(t *testing.T) {
 					if len(lines) != len(manyRecords) {
 						t.Errorf("samtools got %d records, want %d", len(lines), len(manyRecords))
 					}
+				}
+			}
+		})
+	}
+}
+
+func TestUnmappedRoundtrip(t *testing.T) {
+	refFile := "testdata/ref.fa"
+
+	header := htsio.NewSamHeader()
+	header.AddLine("@HD\tVN:1.6\tSO:coordinate")
+	header.AddLine("@SQ\tSN:chr1\tLN:100000")
+
+	records := []*htsio.SamRecord{
+		// Mapped read for reference
+		{
+			ReadName: "mapped1", Flag: 0, RefName: "chr1", Pos: 100, MapQ: 60,
+			Cigar: "10M", RefNext: "*", PosNext: 0, InsertLen: 0,
+			Seq: "ACGTACGTAC", Qual: "IIIIIIIIII",
+			Tags: map[string]htsio.SamTag{}, TagOrder: []string{},
+		},
+		// Unmapped read with sequence and quality
+		{
+			ReadName: "unmapped1", Flag: 4, RefName: "*", Pos: 0, MapQ: 0,
+			Cigar: "*", RefNext: "*", PosNext: 0, InsertLen: 0,
+			Seq: "GATTACAGATTACA", Qual: "IIIIIIIIIIBBBB",
+			Tags: map[string]htsio.SamTag{}, TagOrder: []string{},
+		},
+		// Unmapped read with no sequence
+		{
+			ReadName: "unmapped2", Flag: 4, RefName: "*", Pos: 0, MapQ: 0,
+			Cigar: "*", RefNext: "*", PosNext: 0, InsertLen: 0,
+			Seq: "*", Qual: "*",
+			Tags: map[string]htsio.SamTag{}, TagOrder: []string{},
+		},
+		// Paired, both unmapped
+		{
+			ReadName: "paired_unmap", Flag: 0x4 | 0x8 | 0x1 | 0x40, RefName: "*", Pos: 0, MapQ: 0,
+			Cigar: "*", RefNext: "*", PosNext: 0, InsertLen: 0,
+			Seq: "ACGTACGT", Qual: "IIIIIIII",
+			Tags: map[string]htsio.SamTag{}, TagOrder: []string{},
+		},
+	}
+
+	for _, version := range []struct {
+		name string
+		ver  Version
+	}{
+		{"v2.1", V2},
+		{"v3.0", V3},
+		{"v3.1", V31},
+	} {
+		t.Run(version.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cramFile := filepath.Join(tmpDir, "unmapped.cram")
+
+			opts := NewWriterOpts().SetVersion(version.ver).Reference(refFile)
+			w, err := NewWriter(cramFile, header, opts)
+			if err != nil {
+				t.Fatalf("NewWriter: %v", err)
+			}
+			for _, rec := range records {
+				if err := w.Write(rec); err != nil {
+					t.Fatalf("Write %s: %v", rec.ReadName, err)
+				}
+			}
+			if err := w.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			// Read back with our reader.
+			reader, err := NewReader(cramFile, refFile)
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+			defer reader.Close()
+
+			var got []*htsio.SamRecord
+			for rec, err := range reader.Records() {
+				if err != nil {
+					t.Fatalf("Records: %v", err)
+				}
+				got = append(got, rec)
+			}
+
+			if len(got) != len(records) {
+				t.Fatalf("record count: got %d, want %d", len(got), len(records))
+			}
+
+			for i, want := range records {
+				g := got[i]
+				if g.ReadName != want.ReadName {
+					t.Errorf("record %d ReadName: got %q, want %q", i, g.ReadName, want.ReadName)
+				}
+				if g.Flag != want.Flag {
+					t.Errorf("record %d Flag: got %d, want %d", i, g.Flag, want.Flag)
+				}
+				if g.RefName != want.RefName {
+					t.Errorf("record %d RefName: got %q, want %q", i, g.RefName, want.RefName)
+				}
+				if g.Seq != want.Seq {
+					t.Errorf("record %d Seq: got %q, want %q", i, g.Seq, want.Seq)
+				}
+				if g.Qual != want.Qual {
+					t.Errorf("record %d Qual: got %q, want %q", i, g.Qual, want.Qual)
+				}
+				if g.Cigar != want.Cigar {
+					t.Errorf("record %d Cigar: got %q, want %q", i, g.Cigar, want.Cigar)
+				}
+			}
+
+			// Verify samtools can also read it.
+			if _, err := exec.LookPath("samtools"); err == nil {
+				absRefFile, _ := filepath.Abs(refFile)
+				cmd := exec.Command("samtools", "view", "-T", absRefFile, cramFile)
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Errorf("samtools view failed: %v\noutput: %s", err, string(out))
+				} else {
+					lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+					if len(lines) != len(records) {
+						t.Errorf("samtools got %d records, want %d", len(lines), len(records))
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestTagRoundtrip(t *testing.T) {
+	refFile := "testdata/ref.fa"
+
+	header := htsio.NewSamHeader()
+	header.AddLine("@HD\tVN:1.6\tSO:coordinate")
+	header.AddLine("@SQ\tSN:chr1\tLN:100000")
+	header.AddLine("@RG\tID:sample1\tSM:sample1")
+
+	records := []*htsio.SamRecord{
+		{
+			ReadName: "read_tags", Flag: 0, RefName: "chr1", Pos: 100, MapQ: 60,
+			Cigar: "10M", RefNext: "*", PosNext: 0, InsertLen: 0,
+			Seq: "ACGTACGTAC", Qual: "IIIIIIIIII",
+			Tags: map[string]htsio.SamTag{
+				"NM": {Type: 'i', Value: "5"},
+				"AS": {Type: 'i', Value: "42"},
+				"XS": {Type: 'Z', Value: "hello world"},
+				"XC": {Type: 'A', Value: "G"},
+				"XF": {Type: 'f', Value: "3.14"},
+				"RG": {Type: 'Z', Value: "sample1"},
+			},
+			TagOrder: []string{"NM", "AS", "XS", "XC", "XF", "RG"},
+		},
+		// Record with different tag combination
+		{
+			ReadName: "read_tags2", Flag: 0, RefName: "chr1", Pos: 200, MapQ: 30,
+			Cigar: "10M", RefNext: "*", PosNext: 0, InsertLen: 0,
+			Seq: "ACGTACGTAC", Qual: "IIIIIIIIII",
+			Tags: map[string]htsio.SamTag{
+				"NM": {Type: 'i', Value: "0"},
+			},
+			TagOrder: []string{"NM"},
+		},
+		// Record with no tags
+		{
+			ReadName: "read_notags", Flag: 0, RefName: "chr1", Pos: 300, MapQ: 60,
+			Cigar: "10M", RefNext: "*", PosNext: 0, InsertLen: 0,
+			Seq: "ACGTACGTAC", Qual: "IIIIIIIIII",
+			Tags:     map[string]htsio.SamTag{},
+			TagOrder: []string{},
+		},
+		// Record with large integer tag
+		{
+			ReadName: "read_bigint", Flag: 0, RefName: "chr1", Pos: 400, MapQ: 60,
+			Cigar: "10M", RefNext: "*", PosNext: 0, InsertLen: 0,
+			Seq: "ACGTACGTAC", Qual: "IIIIIIIIII",
+			Tags: map[string]htsio.SamTag{
+				"NM": {Type: 'i', Value: "100000"},
+			},
+			TagOrder: []string{"NM"},
+		},
+	}
+
+	for _, version := range []struct {
+		name string
+		ver  Version
+	}{
+		{"v2.1", V2},
+		{"v3.0", V3},
+		{"v3.1", V31},
+	} {
+		t.Run(version.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cramFile := filepath.Join(tmpDir, "tags.cram")
+
+			opts := NewWriterOpts().SetVersion(version.ver).Reference(refFile)
+			w, err := NewWriter(cramFile, header, opts)
+			if err != nil {
+				t.Fatalf("NewWriter: %v", err)
+			}
+			for _, rec := range records {
+				if err := w.Write(rec); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			if err := w.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			// Read back.
+			reader, err := NewReader(cramFile, refFile)
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+			defer reader.Close()
+
+			var got []*htsio.SamRecord
+			for rec, err := range reader.Records() {
+				if err != nil {
+					t.Fatalf("Records: %v", err)
+				}
+				got = append(got, rec)
+			}
+
+			if len(got) != len(records) {
+				t.Fatalf("record count: got %d, want %d", len(got), len(records))
+			}
+
+			for i, want := range records {
+				g := got[i]
+
+				// Check each expected tag.
+				for tagName, wantTag := range want.Tags {
+					if tagName == "RG" {
+						continue // RG is handled specially
+					}
+					gotTag, ok := g.Tags[tagName]
+					if !ok {
+						t.Errorf("record %d (%s): missing tag %s", i, want.ReadName, tagName)
+						continue
+					}
+					if gotTag.Type != wantTag.Type {
+						t.Errorf("record %d (%s) tag %s type: got %c, want %c", i, want.ReadName, tagName, gotTag.Type, wantTag.Type)
+					}
+					// For floats, compare parsed values due to formatting differences.
+					if wantTag.Type == 'f' {
+						wf, _ := strconv.ParseFloat(wantTag.Value, 32)
+						gf, _ := strconv.ParseFloat(gotTag.Value, 32)
+						if math.Abs(wf-gf) > 0.01 {
+							t.Errorf("record %d (%s) tag %s value: got %q, want %q", i, want.ReadName, tagName, gotTag.Value, wantTag.Value)
+						}
+					} else if gotTag.Value != wantTag.Value {
+						t.Errorf("record %d (%s) tag %s value: got %q, want %q", i, want.ReadName, tagName, gotTag.Value, wantTag.Value)
+					}
+				}
+
+				// Check RG tag if expected.
+				if rgTag, ok := want.Tags["RG"]; ok {
+					gotRG, ok := g.Tags["RG"]
+					if !ok {
+						t.Errorf("record %d (%s): missing RG tag", i, want.ReadName)
+					} else if gotRG.Value != rgTag.Value {
+						t.Errorf("record %d (%s) RG: got %q, want %q", i, want.ReadName, gotRG.Value, rgTag.Value)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestEmbeddedRefRoundtrip(t *testing.T) {
+	refFile := "testdata/ref.fa"
+
+	header := htsio.NewSamHeader()
+	header.AddLine("@HD\tVN:1.6\tSO:coordinate")
+	header.AddLine("@SQ\tSN:chr1\tLN:100000")
+
+	records := []*htsio.SamRecord{
+		{
+			ReadName: "read1", Flag: 0, RefName: "chr1", Pos: 100, MapQ: 60,
+			Cigar: "10M", RefNext: "*", PosNext: 0, InsertLen: 0,
+			Seq: "ACGTACGTAC", Qual: "IIIIIIIIII",
+			Tags: map[string]htsio.SamTag{}, TagOrder: []string{},
+		},
+		{
+			ReadName: "read2", Flag: 0, RefName: "chr1", Pos: 200, MapQ: 30,
+			Cigar: "10M", RefNext: "*", PosNext: 0, InsertLen: 0,
+			Seq: "TGCATGCATG", Qual: "IIIIIIIIII",
+			Tags: map[string]htsio.SamTag{}, TagOrder: []string{},
+		},
+	}
+
+	for _, version := range []struct {
+		name string
+		ver  Version
+	}{
+		{"v3.0", V3},
+		{"v3.1", V31},
+	} {
+		t.Run(version.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cramFile := filepath.Join(tmpDir, "embedded.cram")
+
+			// Write with embedded reference enabled.
+			opts := NewWriterOpts().SetVersion(version.ver).Reference(refFile).EmbedRef(true)
+			w, err := NewWriter(cramFile, header, opts)
+			if err != nil {
+				t.Fatalf("NewWriter: %v", err)
+			}
+			for _, rec := range records {
+				if err := w.Write(rec); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			if err := w.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			// Read back WITHOUT an external reference — the embedded ref should suffice.
+			reader, err := NewReader(cramFile, "")
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+			defer reader.Close()
+
+			var got []*htsio.SamRecord
+			for rec, err := range reader.Records() {
+				if err != nil {
+					t.Fatalf("Records: %v", err)
+				}
+				got = append(got, rec)
+			}
+
+			if len(got) != len(records) {
+				t.Fatalf("record count: got %d, want %d", len(got), len(records))
+			}
+
+			for i, want := range records {
+				g := got[i]
+				if g.ReadName != want.ReadName {
+					t.Errorf("record %d ReadName: got %q, want %q", i, g.ReadName, want.ReadName)
+				}
+				if g.Seq != want.Seq {
+					t.Errorf("record %d Seq: got %q, want %q", i, g.Seq, want.Seq)
+				}
+				if g.Cigar != want.Cigar {
+					t.Errorf("record %d Cigar: got %q, want %q", i, g.Cigar, want.Cigar)
 				}
 			}
 		})

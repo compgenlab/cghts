@@ -14,6 +14,7 @@ import (
 
 	"github.com/compgen-io/cgkit/htsio"
 	"github.com/compgen-io/cgkit/htsio/codec"
+	"github.com/compgen-io/cgkit/seqio"
 )
 
 // Version identifies a CRAM version for the writer.
@@ -33,6 +34,7 @@ type WriterOpts struct {
 	refPath         string
 	level           int // compression level 0-9
 	recordsPerSlice int
+	embedRef        bool // store reference bases in the CRAM file
 }
 
 // NewWriterOpts returns default writer options (v3.1, level 6, 10000 records/slice).
@@ -48,6 +50,7 @@ func (o *WriterOpts) SetVersion(v Version) *WriterOpts         { o.version = v; 
 func (o *WriterOpts) Reference(path string) *WriterOpts        { o.refPath = path; return o }
 func (o *WriterOpts) Level(n int) *WriterOpts                  { o.level = n; return o }
 func (o *WriterOpts) RecordsPerSlice(n int) *WriterOpts        { o.recordsPerSlice = n; return o }
+func (o *WriterOpts) EmbedRef(v bool) *WriterOpts              { o.embedRef = v; return o }
 
 // Writer writes CRAM files. Implements htsio.SamWriter.
 type Writer struct {
@@ -58,7 +61,7 @@ type Writer struct {
 	refs           []refInfo
 	refMap         map[string]int32
 	readGroupMap   map[string]int32
-	refProv        *referenceProvider
+	ref            seqio.ReferenceReader
 	recordBuf      []*htsio.SamRecord
 	recordCounter  int64
 	headerWritten  bool
@@ -123,9 +126,13 @@ func newWriter(w io.Writer, closer io.Closer, header *htsio.SamHeader, opts *Wri
 		cw.readGroupMap[rg] = int32(i)
 	}
 
-	// Set up reference provider.
+	// Set up reference.
 	if opts.refPath != "" {
-		cw.refProv = newReferenceProvider(opts.refPath)
+		var err error
+		cw.ref, err = seqio.OpenReference(opts.refPath)
+		if err != nil {
+			return nil, fmt.Errorf("cram: %w", err)
+		}
 	}
 
 	return cw, nil
@@ -411,8 +418,8 @@ func (cw *Writer) buildFeatures(rec *htsio.SamRecord, cr *cramRecord) []cramFeat
 
 	// Get reference sequence for substitution detection.
 	var refSeq []byte
-	if cr.refID >= 0 && cw.refProv != nil && int(cr.refID) < len(cw.refs) {
-		refSeq, _ = cw.refProv.getSequence(cw.refs[cr.refID].name)
+	if cr.refID >= 0 && cw.ref != nil && int(cr.refID) < len(cw.refs) {
+		refSeq, _ = cw.ref.GetSequence(cw.refs[cr.refID].name)
 	}
 
 	var features []cramFeature
@@ -645,7 +652,8 @@ const (
 	blockIDFP = 26
 	blockIDBB = 27
 	blockIDQQ = 28
-	blockIDTagBase = 100 // tags start at 100+
+	blockIDEmbeddedRef = 99 // embedded reference block
+	blockIDTagBase     = 100 // tags start at 100+
 )
 
 type writerCompressionHeader struct {
@@ -665,7 +673,7 @@ func (cw *Writer) buildCompressionHeader(subMatrix [5][4]byte, tagDict [][]tagKe
 	ch := &writerCompressionHeader{
 		readNamesPreserved: true,
 		apDelta:            true,
-		refRequired:        cw.refProv != nil,
+		refRequired:        cw.ref != nil,
 		dataSeriesEncodings: make(map[string]encodingDescriptor),
 		tagEncodings:       make(map[int32]encodingDescriptor),
 	}
@@ -882,12 +890,21 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 		return b
 	}
 
-	// Tag block ID map: tag key → block ID.
+	// Track per-read quality lengths for fqzcomp.
+	var qsReadLengths []int
+	// Track read names for name tokenizer.
+	var readNames []string
+
+	// Tag block ID map: extract actual block IDs from the encoding descriptors
+	// to ensure consistency with the compression header.
 	tagBlockIDs := make(map[int32]int32)
-	nextTagBlockID := int32(blockIDTagBase)
-	for key := range ch.tagEncodings {
-		tagBlockIDs[key] = nextTagBlockID
-		nextTagBlockID++
+	for key, enc := range ch.tagEncodings {
+		// params layout: lenCodecID(ITF8) lenParamsSize(ITF8) blockID(ITF8) ...
+		pr := newByteReader(enc.params)
+		readITF8(pr) // len codec ID
+		readITF8(pr) // len params size
+		blockID, _ := readITF8(pr)
+		tagBlockIDs[key] = blockID
 	}
 
 	prevAlignPos := startPos
@@ -918,6 +935,7 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 			rnBuf := getExt(blockIDRN)
 			rnBuf.WriteString(rec.readName)
 			rnBuf.WriteByte(0) // NUL stop
+			readNames = append(readNames, rec.readName)
 		}
 
 		// Mate info.
@@ -1007,6 +1025,7 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 				for _, q := range rec.qualScores {
 					qsBuf.WriteByte(q)
 				}
+				qsReadLengths = append(qsReadLengths, len(rec.qualScores))
 			}
 		} else {
 			// BA (unmapped bases)
@@ -1021,14 +1040,15 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 				for _, q := range rec.qualScores {
 					qsBuf.WriteByte(q)
 				}
+				qsReadLengths = append(qsReadLengths, len(rec.qualScores))
 			}
 		}
 	}
 
 	// Compute reference MD5 for slice header.
 	var refMD5 [16]byte
-	if refID >= 0 && cw.refProv != nil && int(refID) < len(cw.refs) {
-		if refSeq, err := cw.refProv.getSequence(cw.refs[refID].name); err == nil {
+	if refID >= 0 && cw.ref != nil && int(refID) < len(cw.refs) {
+		if refSeq, err := cw.ref.GetSequence(cw.refs[refID].name); err == nil {
 			// MD5 of the reference region covered by this slice.
 			start := int(startPos) - 1
 			end := start + int(alignmentSpan)
@@ -1040,6 +1060,25 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 			}
 			if start < end {
 				refMD5 = md5.Sum(refSeq[start:end])
+			}
+		}
+	}
+
+	// Embed reference sequence if requested.
+	embeddedRefID := int32(-1)
+	if cw.opts.embedRef && refID >= 0 && cw.ref != nil && int(refID) < len(cw.refs) {
+		if refSeq, err := cw.ref.GetSequence(cw.refs[refID].name); err == nil {
+			start := int(startPos) - 1
+			end := start + int(alignmentSpan)
+			if start < 0 {
+				start = 0
+			}
+			if end > len(refSeq) {
+				end = len(refSeq)
+			}
+			if start < end {
+				embeddedRefID = blockIDEmbeddedRef
+				externals[embeddedRefID] = bytes.NewBuffer(refSeq[start:end])
 			}
 		}
 	}
@@ -1059,7 +1098,7 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 		recordCounter:   cw.recordCounter,
 		numBlocks:       int32(1 + len(contentIDs)), // core block + external blocks
 		blockContentIDs: contentIDs,
-		embeddedRefID:   -1,
+		embeddedRefID:   embeddedRefID,
 		referenceMD5:    refMD5,
 	}
 
@@ -1083,7 +1122,15 @@ func (cw *Writer) encodeRecords(records []cramRecord, ch *writerCompressionHeade
 
 	for _, id := range contentIDs {
 		data := externals[id].Bytes()
-		blk, err := cw.compressAndEncodeBlock(blockContentExternalData, id, data)
+		var blk []byte
+		var err error
+		if id == blockIDQS && len(qsReadLengths) > 0 {
+			blk, err = cw.compressAndEncodeQualBlock(data, qsReadLengths)
+		} else if id == blockIDRN && len(readNames) > 0 {
+			blk, err = cw.compressAndEncodeNameBlock(data, readNames)
+		} else {
+			blk, err = cw.compressAndEncodeBlock(blockContentExternalData, id, data)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1106,6 +1153,52 @@ func (cw *Writer) serializeSliceHeader(sh *sliceHeader) []byte {
 	writeITF8(&buf, sh.embeddedRefID)
 	buf.Write(sh.referenceMD5[:])
 	return buf.Bytes()
+}
+
+// compressAndEncodeQualBlock compresses quality scores using all methods including fqzcomp.
+func (cw *Writer) compressAndEncodeQualBlock(data []byte, readLengths []int) ([]byte, error) {
+	// Try all standard methods first.
+	best, err := cw.compressAndEncodeBlock(blockContentExternalData, blockIDQS, data)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try fqzcomp (v3.1+ only).
+	if cw.majorVersion() >= 3 && cw.opts.version.minor >= 1 && len(readLengths) > 0 {
+		fqzData := codec.EncodeFqzcomp(data, readLengths)
+		if fqzData != nil {
+			if candidate, err := cw.encodeBlock(blockContentExternalData, blockIDQS, blockMethodFqzcomp, fqzData); err == nil {
+				if len(candidate) < len(best) {
+					best = candidate
+				}
+			}
+		}
+	}
+
+	return best, nil
+}
+
+// compressAndEncodeNameBlock compresses read names using all methods including name tokenizer.
+func (cw *Writer) compressAndEncodeNameBlock(data []byte, names []string) ([]byte, error) {
+	// Try all standard methods first.
+	best, err := cw.compressAndEncodeBlock(blockContentExternalData, blockIDRN, data)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try name tokenizer (v3.1+ only).
+	if cw.majorVersion() >= 3 && cw.opts.version.minor >= 1 && len(names) > 0 {
+		tokData := codec.EncodeNameTokenizer(names)
+		if tokData != nil {
+			if candidate, err := cw.encodeBlock(blockContentExternalData, blockIDRN, blockMethodNameTok, tokData); err == nil {
+				if len(candidate) < len(best) {
+					best = candidate
+				}
+			}
+		}
+	}
+
+	return best, nil
 }
 
 // compressAndEncodeBlock compresses data using multiple methods and picks the smallest.
@@ -1187,6 +1280,12 @@ func (cw *Writer) encodeBlock(contentType byte, contentID int32, method byte, da
 			method = blockMethodRaw
 			compData = data
 		}
+	case blockMethodFqzcomp:
+		// Data is already fqzcomp-encoded (by EncodeFqzcomp).
+		compData = data
+	case blockMethodNameTok:
+		// Data is already name-tokenizer-encoded (by EncodeNameTokenizer).
+		compData = data
 	default:
 		compData = data
 	}

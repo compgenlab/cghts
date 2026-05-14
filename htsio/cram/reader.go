@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/compgen-io/cgkit/htsio"
+	"github.com/compgen-io/cgkit/seqio"
 )
 
 func init() {
@@ -17,10 +18,16 @@ func init() {
 			return bytes.HasPrefix(magic, []byte("CRAM"))
 		},
 		NewFromFile: func(filename string, opts *htsio.SamReaderOpts) (htsio.SamReader, error) {
-			return NewReader(filename, "")
+			if opts == nil {
+				opts = htsio.NewSamReaderOpts()
+			}
+			return NewReader(filename, opts.RefPathValue(), opts)
 		},
 		NewFromStream: func(r io.ReadCloser, opts *htsio.SamReaderOpts) (htsio.SamReader, error) {
-			return NewReaderFromStream(r, "", "")
+			if opts == nil {
+				opts = htsio.NewSamReaderOpts()
+			}
+			return NewReaderFromStream(r, "", opts.RefPathValue(), opts)
 		},
 	})
 }
@@ -34,7 +41,8 @@ type Reader struct {
 	hdr      *htsio.SamHeader
 	refs     []refInfo
 	refMap   map[string]int // ref name → index
-	refProv  *referenceProvider
+	ref      seqio.ReferenceReader
+	opts     *htsio.SamReaderOpts
 	idx      *craiIndex // lazily loaded CRAI index for Query
 	queryFh  *os.File   // separate file handle for Query seeks
 }
@@ -42,22 +50,32 @@ type Reader struct {
 // NewReader creates a CRAM reader from a file path.
 // refPath is the path to the reference FASTA. If empty, the reader
 // will attempt to find the reference from the UR field in @SQ header lines.
-func NewReader(filename string, refPath string) (*Reader, error) {
+// opts may be nil for default options.
+func NewReader(filename string, refPath string, opts ...*htsio.SamReaderOpts) (*Reader, error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err
 	}
-	return NewReaderFromStream(f, filename, refPath)
+	var o *htsio.SamReaderOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	return NewReaderFromStream(f, filename, refPath, o)
 }
 
 // NewReaderFromStream creates a CRAM reader from an io.ReadCloser.
 // The stream must be positioned at the start of a CRAM file (possibly
 // with peeked bytes prepended). filename is used for index lookups.
-func NewReaderFromStream(rc io.ReadCloser, filename string, refPath string) (*Reader, error) {
+// opts may be nil for default options.
+func NewReaderFromStream(rc io.ReadCloser, filename string, refPath string, opts *htsio.SamReaderOpts) (*Reader, error) {
+	if opts == nil {
+		opts = htsio.NewSamReaderOpts()
+	}
 	cr := &Reader{
 		r:        rc,
 		src:      rc,
 		filename: filename,
+		opts:     opts,
 	}
 
 	// Read file definition.
@@ -74,12 +92,28 @@ func NewReaderFromStream(rc io.ReadCloser, filename string, refPath string) (*Re
 		return nil, fmt.Errorf("cram: reading header: %w", err)
 	}
 
-	// Set up reference provider.
-	if refPath == "" {
-		refPath = cr.findReferenceFromHeader()
-	}
-	if refPath != "" {
-		cr.refProv = newReferenceProvider(refPath)
+	// Set up reference: prefer pre-opened ReferenceReader, then refPath, then header UR,
+	// then REF_CACHE/REF_PATH env vars, then refget API.
+	if opts.RefReaderValue() != nil {
+		cr.ref = opts.RefReaderValue()
+	} else {
+		if refPath == "" {
+			refPath, err = cr.findReferenceFromHeader()
+			if err != nil {
+				rc.Close()
+				return nil, err
+			}
+		}
+		if refPath != "" {
+			cr.ref, err = seqio.OpenReference(refPath)
+			if err != nil {
+				rc.Close()
+				return nil, fmt.Errorf("cram: %w", err)
+			}
+		} else {
+			// Try MD5-based reference providers as fallback.
+			cr.ref = cr.tryMD5ReferenceProviders()
+		}
 	}
 
 	return cr, nil
@@ -97,6 +131,9 @@ func (cr *Reader) Header() (*htsio.SamHeader, error) {
 
 // Close releases resources.
 func (cr *Reader) Close() error {
+	if cr.ref != nil {
+		cr.ref.Close()
+	}
 	if cr.queryFh != nil {
 		cr.queryFh.Close()
 	}
@@ -223,11 +260,31 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 
 				// Load reference.
 				var refSeq []byte
-				if sh.refSeqID >= 0 && cr.refProv != nil {
-					if int(sh.refSeqID) < len(cr.refs) {
-						if seq, err := cr.refProv.getSequence(cr.refs[sh.refSeqID].name); err == nil {
-							refSeq = seq
+				refOffset := 0
+				if sh.embeddedRefID >= 0 {
+					if embData, ok := externalBlocks[sh.embeddedRefID]; ok {
+						refSeq = embData
+						refOffset = int(sh.alignmentStart) - 1
+					}
+				} else if sh.refSeqID >= 0 {
+					if cr.ref == nil {
+						refName := "?"
+						if int(sh.refSeqID) < len(cr.refs) {
+							refName = cr.refs[sh.refSeqID].name
 						}
+						yield(nil, fmt.Errorf("cram: reference sequence %q required but no reference FASTA provided (use --cram-ref)", refName))
+						return
+					}
+					if int(sh.refSeqID) < len(cr.refs) {
+						rStart := int(sh.alignmentStart) - 1
+						rEnd := rStart + int(sh.alignmentSpan)
+						seq, err := cr.ref.GetSequenceRange(cr.refs[sh.refSeqID].name, rStart, rEnd)
+						if err != nil {
+							yield(nil, fmt.Errorf("cram: %w", err))
+							return
+						}
+						refSeq = seq
+						refOffset = rStart
 					}
 				}
 
@@ -240,10 +297,13 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 				for i := range records {
 					rec := &records[i]
 					recRefSeq := refSeq
-					if sh.refSeqID == -2 && cr.refProv != nil && rec.refID >= 0 {
+					recRefOffset := refOffset
+					if sh.refSeqID == -2 && cr.ref != nil && rec.refID >= 0 {
 						if int(rec.refID) < len(cr.refs) {
-							if seq, err := cr.refProv.getSequence(cr.refs[rec.refID].name); err == nil {
+							seq, err := cr.ref.GetSequence(cr.refs[rec.refID].name)
+							if err == nil {
 								recRefSeq = seq
+								recRefOffset = 0
 							}
 						}
 					}
@@ -258,7 +318,10 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 						continue
 					}
 
-					samRec := cr.cramToSam(rec, compHdr, recRefSeq)
+					samRec := cr.cramToSam(rec, compHdr, recRefSeq, recRefOffset)
+					if !cr.opts.PassesFilters(samRec) {
+						continue
+					}
 					if !yield(samRec, nil) {
 						return
 					}
@@ -354,17 +417,33 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 
 		// Load reference sequence for this slice.
 		var refSeq []byte
-		if sh.refSeqID >= 0 && cr.refProv != nil {
+		refOffset := 0
+		if sh.embeddedRefID >= 0 {
+			// Embedded reference: the reference bases are stored in an external block.
+			if embData, ok := externalBlocks[sh.embeddedRefID]; ok {
+				refSeq = embData
+				refOffset = int(sh.alignmentStart) - 1
+			}
+		} else if sh.refSeqID >= 0 {
+			if cr.ref == nil {
+				refName := "?"
+				if int(sh.refSeqID) < len(cr.refs) {
+					refName = cr.refs[sh.refSeqID].name
+				}
+				return yield(nil, fmt.Errorf("cram: reference sequence %q required but no reference FASTA provided (use --cram-ref)", refName))
+			}
 			refName := ""
 			if int(sh.refSeqID) < len(cr.refs) {
 				refName = cr.refs[sh.refSeqID].name
 			}
 			if refName != "" {
-				refSeq, err = cr.refProv.getSequence(refName)
+				start := int(sh.alignmentStart) - 1
+				end := start + int(sh.alignmentSpan)
+				refSeq, err = cr.ref.GetSequenceRange(refName, start, end)
 				if err != nil {
-					// Non-fatal: sequence reconstruction will use 'N' for missing ref bases
-					refSeq = nil
+					return yield(nil, fmt.Errorf("cram: %w", err))
 				}
+				refOffset = start
 			}
 		}
 
@@ -377,16 +456,22 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 		// Convert to SamRecords and yield.
 		for i := range records {
 			recRefSeq := refSeq
+			recRefOffset := refOffset
 			// For multi-ref slices, load the correct reference per record.
-			if sh.refSeqID == -2 && cr.refProv != nil && records[i].refID >= 0 {
+			if sh.refSeqID == -2 && cr.ref != nil && records[i].refID >= 0 {
 				if int(records[i].refID) < len(cr.refs) {
 					rn := cr.refs[records[i].refID].name
-					if seq, err := cr.refProv.getSequence(rn); err == nil {
-						recRefSeq = seq
+					recRefSeq, err = cr.ref.GetSequence(rn)
+					if err != nil {
+						return yield(nil, fmt.Errorf("cram: %w", err))
 					}
+					recRefOffset = 0
 				}
 			}
-			samRec := cr.cramToSam(&records[i], compHdr, recRefSeq)
+			samRec := cr.cramToSam(&records[i], compHdr, recRefSeq, recRefOffset)
+			if !cr.opts.PassesFilters(samRec) {
+				continue
+			}
 			if !yield(samRec, nil) {
 				return false
 			}
@@ -397,7 +482,8 @@ func (cr *Reader) processContainer(ch *containerHeader, yield func(*htsio.SamRec
 }
 
 // cramToSam converts a CRAM record to a SamRecord.
-func (cr *Reader) cramToSam(rec *cramRecord, ch *compressionHeader, refSeq []byte) *htsio.SamRecord {
+// refOffset is the 0-based offset subtracted from reference positions (non-zero for embedded refs).
+func (cr *Reader) cramToSam(rec *cramRecord, ch *compressionHeader, refSeq []byte, refOffset int) *htsio.SamRecord {
 	// Reference name
 	refName := "*"
 	if rec.refID >= 0 && int(rec.refID) < len(cr.refs) {
@@ -416,7 +502,7 @@ func (cr *Reader) cramToSam(rec *cramRecord, ch *compressionHeader, refSeq []byt
 	}
 
 	// Sequence
-	seq := reconstructSequence(rec, ch, refSeq)
+	seq := reconstructSequence(rec, ch, refSeq, refOffset)
 
 	// CIGAR
 	cigar := reconstructCigar(rec)
@@ -519,9 +605,41 @@ func (cr *Reader) readHeaderContainer() error {
 	return nil
 }
 
+// tryMD5ReferenceProviders attempts to create a reference reader from MD5-based
+// providers (REF_CACHE/REF_PATH env vars, then refget API). Returns nil if
+// no M5 tags are found in the header or if no provider can be created.
+func (cr *Reader) tryMD5ReferenceProviders() seqio.ReferenceReader {
+	md5s := cr.hdr.ReferenceMD5s()
+	if len(md5s) == 0 {
+		return nil
+	}
+
+	// Build lengths and names from header.
+	refs := cr.hdr.References()
+	lengths := make(map[string]int, len(refs))
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		lengths[ref.Name] = ref.Length
+		names = append(names, ref.Name)
+	}
+
+	// Try REF_CACHE/REF_PATH first.
+	if r, err := seqio.NewRefCacheReader(md5s, lengths, names); err == nil {
+		return r
+	}
+
+	// Try refget API.
+	if r, err := seqio.NewRefgetReader(md5s, lengths, names); err == nil {
+		return r
+	}
+
+	return nil
+}
+
 // findReferenceFromHeader looks for a UR field in the first @SQ line
-// and returns it if it looks like a local file path.
-func (cr *Reader) findReferenceFromHeader() string {
+// and returns it if it looks like a local file path. Returns an error
+// if a UR field is found but the file does not exist.
+func (cr *Reader) findReferenceFromHeader() (string, error) {
 	for _, line := range cr.hdr.Lines {
 		if !strings.HasPrefix(line, "@SQ\t") {
 			continue
@@ -533,12 +651,13 @@ func (cr *Reader) findReferenceFromHeader() string {
 				if strings.HasPrefix(uri, "/") || strings.HasPrefix(uri, "file://") {
 					path := strings.TrimPrefix(uri, "file://")
 					if _, err := os.Stat(path); err == nil {
-						return path
+						return path, nil
 					}
+					return "", fmt.Errorf("cram: reference FASTA from header UR field not found: %s (use --cram-ref to specify)", path)
 				}
 			}
 		}
 		break // only check first @SQ
 	}
-	return ""
+	return "", nil
 }
