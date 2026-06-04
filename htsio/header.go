@@ -16,6 +16,8 @@ type SamHeader struct {
 type SamHeaderRef struct {
 	Name   string
 	Length int
+	M5     string // MD5 checksum of the sequence (from M5 tag), may be empty
+	UR     string // URI of the sequence (from UR tag), may be empty
 }
 
 // NewSamHeader creates an empty header.
@@ -41,6 +43,10 @@ func (h *SamHeader) References() []SamHeaderRef {
 				ref.Name = field[3:]
 			} else if strings.HasPrefix(field, "LN:") {
 				ref.Length, _ = strconv.Atoi(field[3:])
+			} else if strings.HasPrefix(field, "M5:") {
+				ref.M5 = field[3:]
+			} else if strings.HasPrefix(field, "UR:") {
+				ref.UR = field[3:]
 			}
 		}
 		if ref.Name != "" {
@@ -48,6 +54,18 @@ func (h *SamHeader) References() []SamHeaderRef {
 		}
 	}
 	return refs
+}
+
+// ReferenceMD5s returns a map of sequence name → MD5 from @SQ M5 tags.
+// Only sequences with M5 tags are included.
+func (h *SamHeader) ReferenceMD5s() map[string]string {
+	m := make(map[string]string)
+	for _, ref := range h.References() {
+		if ref.M5 != "" {
+			m[ref.Name] = ref.M5
+		}
+	}
+	return m
 }
 
 // ReadGroups returns the read group IDs from @RG lines.

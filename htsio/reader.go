@@ -6,6 +6,8 @@ import (
 	"iter"
 	"strconv"
 	"strings"
+
+	"github.com/compgen-io/cgkit/seqio"
 )
 
 // TagFilterOp specifies the comparison operation for a tag filter.
@@ -129,6 +131,8 @@ type SamReaderOpts struct {
 	minMapQ    int
 	threads    int
 	tagFilters []*TagFilter
+	refPath    string              // reference FASTA path (used by CRAM)
+	refReader  seqio.ReferenceReader // pre-opened reference (takes priority over refPath)
 }
 
 // NewSamReader opens a SAM/BAM/CRAM file by auto-detecting the format
@@ -193,11 +197,15 @@ func (r *SamReaderOpts) FlagReqValue() int    { return r.flagReq }
 func (r *SamReaderOpts) FlagFilterValue() int  { return r.flagFilter }
 func (r *SamReaderOpts) MinMapQValue() int     { return r.minMapQ }
 func (r *SamReaderOpts) ThreadsValue() int     { return r.threads }
+func (r *SamReaderOpts) RefPathValue() string                    { return r.refPath }
+func (r *SamReaderOpts) RefReaderValue() seqio.ReferenceReader   { return r.refReader }
 
 func (r *SamReaderOpts) FlagRequired(flag int) *SamReaderOpts { r.flagReq = flag; return r }
 func (r *SamReaderOpts) FlagFilter(flag int) *SamReaderOpts   { r.flagFilter = flag; return r }
 func (r *SamReaderOpts) MinMapQ(mapq int) *SamReaderOpts      { r.minMapQ = mapq; return r }
 func (r *SamReaderOpts) Threads(n int) *SamReaderOpts         { r.threads = n; return r }
+func (r *SamReaderOpts) RefPath(path string) *SamReaderOpts                  { r.refPath = path; return r }
+func (r *SamReaderOpts) Ref(ref seqio.ReferenceReader) *SamReaderOpts        { r.refReader = ref; return r }
 func (r *SamReaderOpts) AddTagFilter(f *TagFilter) *SamReaderOpts {
 	r.tagFilters = append(r.tagFilters, f)
 	return r

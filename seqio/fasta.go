@@ -38,7 +38,7 @@ func NewFastaFile(filename string) (*FastaReader, error) {
 		return nil, err
 	}
 
-	// TODO: handle FAIDX indexed files (by returning an IndexedFastaReader)
+	// For indexed random access, use NewIndexedFastaReader() instead.
 
 	r := bufio.NewReader(f)
 	magic, err := r.Peek(2)
