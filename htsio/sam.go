@@ -62,6 +62,19 @@ type SamRecord struct {
 	TagOrder  []string // insertion order of tag keys, for consistent output
 }
 
+// SetTag sets an optional tag, appending to TagOrder if this is a new tag.
+// Tags must be in both Tags and TagOrder to be written by the BAM writer
+// (which iterates TagOrder), so this is the safe way to add or update tags.
+func (r *SamRecord) SetTag(tag string, val SamTag) {
+	if r.Tags == nil {
+		r.Tags = make(map[string]SamTag)
+	}
+	if _, exists := r.Tags[tag]; !exists {
+		r.TagOrder = append(r.TagOrder, tag)
+	}
+	r.Tags[tag] = val
+}
+
 // IsUnmapped returns true if the read is unmapped (flag 0x4).
 func (r *SamRecord) IsUnmapped() bool {
 	return r.Flag&0x4 != 0
