@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/compgen-io/cgkit/htsio"
 	"github.com/compgen-io/cgkit/htsio/codec"
@@ -53,7 +54,9 @@ func (o *WriterOpts) RecordsPerSlice(n int) *WriterOpts        { o.recordsPerSli
 func (o *WriterOpts) EmbedRef(v bool) *WriterOpts              { o.embedRef = v; return o }
 
 // Writer writes CRAM files. Implements htsio.SamWriter.
+// It is safe for concurrent use by multiple goroutines.
 type Writer struct {
+	mu             sync.Mutex
 	w              io.Writer
 	closer         io.Closer
 	opts           *WriterOpts
@@ -142,7 +145,11 @@ func (cw *Writer) version() Version { return cw.opts.version }
 func (cw *Writer) majorVersion() byte { return cw.opts.version.major }
 
 // Write buffers a record and flushes when the buffer is full.
+// It is safe for concurrent use by multiple goroutines.
 func (cw *Writer) Write(rec *htsio.SamRecord) error {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+
 	if !cw.headerWritten {
 		if err := cw.writeFileHeader(); err != nil {
 			return err
@@ -159,6 +166,9 @@ func (cw *Writer) Write(rec *htsio.SamRecord) error {
 
 // Close flushes remaining records, writes EOF, and closes the output.
 func (cw *Writer) Close() error {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+
 	if !cw.headerWritten {
 		if err := cw.writeFileHeader(); err != nil {
 			return err

@@ -26,6 +26,7 @@ type sortedWriter struct {
 	refs      []bamRefInfo
 	refIdx    map[string]int32
 	sortCoord bool
+	threads   int // BGZF compression threads (0 or 1 = single-threaded)
 
 	tmpPrefix string
 	tmpFiles  []string
@@ -230,16 +231,22 @@ func (sw *sortedWriter) refID(rec *htsio.SamRecord) int32 {
 	return -1
 }
 
+// SetThreads sets the number of BGZF compression threads for output writing.
+// Must be called before any writes. If threads <= 1, compression is single-threaded.
+func (sw *sortedWriter) SetThreads(n int) {
+	sw.threads = n
+}
+
 // openOutput creates a BAM writer for the final sorted output.
 func (sw *sortedWriter) openOutput() (*Writer, error) {
 	if sw.outWriter != nil {
-		return NewWriterFromWriter(sw.outWriter, sw.header), nil
+		return NewWriterFromWriterWithThreads(sw.outWriter, sw.header, sw.threads), nil
 	}
-	return NewWriter(sw.filename, sw.header)
+	return NewWriterWithThreads(sw.filename, sw.header, sw.threads)
 }
 
 func (sw *sortedWriter) writeBAM(filename string, records []*htsio.SamRecord) error {
-	w, err := NewWriter(filename, sw.header)
+	w, err := NewWriterWithThreads(filename, sw.header, sw.threads)
 	if err != nil {
 		return err
 	}
