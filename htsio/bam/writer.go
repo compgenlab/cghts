@@ -19,7 +19,7 @@ import (
 // It implements the htsio.SamWriter interface and is safe for concurrent use.
 type Writer struct {
 	w       *bgzf.Writer
-	f       *os.File   // non-nil if we opened the file
+	f       *os.File // non-nil if we opened the file
 	header  *htsio.SamHeader
 	refs    []bamRefInfo
 	refIdx  map[string]int32 // ref name → index
@@ -91,6 +91,23 @@ func newWriter(w *bgzf.Writer, header *htsio.SamHeader) *Writer {
 	return bw
 }
 
+// setErr records the first error seen; subsequent errors are ignored.
+// Safe to call from the async writer goroutine and from Close.
+func (bw *Writer) setErr(err error) {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	if bw.err == nil {
+		bw.err = err
+	}
+}
+
+// getErr returns the recorded error (if any) under lock.
+func (bw *Writer) getErr() error {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	return bw.err
+}
+
 // start writes the BAM header and starts the async writer goroutine.
 func (bw *Writer) start() error {
 	bw.mu.Lock()
@@ -110,7 +127,7 @@ func (bw *Writer) start() error {
 		defer bw.writeWg.Done()
 		for rec := range bw.writeCh {
 			if err := bw.encodeRecord(rec); err != nil {
-				bw.err = fmt.Errorf("bam write: %w", err)
+				bw.setErr(fmt.Errorf("bam write: %w", err))
 				for range bw.writeCh {
 				}
 				return
@@ -167,42 +184,43 @@ func (bw *Writer) Write(rec *htsio.SamRecord) error {
 	if err := bw.start(); err != nil {
 		return err
 	}
-	bw.mu.Lock()
-	if bw.err != nil {
-		bw.mu.Unlock()
-		return bw.err
+	if err := bw.getErr(); err != nil {
+		return err
 	}
-	bw.mu.Unlock()
 	bw.writeCh <- rec
 	return nil
 }
 
 // Close drains the write buffer, flushes the BGZF stream, and closes the file.
 func (bw *Writer) Close() error {
+	bw.mu.Lock()
 	if bw.closed {
-		return nil
+		err := bw.err
+		bw.mu.Unlock()
+		return err
 	}
 	bw.closed = true
+	bw.mu.Unlock()
 
-	if !bw.started {
-		// Ensure header is written even if no records were added.
-		if err := bw.start(); err != nil {
-			return err
-		}
+	// Ensure the header is written even if no records were added. start() is
+	// idempotent and locks internally, so calling it here is safe regardless of
+	// whether Write already started the goroutine.
+	if err := bw.start(); err != nil {
+		return err
 	}
 
 	close(bw.writeCh)
 	bw.writeWg.Wait()
 
-	if err := bw.w.Close(); err != nil && bw.err == nil {
-		bw.err = err
+	if err := bw.w.Close(); err != nil {
+		bw.setErr(err)
 	}
 	if bw.f != nil {
-		if err := bw.f.Close(); err != nil && bw.err == nil {
-			bw.err = err
+		if err := bw.f.Close(); err != nil {
+			bw.setErr(err)
 		}
 	}
-	return bw.err
+	return bw.getErr()
 }
 
 // encodeRecord encodes a SamRecord as a BAM binary record and writes it.
@@ -523,4 +541,3 @@ func encodeArrayTagValue(buf []byte, value string) []byte {
 	}
 	return buf
 }
-

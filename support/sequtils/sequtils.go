@@ -64,7 +64,7 @@ func ConvertDNATo4Bit(r byte) byte {
 }
 
 /*
-Return the complimentary DNA base for a given char/rune
+Return the complementary DNA base for a given char/rune
 
 	Complementary Ambiguity Codes
 	A-T / C-G
@@ -74,7 +74,7 @@ Return the complimentary DNA base for a given char/rune
 	D (not C) is complementary to H (not G)
 	N is complementary to N
 */
-func dnaCompliment(r byte) byte {
+func dnaComplement(r byte) byte {
 	switch r {
 	case 'A':
 		return 'T'
@@ -140,10 +140,10 @@ func dnaCompliment(r byte) byte {
 	return r
 }
 
-func ReverseCompliment(seq string) string {
+func ReverseComplement(seq string) string {
 	b := []byte(seq)
 	for i := 0; i < len(seq); i++ {
-		b[i] = dnaCompliment(seq[len(seq)-i-1])
+		b[i] = dnaComplement(seq[len(seq)-i-1])
 	}
 	return string(b)
 }

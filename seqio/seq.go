@@ -67,7 +67,7 @@ func (s SeqQual) Strand() string {
 
 func (s SeqQual) RevComp() SeqQual {
 	return SeqQual{
-		seq:     sequtils.ReverseCompliment(s.seq),
+		seq:     sequtils.ReverseComplement(s.seq),
 		qual:    stringutils.ReverseString(s.qual),
 		name:    s.name,
 		pos:     s.pos,
@@ -155,7 +155,7 @@ func (s *stringSeq) Chunks(n int) iter.Seq[SeqQual] {
 	}
 }
 
-func (s *SeqQual) Sub(start, end int) SeqQual {
+func (s SeqQual) Sub(start, end int) SeqQual {
 	return SeqQual{
 		name:    s.name,
 		seq:     s.seq[start:end],

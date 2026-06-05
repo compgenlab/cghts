@@ -19,7 +19,7 @@ type Chunk struct {
 
 // binIndex holds the bins and linear index for one reference sequence.
 type binIndex struct {
-	bins      map[uint32][]Chunk       // bin number → chunks
+	bins      map[uint32][]Chunk   // bin number → chunks
 	linearIdx []bgzf.VirtualOffset // one entry per 16kb window
 }
 
@@ -288,20 +288,23 @@ func (idx *BinIndex) RefID(name string) int {
 // binning scheme (as defined in the SAM specification).
 func Reg2Bin(beg, end int) uint16 {
 	end--
+	// Parentheses around the shifts are redundant in Go (>> binds tighter than
+	// +), but are written explicitly here to match the SAM spec formula and to
+	// avoid any C-style precedence confusion for future readers.
 	if beg>>14 == end>>14 {
-		return uint16(((1<<15)-1)/7 + beg>>14)
+		return uint16((((1 << 15) - 1) / 7) + (beg >> 14))
 	}
 	if beg>>17 == end>>17 {
-		return uint16(((1<<12)-1)/7 + beg>>17)
+		return uint16((((1 << 12) - 1) / 7) + (beg >> 17))
 	}
 	if beg>>20 == end>>20 {
-		return uint16(((1<<9)-1)/7 + beg>>20)
+		return uint16((((1 << 9) - 1) / 7) + (beg >> 20))
 	}
 	if beg>>23 == end>>23 {
-		return uint16(((1<<6)-1)/7 + beg>>23)
+		return uint16((((1 << 6) - 1) / 7) + (beg >> 23))
 	}
 	if beg>>26 == end>>26 {
-		return uint16(((1<<3)-1)/7 + beg>>26)
+		return uint16((((1 << 3) - 1) / 7) + (beg >> 26))
 	}
 	return 0
 }
