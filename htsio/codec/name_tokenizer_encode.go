@@ -31,7 +31,12 @@ func EncodeNameTokenizer(names []string) []byte {
 		}
 	}
 	if maxTok > maxTokens-1 {
-		maxTok = maxTokens - 1
+		// A name has more tokens than the decoder's fixed per-name capacity
+		// (maxTokens). Clamping maxTok here would let the encoder emit a name it
+		// cannot faithfully round-trip — the decoder would silently truncate it.
+		// Decline instead and let the caller fall back to an uncompressed name
+		// codec (the CRAM writer treats a nil result as "codec not applicable").
+		return nil
 	}
 
 	// Phase 2: Build descriptor streams by comparing with previous name.
@@ -217,8 +222,14 @@ func tokenizeName(name string) []nameToken {
 				j++
 			}
 			s := name[i:j]
-			v, _ := strconv.ParseUint(s, 10, 32)
-			if len(s) > 1 && s[0] == '0' {
+			v, err := strconv.ParseUint(s, 10, 32)
+			if err != nil {
+				// Digit run does not fit in uint32 (e.g. a very long number).
+				// Encode it as a literal string token so it round-trips
+				// exactly, matching htscodecs' fallback behaviour. Otherwise
+				// the truncated value would silently corrupt the name.
+				tokens = append(tokens, nameToken{tokType: tokAlpha, strVal: s})
+			} else if len(s) > 1 && s[0] == '0' {
 				// Zero-padded.
 				tokens = append(tokens, nameToken{
 					tokType: tokDigits0,

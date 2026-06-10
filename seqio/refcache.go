@@ -208,7 +208,7 @@ func (r *RefCacheReader) fetchAndCache(name, md5 string) ([]byte, error) {
 	}
 	req.Header.Set("Accept", "text/plain")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -218,9 +218,9 @@ func (r *RefCacheReader) fetchAndCache(name, md5 string) ([]byte, error) {
 		return nil, fmt.Errorf("HTTP %d from refget for %s", resp.StatusCode, name)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := readCappedBody(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("refget fetch %s: %w", name, err)
 	}
 
 	data = uppercaseBases(data)
@@ -229,9 +229,13 @@ func (r *RefCacheReader) fetchAndCache(name, md5 string) ([]byte, error) {
 	if r.cacheDir != "" {
 		cachePath := expandCachePattern(r.cacheDir, md5)
 		dir := filepath.Dir(cachePath)
-		if err := os.MkdirAll(dir, 0755); err == nil {
-			// Best-effort write — don't fail if caching fails.
-			_ = os.WriteFile(cachePath, data, 0644)
+		// Best-effort cache write — a failure here must not fail the fetch, but
+		// we surface it on stderr rather than swallowing it silently so a
+		// misconfigured or unwritable REF_CACHE is diagnosable.
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not create REF_CACHE dir %q: %v\n", dir, err)
+		} else if err := os.WriteFile(cachePath, data, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not write REF_CACHE file %q: %v\n", cachePath, err)
 		}
 	}
 
@@ -279,7 +283,7 @@ func expandPathTemplate(tmpl, md5 string) string {
 
 // fetchURL fetches a URL and returns the body as bytes.
 func fetchURL(url string) ([]byte, error) {
-	resp, err := http.Get(url)
+	resp, err := httpClient.Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -289,11 +293,32 @@ func fetchURL(url string) ([]byte, error) {
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := readCappedBody(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("fetch %s: %w", url, err)
+	}
+	return uppercaseBases(data), nil
+}
+
+// maxRefSequenceBytes caps a single reference-sequence download. A refget
+// server (or REF_PATH source) returns one sequence — a contig/chromosome — per
+// request, so this is a generous ceiling above any realistic single sequence;
+// its purpose is to stop a malicious or buggy server from streaming an
+// unbounded body into memory, not to enforce a tight size limit.
+const maxRefSequenceBytes = 8 << 30 // 8 GiB
+
+// readCappedBody reads an HTTP body for a single reference sequence, capped at
+// maxRefSequenceBytes. It reads one byte past the cap so an over-large body is
+// reported as an error rather than silently truncated.
+func readCappedBody(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxRefSequenceBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	return uppercaseBases(data), nil
+	if int64(len(data)) > maxRefSequenceBytes {
+		return nil, fmt.Errorf("reference sequence exceeds %d bytes", maxRefSequenceBytes)
+	}
+	return data, nil
 }
 
 // uppercaseBases strips whitespace and uppercases DNA bases.

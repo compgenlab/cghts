@@ -156,7 +156,7 @@ func (r *RemoteFastaReader) loadChunk(name string, chunkIdx int, entry *FaiEntry
 
 // fetchFaiIndex downloads and parses a .fai index from a URL.
 func fetchFaiIndex(url string) (map[string]*FaiEntry, []string, error) {
-	resp, err := http.Get(url)
+	resp, err := httpClient.Get(url)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -194,6 +194,12 @@ func fetchFaiIndex(url string) (map[string]*FaiEntry, []string, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("bad lineWidth in .fai: %s", fields[4])
 		}
+		// lineBases is used as a divisor when mapping a base offset to a byte
+		// offset in loadChunk; a non-positive line geometry would divide by zero
+		// or produce nonsensical offsets. Reject malformed entries up front.
+		if length < 0 || lineBases <= 0 || lineWidth <= 0 {
+			return nil, nil, fmt.Errorf("invalid .fai geometry for %s: length=%d lineBases=%d lineWidth=%d", fields[0], length, lineBases, lineWidth)
+		}
 		name := fields[0]
 		fai[name] = &FaiEntry{
 			Name:      name,
@@ -221,7 +227,7 @@ func httpRangeGet(url string, start, end int64) ([]byte, error) {
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -231,5 +237,12 @@ func httpRangeGet(url string, start, end int64) ([]byte, error) {
 		return nil, fmt.Errorf("HTTP %d (expected 206 Partial Content)", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
+	// A well-behaved server returns exactly the requested byte range; cap the
+	// read to its size so a server that ignores the Range header and replies
+	// 200 with the whole file cannot stream an unbounded body into memory.
+	limit := end - start + 1
+	if limit <= 0 {
+		return nil, fmt.Errorf("invalid range %d-%d", start, end)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, limit))
 }

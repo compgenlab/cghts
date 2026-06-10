@@ -65,6 +65,13 @@ func decodeRansNx16WithSize(data []byte, expectedSize uint32) ([]byte, error) {
 		outSize = expectedSize
 	}
 
+	// The full uncompressed size of this block. outSize is repurposed below to
+	// mean "size of the input to the next inverse transform" as PACK/RLE are
+	// handled, so capture the final size now to bound the RLE expansion: the
+	// un-RLE output feeds unpack, and packing only shrinks data, so it can never
+	// exceed uncompressedSize. (0 means "unknown" — a no-size standalone block.)
+	uncompressedSize := outSize
+
 	// Read PACK metadata.
 	var packMap [16]byte
 	var nPackedSym int
@@ -108,7 +115,7 @@ func decodeRansNx16WithSize(data []byte, expectedSize uint32) ([]byte, error) {
 			// Uncompressed meta.
 			cMetaSize := uMetaSize / 2
 			off := n1 + n2
-			if uint32(len(data)-off) < cMetaSize {
+			if off > len(data) || uint32(len(data)-off) < cMetaSize {
 				return nil, fmt.Errorf("rans_nx16: truncated rle meta")
 			}
 			rleMeta = data[off : off+int(cMetaSize)]
@@ -121,6 +128,9 @@ func decodeRansNx16WithSize(data []byte, expectedSize uint32) ([]byte, error) {
 			}
 			off := n1 + n2 + n3
 			uMetaSize /= 2
+			if off > len(data) || uint32(len(data)-off) < cMetaSize {
+				return nil, fmt.Errorf("rans_nx16: truncated rle cmeta")
+			}
 			meta, err := decodeRansNx16Order0(data[off:off+int(cMetaSize)], uMetaSize, 4)
 			if err != nil {
 				return nil, fmt.Errorf("rans_nx16: decompressing rle meta: %w", err)
@@ -177,7 +187,7 @@ func decodeRansNx16WithSize(data []byte, expectedSize uint32) ([]byte, error) {
 	tmp2 := tmp1
 	if doRLE {
 		var err error
-		tmp2, err = rleDecodeNx16(tmp1, rleMeta, rleSyms)
+		tmp2, err = rleDecodeNx16(tmp1, rleMeta, rleSyms, uncompressedSize)
 		if err != nil {
 			return nil, fmt.Errorf("rans_nx16: rle decode: %w", err)
 		}
@@ -296,6 +306,13 @@ func decodeRansNx16Order0(data []byte, outSize uint32, nx int) ([]byte, error) {
 	x := uint32(0)
 	for j := 0; j < 256; j++ {
 		if F[j] > 0 {
+			// Guard the running sum before filling the LUTs: on malformed input
+			// the (normalised) frequencies may sum past ransNx16TotFreq, which
+			// would otherwise index past the fixed-size LUTs and panic. The
+			// post-loop check below still catches an under-full table.
+			if x+F[j] > ransNx16TotFreq {
+				return nil, fmt.Errorf("rans_nx16_o0: frequency sum exceeds %d", ransNx16TotFreq)
+			}
 			for y := uint32(0); y < F[j]; y++ {
 				lutSym[x+y] = byte(j)
 				lutFreq[x+y] = uint16(F[j])
@@ -764,8 +781,12 @@ func unpackNx16(data []byte, outSize uint32, nPackedSym int, mp [16]byte) ([]byt
 
 // rleDecodeNx16 reverses the RLE transform.
 // lit is the literal data, run is the run-length data, rleSyms lists
-// which symbols can be RLE-encoded.
-func rleDecodeNx16(lit []byte, run []byte, rleSyms []byte) ([]byte, error) {
+// which symbols can be RLE-encoded. maxSize is the block's uncompressed size:
+// the run lengths are read from input and are otherwise unbounded, so the
+// expansion is capped at maxSize to reject a crafted run that would grow the
+// output without bound. A maxSize of 0 means the size is unknown (a no-size
+// standalone block), in which case no cap is applied.
+func rleDecodeNx16(lit []byte, run []byte, rleSyms []byte, maxSize uint32) ([]byte, error) {
 	// Build lookup of RLE-eligible symbols.
 	var isRLE [256]bool
 	for _, s := range rleSyms {
@@ -775,6 +796,7 @@ func rleDecodeNx16(lit []byte, run []byte, rleSyms []byte) ([]byte, error) {
 	// Estimate output size (we'll grow if needed).
 	out := make([]byte, 0, len(lit)*2)
 	runPos := 0
+	capped := maxSize > 0
 
 	for _, b := range lit {
 		if isRLE[b] {
@@ -784,10 +806,18 @@ func rleDecodeNx16(lit []byte, run []byte, rleSyms []byte) ([]byte, error) {
 				rlen = val
 				runPos += n
 			}
+			// rlen is attacker-controlled; rlen+1 copies of b must still fit
+			// within the block's uncompressed size.
+			if capped && uint64(len(out))+uint64(rlen)+1 > uint64(maxSize) {
+				return nil, fmt.Errorf("rans_nx16: rle run overflows uncompressed size %d", maxSize)
+			}
 			for k := uint32(0); k <= rlen; k++ {
 				out = append(out, b)
 			}
 		} else {
+			if capped && uint64(len(out))+1 > uint64(maxSize) {
+				return nil, fmt.Errorf("rans_nx16: rle output overflows uncompressed size %d", maxSize)
+			}
 			out = append(out, b)
 		}
 	}

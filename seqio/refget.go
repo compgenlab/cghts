@@ -161,7 +161,7 @@ func (r *RefgetReader) loadChunk(name, md5 string, chunkIdx, seqLen int) ([]byte
 	}
 	req.Header.Set("Accept", "text/plain")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("refget fetch %s [%d,%d): %w", name, baseStart, baseEnd, err)
 	}
@@ -171,7 +171,9 @@ func (r *RefgetReader) loadChunk(name, md5 string, chunkIdx, seqLen int) ([]byte
 		return nil, fmt.Errorf("refget fetch %s [%d,%d): HTTP %d", name, baseStart, baseEnd, resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	// Cap the read to the number of bases requested; the server should return
+	// exactly this subsequence, so this bounds memory if it returns more.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(baseEnd-baseStart)))
 	if err != nil {
 		return nil, fmt.Errorf("refget fetch %s [%d,%d): %w", name, baseStart, baseEnd, err)
 	}
@@ -191,7 +193,7 @@ func (r *RefgetReader) loadChunk(name, md5 string, chunkIdx, seqLen int) ([]byte
 func (r *RefgetReader) fetchMetadataLength(md5 string) (int, error) {
 	url := fmt.Sprintf("%s/%s/metadata", r.server, md5)
 
-	resp, err := http.Get(url)
+	resp, err := httpClient.Get(url)
 	if err != nil {
 		return 0, err
 	}
@@ -203,7 +205,9 @@ func (r *RefgetReader) fetchMetadataLength(md5 string) (int, error) {
 
 	// The metadata response is JSON with a "metadata.length" field.
 	// We do a simple parse to avoid importing encoding/json for one field.
-	body, err := io.ReadAll(resp.Body)
+	// Cap the read — this is a small JSON document, so a multi-megabyte body
+	// indicates a misbehaving server, not legitimate metadata.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return 0, err
 	}

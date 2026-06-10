@@ -149,7 +149,7 @@ func decompressBlock(method byte, data []byte, rawSize int32) ([]byte, error) {
 	case blockMethodAdaptive:
 		return codec.DecodeArithDynamic(data)
 	case blockMethodFqzcomp:
-		return codec.DecodeFqzcomp(data)
+		return codec.DecodeFqzcompSize(data, int(rawSize))
 	case blockMethodNameTok:
 		return codec.DecodeNameTokenizer(data)
 	default:

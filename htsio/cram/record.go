@@ -143,6 +143,14 @@ func decodeRecord(
 	if err != nil {
 		return rec, fmt.Errorf("decoding RL: %w", err)
 	}
+	// readLen is decoded from untrusted input and is used below to size the
+	// per-base bases/qualScores buffers. Reject a negative value (which would
+	// panic make) here; the buffers are grown by append so a bogus-but-positive
+	// readLen fails when the codec runs out of input rather than allocating
+	// readLen bytes up front.
+	if rec.readLen < 0 {
+		return rec, fmt.Errorf("invalid read length %d", rec.readLen)
+	}
 
 	// AP: Alignment position
 	apCodec, err := ch.getIntCodec("AP")
@@ -288,8 +296,13 @@ func decodeRecord(
 		if err != nil {
 			return rec, fmt.Errorf("decoding FN: %w", err)
 		}
+		if numFeatures < 0 {
+			return rec, fmt.Errorf("invalid feature count %d", numFeatures)
+		}
 
-		rec.features = make([]cramFeature, 0, numFeatures)
+		// Cap the initial capacity hint; numFeatures is attacker-controlled and
+		// the loop grows the slice by append, failing at EOF for a bogus count.
+		rec.features = make([]cramFeature, 0, min(int(numFeatures), 1024))
 		prevFeatPos := int32(0)
 		for j := int32(0); j < numFeatures; j++ {
 			feat, err := decodeFeature(core, external, extPos, ch, prevFeatPos)
@@ -316,12 +329,13 @@ func decodeRecord(
 			if err != nil {
 				return rec, err
 			}
-			rec.qualScores = make([]byte, rec.readLen)
+			rec.qualScores = make([]byte, 0, min(int(rec.readLen), 4096))
 			for j := int32(0); j < rec.readLen; j++ {
-				rec.qualScores[j], err = qsCodec.decodeByte(core, external, extPos)
+				b, err := qsCodec.decodeByte(core, external, extPos)
 				if err != nil {
 					return rec, fmt.Errorf("decoding QS[%d]: %w", j, err)
 				}
+				rec.qualScores = append(rec.qualScores, b)
 			}
 		}
 	} else {
@@ -330,12 +344,13 @@ func decodeRecord(
 		if err != nil {
 			return rec, err
 		}
-		rec.bases = make([]byte, rec.readLen)
+		rec.bases = make([]byte, 0, min(int(rec.readLen), 4096))
 		for j := int32(0); j < rec.readLen; j++ {
-			rec.bases[j], err = baCodec.decodeByte(core, external, extPos)
+			b, err := baCodec.decodeByte(core, external, extPos)
 			if err != nil {
 				return rec, fmt.Errorf("decoding BA[%d]: %w", j, err)
 			}
+			rec.bases = append(rec.bases, b)
 		}
 
 		// QS: Quality scores (if CF & 0x1)
@@ -344,12 +359,13 @@ func decodeRecord(
 			if err != nil {
 				return rec, err
 			}
-			rec.qualScores = make([]byte, rec.readLen)
+			rec.qualScores = make([]byte, 0, min(int(rec.readLen), 4096))
 			for j := int32(0); j < rec.readLen; j++ {
-				rec.qualScores[j], err = qsCodec.decodeByte(core, external, extPos)
+				b, err := qsCodec.decodeByte(core, external, extPos)
 				if err != nil {
 					return rec, fmt.Errorf("decoding QS[%d]: %w", j, err)
 				}
+				rec.qualScores = append(rec.qualScores, b)
 			}
 		}
 	}

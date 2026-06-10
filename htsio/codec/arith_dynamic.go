@@ -179,6 +179,13 @@ func decodeArithStripe(data []byte) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("arith_stripe: stripe %d: %w", i, err)
 		}
+		// A stripe that decodes to the wrong length would otherwise overwrite a
+		// neighbouring stripe's region in outN (a short copy) or be silently
+		// truncated, corrupting the un-striped output. Reject it instead,
+		// mirroring the size check in the rans_nx16 stripe path.
+		if len(decoded) != ulenN[i] {
+			return nil, fmt.Errorf("arith_stripe: stripe %d decoded to %d bytes, expected %d", i, len(decoded), ulenN[i])
+		}
 		copy(outN[idxN[i]:], decoded)
 		pos += clenN[i]
 	}

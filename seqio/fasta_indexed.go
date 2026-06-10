@@ -260,6 +260,12 @@ func parseFaiIndex(path string) (map[string]*FaiEntry, []string, error) {
 		if err != nil {
 			return nil, nil, fmt.Errorf("bad lineWidth in .fai: %s", fields[4])
 		}
+		// lineBases is used as a divisor when mapping a base offset to a byte
+		// offset in loadChunk; a non-positive line geometry would divide by zero
+		// or produce nonsensical offsets. Reject malformed entries up front.
+		if length < 0 || lineBases <= 0 || lineWidth <= 0 {
+			return nil, nil, fmt.Errorf("invalid .fai geometry for %s: length=%d lineBases=%d lineWidth=%d", fields[0], length, lineBases, lineWidth)
+		}
 		name := fields[0]
 		fai[name] = &FaiEntry{
 			Name:      name,
