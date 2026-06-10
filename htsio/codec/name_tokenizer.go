@@ -67,6 +67,15 @@ func DecodeNameTokenizer(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("tok3: arithmetic coding not supported (only rANS)")
 	}
 
+	// nreads is attacker-controlled and is used to size several per-read slices
+	// below. Each read must contribute at least one byte to the token streams
+	// (every read ends with an explicit end token), so nreads can never exceed
+	// the encoded length; reject anything larger before allocating to avoid a
+	// huge make() on a crafted header.
+	if nreads < 0 || nreads > len(data) {
+		return nil, fmt.Errorf("tok3: implausible read count %d for %d bytes of input", nreads, len(data))
+	}
+
 	ctx := &nameContext{
 		desc:       make([]descriptor, maxTokens*16),
 		lastNames:  make([]string, nreads),

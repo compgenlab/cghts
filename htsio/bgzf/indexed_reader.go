@@ -97,8 +97,10 @@ func LoadGZIndex(filename string) (*GZIndex, error) {
 	}
 
 	// The first block (offset 0,0) is implicit — the gzi stores only
-	// subsequent block boundaries.
-	entries := make([]gziEntry, 1, count+1)
+	// subsequent block boundaries. count is attacker-controlled, so cap the
+	// initial capacity hint; the slice grows by append as entries are read and
+	// a bogus count fails at EOF below rather than allocating count*16 bytes.
+	entries := make([]gziEntry, 1, 1+min(count, 1024))
 	entries[0] = gziEntry{0, 0}
 
 	for i := uint64(0); i < count; i++ {

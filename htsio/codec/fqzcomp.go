@@ -87,7 +87,21 @@ type fqzModels struct {
 	dup     *simpleModel
 }
 
+// DecodeFqzcomp decodes a standalone fqzcomp block, taking the decoded size
+// from the block's own header.
 func DecodeFqzcomp(data []byte) ([]byte, error) {
+	return DecodeFqzcompSize(data, -1)
+}
+
+// DecodeFqzcompSize decodes an fqzcomp block. If rawSize >= 0 it is the
+// expected uncompressed size (e.g. from a CRAM block header) and the decoded
+// length declared in the fqzcomp header must match it exactly. This bounds the
+// output allocation by the (CRC-protected) block header rather than trusting
+// the embedded size field alone, so a corrupt or mismatched header is rejected
+// before any large allocation. Every decoded read consumes at least one byte
+// (zero-length reads are rejected below), so the per-read revA/lenA arrays are
+// in turn bounded by the decoded size and cannot grow without bound.
+func DecodeFqzcompSize(data []byte, rawSize int) ([]byte, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("fqzcomp: data too short")
 	}
@@ -96,6 +110,9 @@ func DecodeFqzcomp(data []byte) ([]byte, error) {
 	n, outLen := varGetU32(data)
 	if n == 0 {
 		return nil, fmt.Errorf("fqzcomp: truncated size")
+	}
+	if rawSize >= 0 && int(outLen) != rawSize {
+		return nil, fmt.Errorf("fqzcomp: declared size %d does not match block raw size %d", outLen, rawSize)
 	}
 	pos := n
 

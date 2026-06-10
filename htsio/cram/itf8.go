@@ -126,6 +126,25 @@ func readLTF8(r io.Reader) (int64, error) {
 		int64(buf[4])<<24 | int64(buf[5])<<16 | int64(buf[6])<<8 | int64(buf[7]), nil
 }
 
+// readSizedBytes reads exactly size bytes from r, where size was read from
+// untrusted input. It rejects a negative size and reads through a LimitReader
+// so a bogus (huge) size cannot force a multi-gigabyte allocation up front: the
+// buffer grows with the bytes actually present, and a short stream is reported
+// as a truncation error rather than returning a partially-zeroed buffer.
+func readSizedBytes(r io.Reader, size int32) ([]byte, error) {
+	if size < 0 {
+		return nil, fmt.Errorf("negative block size: %d", size)
+	}
+	data, err := io.ReadAll(io.LimitReader(r, int64(size)))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) != int(size) {
+		return nil, fmt.Errorf("truncated block: got %d of %d bytes", len(data), size)
+	}
+	return data, nil
+}
+
 // readITF8Array reads an ITF8 length followed by that many ITF8 values.
 func readITF8Array(r io.Reader) ([]int32, error) {
 	n, err := readITF8(r)
@@ -135,12 +154,17 @@ func readITF8Array(r io.Reader) ([]int32, error) {
 	if n < 0 {
 		return nil, fmt.Errorf("negative array length: %d", n)
 	}
-	vals := make([]int32, n)
+	// Grow via append rather than make([]int32, n): n is attacker-controlled,
+	// so a huge value would otherwise allocate gigabytes up front. Appending
+	// caps memory at the number of elements actually present in the stream — a
+	// lying length simply fails the read below at EOF.
+	vals := make([]int32, 0, min(int(n), 1024))
 	for i := int32(0); i < n; i++ {
-		vals[i], err = readITF8(r)
+		v, err := readITF8(r)
 		if err != nil {
 			return nil, fmt.Errorf("reading array element %d: %w", i, err)
 		}
+		vals = append(vals, v)
 	}
 	return vals, nil
 }

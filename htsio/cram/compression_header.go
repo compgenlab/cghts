@@ -64,8 +64,8 @@ func (ch *compressionHeader) readPreservationMap(r io.Reader) error {
 		return err
 	}
 	// Read the map content from the known size
-	mapData := make([]byte, mapSize)
-	if _, err := io.ReadFull(r, mapData); err != nil {
+	mapData, err := readSizedBytes(r, mapSize)
+	if err != nil {
 		return err
 	}
 	mr := bytes.NewReader(mapData)
@@ -117,8 +117,8 @@ func (ch *compressionHeader) readPreservationMap(r io.Reader) error {
 			if err != nil {
 				return err
 			}
-			tdData := make([]byte, tdLen)
-			if _, err := io.ReadFull(mr, tdData); err != nil {
+			tdData, err := readSizedBytes(mr, tdLen)
+			if err != nil {
 				return err
 			}
 			ch.parseTagDictionary(tdData)
@@ -198,8 +198,8 @@ func (ch *compressionHeader) readDataSeriesMap(r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	mapData := make([]byte, mapSize)
-	if _, err := io.ReadFull(r, mapData); err != nil {
+	mapData, err := readSizedBytes(r, mapSize)
+	if err != nil {
 		return err
 	}
 	mr := bytes.NewReader(mapData)
@@ -233,8 +233,8 @@ func (ch *compressionHeader) readTagEncodingMap(r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	mapData := make([]byte, mapSize)
-	if _, err := io.ReadFull(r, mapData); err != nil {
+	mapData, err := readSizedBytes(r, mapSize)
+	if err != nil {
 		return err
 	}
 	mr := bytes.NewReader(mapData)
