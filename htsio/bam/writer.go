@@ -187,6 +187,13 @@ func (bw *Writer) Write(rec *htsio.SamRecord) error {
 	if err := bw.getErr(); err != nil {
 		return err
 	}
+	// Reject a record whose CIGAR query length disagrees with len(SEQ): such a
+	// record is malformed per the SAM spec and would produce an invalid BAM.
+	// Validate synchronously so the caller gets immediate feedback rather than a
+	// deferred sticky error.
+	if err := htsio.ValidateCigarSeq(rec.Cigar, rec.Seq); err != nil {
+		return fmt.Errorf("bam: read %s: %w", rec.ReadName, err)
+	}
 	bw.writeCh <- rec
 	return nil
 }
@@ -284,8 +291,12 @@ func (bw *Writer) encodeRecord(rec *htsio.SamRecord) error {
 	if err := binary.Write(bw.w, binary.LittleEndian, pos); err != nil {
 		return err
 	}
-	bw.w.Write([]byte{byte(len(nameBytes))}) // l_read_name
-	bw.w.Write([]byte{byte(rec.MapQ)})       // MAPQ
+	if _, err := bw.w.Write([]byte{byte(len(nameBytes))}); err != nil { // l_read_name
+		return err
+	}
+	if _, err := bw.w.Write([]byte{byte(rec.MapQ)}); err != nil { // MAPQ
+		return err
+	}
 	if err := binary.Write(bw.w, binary.LittleEndian, uint16(bin)); err != nil {
 		return err
 	}
@@ -309,14 +320,26 @@ func (bw *Writer) encodeRecord(rec *htsio.SamRecord) error {
 		return err
 	}
 
-	// Variable-length data
-	bw.w.Write(nameBytes)
-	for _, op := range cigarOps {
-		binary.Write(bw.w, binary.LittleEndian, op)
+	// Variable-length data. A write error here (e.g. disk full, broken pipe)
+	// must propagate — otherwise the writer keeps emitting records onto a failed
+	// sink and produces a silently truncated/corrupt BAM.
+	if _, err := bw.w.Write(nameBytes); err != nil {
+		return err
 	}
-	bw.w.Write(seqBytes)
-	bw.w.Write(qualBytes)
-	bw.w.Write(auxBytes)
+	for _, op := range cigarOps {
+		if err := binary.Write(bw.w, binary.LittleEndian, op); err != nil {
+			return err
+		}
+	}
+	if _, err := bw.w.Write(seqBytes); err != nil {
+		return err
+	}
+	if _, err := bw.w.Write(qualBytes); err != nil {
+		return err
+	}
+	if _, err := bw.w.Write(auxBytes); err != nil {
+		return err
+	}
 
 	return nil
 }

@@ -68,6 +68,8 @@ type Writer struct {
 	recordBuf      []*htsio.SamRecord
 	recordCounter  int64
 	headerWritten  bool
+	closed         bool
+	closeErr       error
 }
 
 // NewWriter creates a CRAM writer. If filename is "-", writes to stdout.
@@ -107,6 +109,11 @@ func NewWriterFromWriter(w io.Writer, header *htsio.SamHeader, opts ...*WriterOp
 }
 
 func newWriter(w io.Writer, closer io.Closer, header *htsio.SamHeader, opts *WriterOpts) (*Writer, error) {
+	// Copy opts so the writer is isolated from post-construction mutation of the
+	// caller's WriterOpts (all fields are values, so a shallow copy suffices).
+	optsCopy := *opts
+	opts = &optsCopy
+
 	cw := &Writer{
 		w:            w,
 		closer:       closer,
@@ -150,6 +157,16 @@ func (cw *Writer) Write(rec *htsio.SamRecord) error {
 	cw.mu.Lock()
 	defer cw.mu.Unlock()
 
+	if cw.closed {
+		return fmt.Errorf("cram: write to closed writer")
+	}
+
+	// The CRAM writer reconstructs SEQ from the CIGAR features, so an
+	// inconsistent CIGAR/SEQ pair would silently lose bases. Reject it.
+	if err := htsio.ValidateCigarSeq(rec.Cigar, rec.Seq); err != nil {
+		return fmt.Errorf("cram: read %s: %w", rec.ReadName, err)
+	}
+
 	if !cw.headerWritten {
 		if err := cw.writeFileHeader(); err != nil {
 			return err
@@ -169,6 +186,19 @@ func (cw *Writer) Close() error {
 	cw.mu.Lock()
 	defer cw.mu.Unlock()
 
+	// Close is idempotent: a second call must not write another EOF container
+	// or double-close the underlying file. Return the first call's result.
+	if cw.closed {
+		return cw.closeErr
+	}
+	cw.closed = true
+	cw.closeErr = cw.closeLocked()
+	return cw.closeErr
+}
+
+// closeLocked performs the one-time close work; the caller holds cw.mu and
+// guarantees it runs at most once.
+func (cw *Writer) closeLocked() error {
 	if !cw.headerWritten {
 		if err := cw.writeFileHeader(); err != nil {
 			return err
@@ -683,6 +713,11 @@ func (cw *Writer) buildCompressionHeader(subMatrix [5][4]byte, tagDict [][]tagKe
 	ch := &writerCompressionHeader{
 		readNamesPreserved: true,
 		apDelta:            true,
+		// RR reflects whether a reference is needed to decode. This encoder
+		// chooses its mode globally: with a reference, mapped reads are encoded
+		// as substitution features against it (reference required); without one,
+		// bases are stored explicitly (reference not required). So keying RR on
+		// reference presence accurately describes the emitted records.
 		refRequired:        cw.ref != nil,
 		dataSeriesEncodings: make(map[string]encodingDescriptor),
 		tagEncodings:       make(map[int32]encodingDescriptor),
@@ -1265,7 +1300,11 @@ func (cw *Writer) encodeBlock(contentType byte, contentID int32, method byte, da
 			gz.Close()
 			return nil, err
 		}
-		gz.Close()
+		// Close flushes the final gzip frame; a failure here means compData would
+		// be incomplete, so propagate it rather than emitting a corrupt block.
+		if err := gz.Close(); err != nil {
+			return nil, err
+		}
 		compData = buf.Bytes()
 		if len(compData) >= len(data) {
 			method = blockMethodRaw

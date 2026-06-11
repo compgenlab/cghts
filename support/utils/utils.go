@@ -30,6 +30,8 @@ func (c *PositionTrackingReader) Read(p []byte) (int, error) {
 	return k, err
 }
 
+// Semaphore is a counting semaphore backed by a buffered channel. Acquire and
+// Release must be balanced (each goroutine that Acquires must Release).
 type Semaphore chan struct{}
 
 func NewSemaphore(n int) Semaphore {
@@ -44,6 +46,10 @@ func (s Semaphore) Release() {
 	<-s
 }
 
+// Close releases the semaphore's resources. It must only be called once all
+// goroutines have finished using it — closing while a goroutine is blocked in
+// Acquire would panic with "send on closed channel". Close is optional; a
+// semaphore that is simply abandoned is reclaimed by the garbage collector.
 func (s Semaphore) Close() {
 	close(s)
 }
