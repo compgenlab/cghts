@@ -18,6 +18,8 @@ type Writer struct {
 	f             *os.File // non-nil if we opened the file
 	header        *htsio.SamHeader
 	headerWritten bool
+	closed        bool
+	closeErr      error
 }
 
 // NewWriter creates a SAM text writer for the given output file.
@@ -73,11 +75,19 @@ func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Idempotent: a second Close must not re-flush or double-close the file.
+	if w.closed {
+		return w.closeErr
+	}
+	w.closed = true
+
 	if err := w.w.Flush(); err != nil {
+		w.closeErr = err
 		return err
 	}
 	if w.f != nil {
-		return w.f.Close()
+		w.closeErr = w.f.Close()
+		return w.closeErr
 	}
 	return nil
 }

@@ -160,13 +160,19 @@ func (r *TextReader) Query(ref string, start, end int) (iter.Seq2[*htsio.SamReco
 }
 
 func (r *TextReader) Close() error {
+	// Surface a gzip decompression error (e.g. a corrupt/truncated stream
+	// detected at EOF) rather than dropping it; the underlying source close
+	// error still takes precedence if both occur.
+	var gzErr error
 	if r.gz != nil {
-		r.gz.Close()
+		gzErr = r.gz.Close()
 	}
 	if r.src != nil {
-		return r.src.Close()
+		if err := r.src.Close(); err != nil {
+			return err
+		}
 	}
-	return nil
+	return gzErr
 }
 
 func parseSamLine(line string) (*htsio.SamRecord, error) {
