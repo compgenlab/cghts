@@ -100,7 +100,9 @@ func newInMemoryFasta(path string) (*inMemoryFasta, error) {
 		line := scanner.Text()
 		if strings.HasPrefix(line, ">") {
 			if name != "" {
-				r.storeSequence(name, bytes.ToUpper(seq.Bytes()))
+				if err := r.storeSequence(name, bytes.ToUpper(seq.Bytes())); err != nil {
+					return nil, err
+				}
 			}
 			fields := strings.Fields(line[1:])
 			if len(fields) > 0 {
@@ -113,7 +115,9 @@ func newInMemoryFasta(path string) (*inMemoryFasta, error) {
 		}
 	}
 	if name != "" {
-		r.storeSequence(name, bytes.ToUpper(seq.Bytes()))
+		if err := r.storeSequence(name, bytes.ToUpper(seq.Bytes())); err != nil {
+			return nil, err
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
@@ -123,7 +127,7 @@ func newInMemoryFasta(path string) (*inMemoryFasta, error) {
 }
 
 // storeSequence breaks a sequence into chunks and compresses each one.
-func (r *inMemoryFasta) storeSequence(name string, seq []byte) {
+func (r *inMemoryFasta) storeSequence(name string, seq []byte) error {
 	r.lengths[name] = len(seq)
 	for i := 0; i < len(seq); i += faiChunkSize {
 		end := i + faiChunkSize
@@ -131,9 +135,13 @@ func (r *inMemoryFasta) storeSequence(name string, seq []byte) {
 			end = len(seq)
 		}
 		chunkIdx := i / faiChunkSize
-		compressed := gzipCompress(seq[i:end])
+		compressed, err := gzipCompress(seq[i:end])
+		if err != nil {
+			return fmt.Errorf("compressing chunk %d of %q: %w", chunkIdx, name, err)
+		}
 		r.chunks[faiCacheKey{name: name, chunkIdx: chunkIdx}] = compressed
 	}
+	return nil
 }
 
 func (r *inMemoryFasta) Names() []string { return r.names }
@@ -226,10 +234,17 @@ func (r *inMemoryFasta) decompressChunk(name string, chunkIdx int) ([]byte, erro
 }
 
 // gzipCompress compresses data with gzip at BestSpeed.
-func gzipCompress(data []byte) []byte {
+func gzipCompress(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
-	gz, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
-	gz.Write(data)
-	gz.Close()
-	return buf.Bytes()
+	gz, err := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := gz.Write(data); err != nil {
+		return nil, err
+	}
+	if err := gz.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }

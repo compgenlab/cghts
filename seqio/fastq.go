@@ -10,11 +10,6 @@ import (
 	"strings"
 )
 
-type FastqSeqReader struct {
-	buf    string
-	reader *bufio.Reader
-}
-
 type FastqReader struct {
 	filename string
 	file     *os.File

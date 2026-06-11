@@ -19,7 +19,7 @@ type Chunk struct {
 
 // binIndex holds the bins and linear index for one reference sequence.
 type binIndex struct {
-	bins      map[uint32][]Chunk       // bin number → chunks
+	bins      map[uint32][]Chunk   // bin number → chunks
 	linearIdx []bgzf.VirtualOffset // one entry per 16kb window
 }
 
@@ -110,18 +110,35 @@ func LoadTBI(filename string) (*BinIndex, error) {
 	if err := binary.Read(r, binary.LittleEndian, &namesLen); err != nil {
 		return nil, fmt.Errorf("tbi: reading names length: %w", err)
 	}
-	namesData := make([]byte, namesLen)
-	if _, err := io.ReadFull(r, namesData); err != nil {
+	if namesLen < 0 {
+		return nil, fmt.Errorf("tbi: negative names length %d", namesLen)
+	}
+	// namesLen is attacker-controlled; read through a LimitReader so the buffer
+	// grows with the bytes actually present rather than pre-allocating namesLen
+	// (up to 2GB) for a truncated file.
+	namesData, err := io.ReadAll(io.LimitReader(r, int64(namesLen)))
+	if err != nil {
 		return nil, fmt.Errorf("tbi: reading names: %w", err)
+	}
+	if len(namesData) != int(namesLen) {
+		return nil, fmt.Errorf("tbi: truncated names: got %d of %d bytes", len(namesData), namesLen)
 	}
 
 	idx.Names = splitNulTerminated(namesData)
 
-	idx.refs = make([]binIndex, nRef)
+	// nRef is attacker-controlled. Grow refs via append (capped initial hint)
+	// so a bogus count fails at EOF in readRefBins rather than pre-allocating a
+	// huge slice; a negative count is rejected outright.
+	if nRef < 0 {
+		return nil, fmt.Errorf("tbi: negative n_ref %d", nRef)
+	}
+	idx.refs = make([]binIndex, 0, min(int(nRef), 1024))
 	for i := int32(0); i < nRef; i++ {
-		if err := readRefBins(r, &idx.refs[i]); err != nil {
+		var rb binIndex
+		if err := readRefBins(r, &rb); err != nil {
 			return nil, fmt.Errorf("tbi: ref %d: %w", i, err)
 		}
+		idx.refs = append(idx.refs, rb)
 	}
 
 	return idx, nil
@@ -132,15 +149,20 @@ func readBinIndex(r io.Reader) (*BinIndex, error) {
 	if err := binary.Read(r, binary.LittleEndian, &nRef); err != nil {
 		return nil, fmt.Errorf("reading n_ref: %w", err)
 	}
+	if nRef < 0 {
+		return nil, fmt.Errorf("negative n_ref %d", nRef)
+	}
 
 	idx := &BinIndex{
-		refs: make([]binIndex, nRef),
+		refs: make([]binIndex, 0, min(int(nRef), 1024)),
 	}
 
 	for i := int32(0); i < nRef; i++ {
-		if err := readRefBins(r, &idx.refs[i]); err != nil {
+		var rb binIndex
+		if err := readRefBins(r, &rb); err != nil {
 			return nil, fmt.Errorf("ref %d: %w", i, err)
 		}
+		idx.refs = append(idx.refs, rb)
 	}
 
 	return idx, nil
@@ -151,8 +173,14 @@ func readRefBins(r io.Reader, ref *binIndex) error {
 	if err := binary.Read(r, binary.LittleEndian, &nBins); err != nil {
 		return fmt.Errorf("reading n_bins: %w", err)
 	}
+	if nBins < 0 {
+		return fmt.Errorf("negative n_bins %d", nBins)
+	}
 
-	ref.bins = make(map[uint32][]Chunk, nBins)
+	// Counts (n_bins, n_chunks, n_intervals) are attacker-controlled. Grow the
+	// containers via append/insert as elements are read rather than allocating
+	// the full count up front, so a bogus count fails at EOF below.
+	ref.bins = make(map[uint32][]Chunk)
 	for i := int32(0); i < nBins; i++ {
 		var binNum uint32
 		if err := binary.Read(r, binary.LittleEndian, &binNum); err != nil {
@@ -163,8 +191,11 @@ func readRefBins(r io.Reader, ref *binIndex) error {
 		if err := binary.Read(r, binary.LittleEndian, &nChunks); err != nil {
 			return fmt.Errorf("reading n_chunks: %w", err)
 		}
+		if nChunks < 0 {
+			return fmt.Errorf("negative n_chunks %d", nChunks)
+		}
 
-		chunks := make([]Chunk, nChunks)
+		chunks := make([]Chunk, 0, min(int(nChunks), 1024))
 		for j := int32(0); j < nChunks; j++ {
 			var begin, end uint64
 			if err := binary.Read(r, binary.LittleEndian, &begin); err != nil {
@@ -173,10 +204,10 @@ func readRefBins(r io.Reader, ref *binIndex) error {
 			if err := binary.Read(r, binary.LittleEndian, &end); err != nil {
 				return fmt.Errorf("reading chunk end: %w", err)
 			}
-			chunks[j] = Chunk{
+			chunks = append(chunks, Chunk{
 				Begin: bgzf.VirtualOffset(begin),
 				End:   bgzf.VirtualOffset(end),
-			}
+			})
 		}
 		ref.bins[binNum] = chunks
 	}
@@ -185,14 +216,17 @@ func readRefBins(r io.Reader, ref *binIndex) error {
 	if err := binary.Read(r, binary.LittleEndian, &nIntervals); err != nil {
 		return fmt.Errorf("reading n_intervals: %w", err)
 	}
+	if nIntervals < 0 {
+		return fmt.Errorf("negative n_intervals %d", nIntervals)
+	}
 
-	ref.linearIdx = make([]bgzf.VirtualOffset, nIntervals)
+	ref.linearIdx = make([]bgzf.VirtualOffset, 0, min(int(nIntervals), 1024))
 	for i := int32(0); i < nIntervals; i++ {
 		var offset uint64
 		if err := binary.Read(r, binary.LittleEndian, &offset); err != nil {
 			return fmt.Errorf("reading linear index: %w", err)
 		}
-		ref.linearIdx[i] = bgzf.VirtualOffset(offset)
+		ref.linearIdx = append(ref.linearIdx, bgzf.VirtualOffset(offset))
 	}
 
 	return nil
@@ -288,20 +322,23 @@ func (idx *BinIndex) RefID(name string) int {
 // binning scheme (as defined in the SAM specification).
 func Reg2Bin(beg, end int) uint16 {
 	end--
+	// Parentheses around the shifts are redundant in Go (>> binds tighter than
+	// +), but are written explicitly here to match the SAM spec formula and to
+	// avoid any C-style precedence confusion for future readers.
 	if beg>>14 == end>>14 {
-		return uint16(((1<<15)-1)/7 + beg>>14)
+		return uint16((((1 << 15) - 1) / 7) + (beg >> 14))
 	}
 	if beg>>17 == end>>17 {
-		return uint16(((1<<12)-1)/7 + beg>>17)
+		return uint16((((1 << 12) - 1) / 7) + (beg >> 17))
 	}
 	if beg>>20 == end>>20 {
-		return uint16(((1<<9)-1)/7 + beg>>20)
+		return uint16((((1 << 9) - 1) / 7) + (beg >> 20))
 	}
 	if beg>>23 == end>>23 {
-		return uint16(((1<<6)-1)/7 + beg>>23)
+		return uint16((((1 << 6) - 1) / 7) + (beg >> 23))
 	}
 	if beg>>26 == end>>26 {
-		return uint16(((1<<3)-1)/7 + beg>>26)
+		return uint16((((1 << 3) - 1) / 7) + (beg >> 26))
 	}
 	return 0
 }

@@ -89,11 +89,18 @@ func LoadCSI(filename string) (*CSIIndex, error) {
 		return nil, fmt.Errorf("csi: reading n_ref: %w", err)
 	}
 
-	idx.refs = make([]csiRefIndex, nRef)
+	// nRef is attacker-controlled; grow refs via append so a bogus count fails
+	// at EOF in readCSIRef rather than pre-allocating a huge slice.
+	if nRef < 0 {
+		return nil, fmt.Errorf("csi: negative n_ref %d", nRef)
+	}
+	idx.refs = make([]csiRefIndex, 0, min(int(nRef), 1024))
 	for i := int32(0); i < nRef; i++ {
-		if err := idx.readCSIRef(r, &idx.refs[i]); err != nil {
+		var rb csiRefIndex
+		if err := idx.readCSIRef(r, &rb); err != nil {
 			return nil, fmt.Errorf("csi: ref %d: %w", i, err)
 		}
+		idx.refs = append(idx.refs, rb)
 	}
 
 	return idx, nil
@@ -110,15 +117,17 @@ func (idx *CSIIndex) parseTabixAux(data []byte) error {
 	idx.ColEnd = int32(binary.LittleEndian.Uint32(data[12:16]))
 	idx.Meta = int32(binary.LittleEndian.Uint32(data[16:20]))
 	idx.Skip = int32(binary.LittleEndian.Uint32(data[20:24]))
-	namesLen := int32(binary.LittleEndian.Uint32(data[24:28]))
+	namesLen := binary.LittleEndian.Uint32(data[24:28])
 
 	if idx.Format&0x10000 != 0 {
 		idx.ZeroBased = true
 		idx.Format &= 0xFFFF
 	}
 
-	if int(28+namesLen) <= len(data) {
-		idx.Names = splitNulTerminated(data[28 : 28+namesLen])
+	// namesLen is unsigned; compute the end with uint64 to avoid overflow and
+	// guard the slice bounds before indexing into data.
+	if end := uint64(28) + uint64(namesLen); end <= uint64(len(data)) {
+		idx.Names = splitNulTerminated(data[28:end])
 	}
 
 	return nil
@@ -129,8 +138,12 @@ func (idx *CSIIndex) readCSIRef(r io.Reader, ref *csiRefIndex) error {
 	if err := binary.Read(r, binary.LittleEndian, &nBins); err != nil {
 		return fmt.Errorf("reading n_bins: %w", err)
 	}
+	if nBins < 0 {
+		return fmt.Errorf("negative n_bins %d", nBins)
+	}
 
-	ref.bins = make(map[uint32]*csiBin, nBins)
+	// Counts are attacker-controlled; grow containers as elements are read.
+	ref.bins = make(map[uint32]*csiBin)
 	for i := int32(0); i < nBins; i++ {
 		var binNum uint32
 		if err := binary.Read(r, binary.LittleEndian, &binNum); err != nil {
@@ -146,8 +159,11 @@ func (idx *CSIIndex) readCSIRef(r io.Reader, ref *csiRefIndex) error {
 		if err := binary.Read(r, binary.LittleEndian, &nChunks); err != nil {
 			return fmt.Errorf("reading n_chunks: %w", err)
 		}
+		if nChunks < 0 {
+			return fmt.Errorf("negative n_chunks %d", nChunks)
+		}
 
-		chunks := make([]Chunk, nChunks)
+		chunks := make([]Chunk, 0, min(int(nChunks), 1024))
 		for j := int32(0); j < nChunks; j++ {
 			var begin, end uint64
 			if err := binary.Read(r, binary.LittleEndian, &begin); err != nil {
@@ -156,10 +172,10 @@ func (idx *CSIIndex) readCSIRef(r io.Reader, ref *csiRefIndex) error {
 			if err := binary.Read(r, binary.LittleEndian, &end); err != nil {
 				return fmt.Errorf("reading chunk end: %w", err)
 			}
-			chunks[j] = Chunk{
+			chunks = append(chunks, Chunk{
 				Begin: bgzf.VirtualOffset(begin),
 				End:   bgzf.VirtualOffset(end),
-			}
+			})
 		}
 
 		ref.bins[binNum] = &csiBin{

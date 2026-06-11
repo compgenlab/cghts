@@ -176,6 +176,11 @@ func readFreqTableOrder0(data []byte) ([256]ransDecSymbol, uint32, int, error) {
 
 		syms[j] = ransDecSymbol{cumFreq: cumTotal, freq: freq}
 		cumTotal += freq
+		// Frequencies are read from untrusted input; their running total must
+		// not exceed ransTotFreq or buildCumLUT would index past the LUT.
+		if cumTotal > ransTotFreq {
+			return syms, 0, pos, fmt.Errorf("rans0: cumulative frequency %d exceeds %d", cumTotal, ransTotFreq)
+		}
 
 		// Advance to next symbol.
 		if rle == 0 && j < 255 && pos < len(data) && data[pos] == byte(j+1) {
@@ -210,6 +215,12 @@ func buildCumLUT(syms [256]ransDecSymbol) [ransTotFreq]byte {
 	for s := 0; s < 256; s++ {
 		ds := syms[s]
 		for j := uint32(0); j < ds.freq; j++ {
+			// Defensive bound: the frequency-table readers reject totals beyond
+			// ransTotFreq, but never index past the LUT even if a caller does
+			// not validate first.
+			if ds.cumFreq+j >= ransTotFreq {
+				break
+			}
 			lut[ds.cumFreq+j] = byte(s)
 		}
 	}
@@ -271,6 +282,11 @@ func decodeRansOrder1(data []byte) ([]byte, error) {
 
 			syms[ctxI][j] = ransDecSymbol{cumFreq: cumTotal, freq: freq}
 			cumTotal += freq
+			// Bound the running total (see order-0 path above): an unchecked
+			// total lets buildCumLUT index past the LUT on malformed input.
+			if cumTotal > ransTotFreq {
+				return nil, fmt.Errorf("rans1: cumulative frequency %d exceeds %d at ctx=%d", cumTotal, ransTotFreq, ctxI)
+			}
 
 			if rle == 0 && j < 255 && pos < len(data) && data[pos] == byte(j+1) {
 				j = int(data[pos])

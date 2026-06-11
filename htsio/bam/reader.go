@@ -237,9 +237,14 @@ func (b *Reader) readHeader() error {
 		return fmt.Errorf("negative header length: %d", headerLen)
 	}
 
-	headerText := make([]byte, headerLen)
-	if _, err := io.ReadFull(b.r, headerText); err != nil {
+	// headerLen is attacker-controlled; read through a LimitReader so a bogus
+	// (huge) length cannot force a multi-gigabyte allocation up front.
+	headerText, err := io.ReadAll(io.LimitReader(b.r, int64(headerLen)))
+	if err != nil {
 		return fmt.Errorf("reading header text: %w", err)
+	}
+	if len(headerText) != int(headerLen) {
+		return fmt.Errorf("truncated header text: got %d of %d bytes", len(headerText), headerLen)
 	}
 
 	b.hdr = htsio.NewSamHeader()
@@ -259,15 +264,27 @@ func (b *Reader) readHeader() error {
 		return fmt.Errorf("negative ref count: %d", nRef)
 	}
 
-	b.refs = make([]bamRefInfo, nRef)
+	// nRef is attacker-controlled; grow refs via append (capped hint) so a
+	// bogus count fails at EOF below rather than pre-allocating a huge slice.
+	b.refs = make([]bamRefInfo, 0, min(int(nRef), 1024))
 	for i := int32(0); i < nRef; i++ {
 		var nameLen int32
 		if err := binary.Read(b.r, binary.LittleEndian, &nameLen); err != nil {
 			return fmt.Errorf("reading ref name length [%d]: %w", i, err)
 		}
-		nameBuf := make([]byte, nameLen)
-		if _, err := io.ReadFull(b.r, nameBuf); err != nil {
+		// l_name includes the trailing NUL, so it is always >= 1 for a valid
+		// record. Reject non-positive values before slicing nameBuf[:nameLen-1]
+		// (which would otherwise panic) and read through a LimitReader so a huge
+		// length cannot force a multi-gigabyte allocation up front.
+		if nameLen <= 0 {
+			return fmt.Errorf("invalid ref name length %d [%d]", nameLen, i)
+		}
+		nameBuf, err := io.ReadAll(io.LimitReader(b.r, int64(nameLen)))
+		if err != nil {
 			return fmt.Errorf("reading ref name [%d]: %w", i, err)
+		}
+		if len(nameBuf) != int(nameLen) {
+			return fmt.Errorf("truncated ref name [%d]: got %d of %d bytes", i, len(nameBuf), nameLen)
 		}
 		// Name is NUL-terminated.
 		name := string(nameBuf[:nameLen-1])
@@ -276,7 +293,7 @@ func (b *Reader) readHeader() error {
 		if err := binary.Read(b.r, binary.LittleEndian, &refLen); err != nil {
 			return fmt.Errorf("reading ref length [%d]: %w", i, err)
 		}
-		b.refs[i] = bamRefInfo{name: name, length: refLen}
+		b.refs = append(b.refs, bamRefInfo{name: name, length: refLen})
 	}
 
 	return nil
@@ -343,6 +360,17 @@ func readBamRecord(r io.Reader, refs []bamRefInfo) (*htsio.SamRecord, error) {
 	nextRefID := int32(binary.LittleEndian.Uint32(buf[20:24]))
 	nextPos := int32(binary.LittleEndian.Uint32(buf[24:28]))
 	tlen := int32(binary.LittleEndian.Uint32(buf[28:32]))
+
+	// Validate length fields before using them to slice buf. l_read_name
+	// includes the trailing NUL so it is always >= 1, and l_seq is a count so it
+	// is never negative; rejecting these (as samtools does) avoids panicking on
+	// a malformed record below.
+	if nameLen == 0 {
+		return nil, fmt.Errorf("bam: invalid read name length 0")
+	}
+	if seqLen < 0 {
+		return nil, fmt.Errorf("bam: invalid sequence length %d", seqLen)
+	}
 
 	offset := 32
 
@@ -626,6 +654,12 @@ func decodeArrayTag(data []byte, pos int) (htsio.SamTag, int) {
 			bits := binary.LittleEndian.Uint32(data[pos:])
 			sb.WriteString(strconv.FormatFloat(float64(math.Float32frombits(bits)), 'g', -1, 32))
 			pos += 4
+		default:
+			// Unknown array element type. Bail out rather than spinning for
+			// `count` iterations (count is attacker-controlled and may be huge),
+			// which would otherwise grow the builder without bound on malformed
+			// input.
+			return htsio.SamTag{Type: 'B', Value: sb.String()}, pos
 		}
 	}
 

@@ -218,7 +218,10 @@ func parseSamLine(line string) (*htsio.SamRecord, error) {
 	if len(fields) > 11 {
 		for _, raw := range strings.Split(fields[11], "\t") {
 			parts := strings.SplitN(raw, ":", 3)
-			if len(parts) != 3 {
+			// Require TAG:TYPE:VALUE with a non-empty single-character type.
+			// Malformed fields are skipped (samtools is similarly tolerant);
+			// the type-length check also guards the parts[1][0] access below.
+			if len(parts) != 3 || len(parts[1]) == 0 {
 				continue
 			}
 			tag := parts[0]

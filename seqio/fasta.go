@@ -10,11 +10,6 @@ import (
 	"strings"
 )
 
-type FastaSeqReader struct {
-	buf    string
-	reader *bufio.Reader
-}
-
 type FastaReader struct {
 	filename string
 	file     *os.File

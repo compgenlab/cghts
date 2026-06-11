@@ -19,7 +19,7 @@ import (
 // It implements the htsio.SamWriter interface and is safe for concurrent use.
 type Writer struct {
 	w       *bgzf.Writer
-	f       *os.File   // non-nil if we opened the file
+	f       *os.File // non-nil if we opened the file
 	header  *htsio.SamHeader
 	refs    []bamRefInfo
 	refIdx  map[string]int32 // ref name → index
@@ -91,6 +91,23 @@ func newWriter(w *bgzf.Writer, header *htsio.SamHeader) *Writer {
 	return bw
 }
 
+// setErr records the first error seen; subsequent errors are ignored.
+// Safe to call from the async writer goroutine and from Close.
+func (bw *Writer) setErr(err error) {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	if bw.err == nil {
+		bw.err = err
+	}
+}
+
+// getErr returns the recorded error (if any) under lock.
+func (bw *Writer) getErr() error {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	return bw.err
+}
+
 // start writes the BAM header and starts the async writer goroutine.
 func (bw *Writer) start() error {
 	bw.mu.Lock()
@@ -110,7 +127,7 @@ func (bw *Writer) start() error {
 		defer bw.writeWg.Done()
 		for rec := range bw.writeCh {
 			if err := bw.encodeRecord(rec); err != nil {
-				bw.err = fmt.Errorf("bam write: %w", err)
+				bw.setErr(fmt.Errorf("bam write: %w", err))
 				for range bw.writeCh {
 				}
 				return
@@ -167,42 +184,43 @@ func (bw *Writer) Write(rec *htsio.SamRecord) error {
 	if err := bw.start(); err != nil {
 		return err
 	}
-	bw.mu.Lock()
-	if bw.err != nil {
-		bw.mu.Unlock()
-		return bw.err
+	if err := bw.getErr(); err != nil {
+		return err
 	}
-	bw.mu.Unlock()
 	bw.writeCh <- rec
 	return nil
 }
 
 // Close drains the write buffer, flushes the BGZF stream, and closes the file.
 func (bw *Writer) Close() error {
+	bw.mu.Lock()
 	if bw.closed {
-		return nil
+		err := bw.err
+		bw.mu.Unlock()
+		return err
 	}
 	bw.closed = true
+	bw.mu.Unlock()
 
-	if !bw.started {
-		// Ensure header is written even if no records were added.
-		if err := bw.start(); err != nil {
-			return err
-		}
+	// Ensure the header is written even if no records were added. start() is
+	// idempotent and locks internally, so calling it here is safe regardless of
+	// whether Write already started the goroutine.
+	if err := bw.start(); err != nil {
+		return err
 	}
 
 	close(bw.writeCh)
 	bw.writeWg.Wait()
 
-	if err := bw.w.Close(); err != nil && bw.err == nil {
-		bw.err = err
+	if err := bw.w.Close(); err != nil {
+		bw.setErr(err)
 	}
 	if bw.f != nil {
-		if err := bw.f.Close(); err != nil && bw.err == nil {
-			bw.err = err
+		if err := bw.f.Close(); err != nil {
+			bw.setErr(err)
 		}
 	}
-	return bw.err
+	return bw.getErr()
 }
 
 // encodeRecord encodes a SamRecord as a BAM binary record and writes it.
@@ -238,7 +256,10 @@ func (bw *Writer) encodeRecord(rec *htsio.SamRecord) error {
 	qualBytes := encodeQualBytes(rec.Qual, seqLen)
 
 	// Encode aux tags
-	auxBytes := encodeAuxTags(rec.Tags, rec.TagOrder)
+	auxBytes, err := encodeAuxTags(rec.Tags, rec.TagOrder)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", rec.ReadName, err)
+	}
 
 	// Read name (NUL-terminated)
 	nameBytes := append([]byte(rec.ReadName), 0)
@@ -413,12 +434,15 @@ func encodeQualBytes(qual string, seqLen int) []byte {
 	return out
 }
 
-// encodeAuxTags encodes SAM optional tags into BAM binary format.
-func encodeAuxTags(tags map[string]htsio.SamTag, tagOrder []string) []byte {
+// encodeAuxTags encodes SAM optional tags into BAM binary format. It returns an
+// error if any tag has an unsupported type or a value that cannot be encoded,
+// rather than silently writing a corrupt or zeroed tag.
+func encodeAuxTags(tags map[string]htsio.SamTag, tagOrder []string) ([]byte, error) {
 	if len(tags) == 0 {
-		return nil
+		return nil, nil
 	}
 	var buf []byte
+	var err error
 
 	if len(tagOrder) > 0 {
 		for _, tag := range tagOrder {
@@ -426,17 +450,21 @@ func encodeAuxTags(tags map[string]htsio.SamTag, tagOrder []string) []byte {
 			if !ok {
 				continue
 			}
-			buf = encodeOneTag(buf, tag, st)
+			if buf, err = encodeOneTag(buf, tag, st); err != nil {
+				return nil, err
+			}
 		}
 	} else {
 		for tag, st := range tags {
-			buf = encodeOneTag(buf, tag, st)
+			if buf, err = encodeOneTag(buf, tag, st); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return buf
+	return buf, nil
 }
 
-func encodeOneTag(buf []byte, tag string, st htsio.SamTag) []byte {
+func encodeOneTag(buf []byte, tag string, st htsio.SamTag) ([]byte, error) {
 	buf = append(buf, tag[0], tag[1])
 	switch st.Type {
 	case 'A':
@@ -447,7 +475,10 @@ func encodeOneTag(buf []byte, tag string, st htsio.SamTag) []byte {
 			buf = append(buf, 0)
 		}
 	case 'i':
-		v, _ := strconv.ParseInt(st.Value, 10, 64)
+		v, err := strconv.ParseInt(st.Value, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("tag %s: invalid integer value %q: %w", tag, st.Value, err)
+		}
 		if v >= 0 && v <= 255 {
 			buf = append(buf, 'C', byte(v))
 		} else if v >= -128 && v <= 127 {
@@ -466,8 +497,11 @@ func encodeOneTag(buf []byte, tag string, st htsio.SamTag) []byte {
 			buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(v)))
 		}
 	case 'f':
+		v, err := strconv.ParseFloat(st.Value, 32)
+		if err != nil {
+			return nil, fmt.Errorf("tag %s: invalid float value %q: %w", tag, st.Value, err)
+		}
 		buf = append(buf, 'f')
-		v, _ := strconv.ParseFloat(st.Value, 32)
 		buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(float32(v)))
 	case 'Z':
 		buf = append(buf, 'Z')
@@ -479,19 +513,33 @@ func encodeOneTag(buf []byte, tag string, st htsio.SamTag) []byte {
 		buf = append(buf, 0)
 	case 'B':
 		buf = append(buf, 'B')
-		buf = encodeArrayTagValue(buf, st.Value)
+		var err error
+		if buf, err = encodeArrayTagValue(buf, st.Value); err != nil {
+			return nil, fmt.Errorf("tag %s: %w", tag, err)
+		}
+	default:
+		return nil, fmt.Errorf("tag %s: unsupported tag type %q", tag, st.Type)
 	}
-	return buf
+	return buf, nil
 }
 
 // encodeArrayTagValue encodes a B-type array tag value (e.g. "C,1,2,3") into
-// BAM binary and appends it to buf.
-func encodeArrayTagValue(buf []byte, value string) []byte {
+// BAM binary and appends it to buf. A value containing only the element type
+// (e.g. "C") is a valid zero-length array. It returns an error for an empty or
+// malformed value, an unsupported element type, or an element that fails to
+// parse, rather than silently emitting a corrupt array.
+func encodeArrayTagValue(buf []byte, value string) ([]byte, error) {
 	parts := strings.Split(value, ",")
-	if len(parts) < 2 {
-		return buf
+	if len(parts) == 0 || len(parts[0]) == 0 {
+		return nil, fmt.Errorf("invalid array tag value %q", value)
 	}
 	elemType := parts[0][0]
+	switch elemType {
+	case 'c', 'C', 's', 'S', 'i', 'I', 'f':
+		// supported
+	default:
+		return nil, fmt.Errorf("unsupported array element type %q in %q", elemType, value)
+	}
 	buf = append(buf, elemType)
 	count := len(parts) - 1
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(count))
@@ -499,28 +547,48 @@ func encodeArrayTagValue(buf []byte, value string) []byte {
 	for _, p := range parts[1:] {
 		switch elemType {
 		case 'c':
-			v, _ := strconv.ParseInt(p, 10, 8)
+			v, err := strconv.ParseInt(p, 10, 8)
+			if err != nil {
+				return nil, fmt.Errorf("array element %q: %w", p, err)
+			}
 			buf = append(buf, byte(int8(v)))
 		case 'C':
-			v, _ := strconv.ParseUint(p, 10, 8)
+			v, err := strconv.ParseUint(p, 10, 8)
+			if err != nil {
+				return nil, fmt.Errorf("array element %q: %w", p, err)
+			}
 			buf = append(buf, byte(v))
 		case 's':
-			v, _ := strconv.ParseInt(p, 10, 16)
+			v, err := strconv.ParseInt(p, 10, 16)
+			if err != nil {
+				return nil, fmt.Errorf("array element %q: %w", p, err)
+			}
 			buf = binary.LittleEndian.AppendUint16(buf, uint16(int16(v)))
 		case 'S':
-			v, _ := strconv.ParseUint(p, 10, 16)
+			v, err := strconv.ParseUint(p, 10, 16)
+			if err != nil {
+				return nil, fmt.Errorf("array element %q: %w", p, err)
+			}
 			buf = binary.LittleEndian.AppendUint16(buf, uint16(v))
 		case 'i':
-			v, _ := strconv.ParseInt(p, 10, 32)
+			v, err := strconv.ParseInt(p, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("array element %q: %w", p, err)
+			}
 			buf = binary.LittleEndian.AppendUint32(buf, uint32(int32(v)))
 		case 'I':
-			v, _ := strconv.ParseUint(p, 10, 32)
+			v, err := strconv.ParseUint(p, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("array element %q: %w", p, err)
+			}
 			buf = binary.LittleEndian.AppendUint32(buf, uint32(v))
 		case 'f':
-			v, _ := strconv.ParseFloat(p, 32)
+			v, err := strconv.ParseFloat(p, 32)
+			if err != nil {
+				return nil, fmt.Errorf("array element %q: %w", p, err)
+			}
 			buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(float32(v)))
 		}
 	}
-	return buf
+	return buf, nil
 }
-

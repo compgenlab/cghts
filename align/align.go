@@ -21,14 +21,14 @@ type ScoringMatrix interface {
 }
 
 type PairwiseAlignment struct {
-	Query        seqio.SeqQual
-	Target       seqio.SeqQual
-	QueryStart   int
-	QueryEnd     int
-	TargetStart  int
-	TargetEnd    int
-	Score        float32
-	CIGAR        string
+	Query         seqio.SeqQual
+	Target        seqio.SeqQual
+	QueryStart    int
+	QueryEnd      int
+	TargetStart   int
+	TargetEnd     int
+	Score         float32
+	CIGAR         string
 	cigarExpanded string
 }
 
@@ -354,7 +354,7 @@ func (a *PairwiseAlignment) TargetAlignedStr() string {
 // Return the target string, relative to the plus strand
 func (a *PairwiseAlignment) TargetStrPlus() string {
 	if a.Target.IsRevComp() {
-		return sequtils.ReverseCompliment(a.Target.Seq()[a.TargetStart:a.TargetEnd])
+		return sequtils.ReverseComplement(a.Target.Seq()[a.TargetStart:a.TargetEnd])
 	}
 	return a.Target.Seq()[a.TargetStart:a.TargetEnd]
 }
@@ -396,7 +396,7 @@ func (a *PairwiseAlignment) QueryAlignedStr() string {
 // Return the query string, relative to the plus strand
 func (a *PairwiseAlignment) QueryStrPlus() string {
 	if a.Query.IsRevComp() {
-		return sequtils.ReverseCompliment(a.Query.Seq()[a.QueryStart:a.QueryEnd])
+		return sequtils.ReverseComplement(a.Query.Seq()[a.QueryStart:a.QueryEnd])
 	}
 	return a.Query.Seq()[a.QueryStart:a.QueryEnd]
 }
@@ -436,16 +436,16 @@ func (pap *PairwiseAlignmentPromise) setResult(idx int, aln *PairwiseAlignment) 
 func (pap *PairwiseAlignmentPromise) Result() *PairwiseAlignment {
 	pap.wg.Wait()
 
+	if len(pap.results) == 0 {
+		return nil
+	}
 	bestAln := pap.results[0]
 	// Find the best alignment
-	for i, result := range pap.results {
-		if i > 0 {
-			if result.Score > bestAln.Score {
-				bestAln = result
-			}
+	for _, result := range pap.results[1:] {
+		if result.Score > bestAln.Score {
+			bestAln = result
 		}
 	}
-	// fmt.Println(bestAln.String())
 	return bestAln
 }
 
