@@ -187,10 +187,13 @@ func (bw *Writer) Write(rec *htsio.SamRecord) error {
 	if err := bw.getErr(); err != nil {
 		return err
 	}
-	// Note: unlike the CRAM writer, the BAM writer stores SEQ verbatim and does
-	// not reconstruct it from the CIGAR, so a CIGAR/SEQ length mismatch does not
-	// lose data here. We intentionally do not reject it — callers (e.g. tools
-	// that rewrite records with simplified CIGARs) rely on this leniency.
+	// Reject a record whose CIGAR query length disagrees with len(SEQ): such a
+	// record is malformed per the SAM spec and would produce an invalid BAM.
+	// Validate synchronously so the caller gets immediate feedback rather than a
+	// deferred sticky error.
+	if err := htsio.ValidateCigarSeq(rec.Cigar, rec.Seq); err != nil {
+		return fmt.Errorf("bam: read %s: %w", rec.ReadName, err)
+	}
 	bw.writeCh <- rec
 	return nil
 }
