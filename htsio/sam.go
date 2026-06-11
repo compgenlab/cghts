@@ -122,10 +122,18 @@ func (r *SamRecord) String() string {
 }
 
 // SamReader is the interface for reading SAM/BAM/CRAM records.
+//
+// A reader is single-pass and not safe for concurrent iteration: Records and
+// Query advance the same underlying stream, so only one iterator should be
+// active at a time. Iterators may be stopped early (a `break` out of the range
+// loop is safe); they do not have to be fully drained.
 type SamReader interface {
-	// Records returns an iterator over all records in the reader.
+	// Records returns an iterator over all records in the reader. Each yielded
+	// *SamRecord is freshly allocated, so it is safe to retain.
 	Records() iter.Seq2[*SamRecord, error]
-	// Header returns the parsed SAM header. May return nil before the first Records() call.
+	// Header returns the parsed SAM header. May return nil before the first
+	// Records() call. The returned header is shared (not a copy) and must be
+	// treated as read-only.
 	Header() (*SamHeader, error)
 	// Query returns an iterator over records overlapping the 0-based
 	// half-open region [start, end) on the given reference. Returns an
