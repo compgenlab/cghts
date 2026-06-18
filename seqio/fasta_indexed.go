@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/compgen-io/cgkit/htsio/bgzf"
+	"github.com/compgenlab/hts/htsio/bgzf"
 )
 
 const (

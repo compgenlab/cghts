@@ -5,7 +5,7 @@ package seq_test
 // 	"strings"
 // 	"testing"
 
-// 	"github.com/compgen-io/cgkit/seqio"
+// 	"github.com/compgenlab/hts/seqio"
 // )
 
 // func TestFastaReaderChunking(t *testing.T) {

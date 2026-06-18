@@ -7,9 +7,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/compgen-io/cgkit/seqio"
-	"github.com/compgen-io/cgkit/support/sequtils"
-	"github.com/compgen-io/cgkit/support/utils"
+	"github.com/compgenlab/hts/seqio"
+	"github.com/compgenlab/hts/support/sequtils"
+	"github.com/compgenlab/hts/support/utils"
 )
 
 type PairwiseAligner interface {

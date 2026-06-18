@@ -7,7 +7,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/compgen-io/cgkit/htsio/bgzf"
+	"github.com/compgenlab/hts/htsio/bgzf"
 )
 
 // Chunk represents a contiguous range of BGZF virtual offsets containing

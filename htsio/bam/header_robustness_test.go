@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/compgen-io/cgkit/htsio/bgzf"
+	"github.com/compgenlab/hts/htsio/bgzf"
 )
 
 // bgzfReaderFrom wraps raw bytes in a single BGZF block and returns a reader

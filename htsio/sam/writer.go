@@ -7,7 +7,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/compgen-io/cgkit/htsio"
+	"github.com/compgenlab/hts/htsio"
 )
 
 // Writer writes SAM text files. Implements htsio.SamWriter.

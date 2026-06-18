@@ -13,9 +13,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/compgen-io/cgkit/htsio"
-	"github.com/compgen-io/cgkit/htsio/codec"
-	"github.com/compgen-io/cgkit/seqio"
+	"github.com/compgenlab/hts/htsio"
+	"github.com/compgenlab/hts/htsio/codec"
+	"github.com/compgenlab/hts/seqio"
 )
 
 // Version identifies a CRAM version for the writer.

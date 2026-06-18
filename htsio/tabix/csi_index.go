@@ -7,7 +7,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/compgen-io/cgkit/htsio/bgzf"
+	"github.com/compgenlab/hts/htsio/bgzf"
 )
 
 // csiBin holds a single bin from a CSI index, including its loffset

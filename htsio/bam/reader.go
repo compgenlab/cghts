@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgen-io/cgkit/htsio"
-	"github.com/compgen-io/cgkit/htsio/bgzf"
-	"github.com/compgen-io/cgkit/htsio/tabix"
+	"github.com/compgenlab/hts/htsio"
+	"github.com/compgenlab/hts/htsio/bgzf"
+	"github.com/compgenlab/hts/htsio/tabix"
 )
 
 // BAM CIGAR operation codes (4-bit).

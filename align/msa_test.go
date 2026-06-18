@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/compgen-io/cgkit/seqio"
+	"github.com/compgenlab/hts/seqio"
 )
 
 // msaTestAligner returns a global aligner suitable for MSA tests.

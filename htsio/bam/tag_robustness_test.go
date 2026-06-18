@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/compgen-io/cgkit/htsio"
+	"github.com/compgenlab/hts/htsio"
 )
 
 // TestDecodeTagsTruncatedNoPanic feeds deliberately truncated and malformed aux
