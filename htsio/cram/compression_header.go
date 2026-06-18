@@ -24,8 +24,8 @@ type compressionHeader struct {
 
 // tagKey represents a tag ID (2 chars) and its type (1 char), e.g. "RG" + 'Z'.
 type tagKey struct {
-	id   [2]byte
-	typ  byte
+	id  [2]byte
+	typ byte
 }
 
 // tagKeyToITF8 converts a tagKey to the 3-byte ITF8 key used in the tag encoding map.

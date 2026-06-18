@@ -46,15 +46,15 @@ func readFileDefinition(r io.Reader) (*fileDefinition, error) {
 
 // containerHeader holds metadata for a CRAM container.
 type containerHeader struct {
-	Length         int32
-	RefSeqID       int32
-	StartPos       int32
-	AlignmentSpan  int32
-	NumRecords     int32
-	RecordCounter  int64
-	Bases          int64
-	NumBlocks      int32
-	Landmarks      []int32
+	Length        int32
+	RefSeqID      int32
+	StartPos      int32
+	AlignmentSpan int32
+	NumRecords    int32
+	RecordCounter int64
+	Bases         int64
+	NumBlocks     int32
+	Landmarks     []int32
 }
 
 // isEOF returns true if this is the EOF container.

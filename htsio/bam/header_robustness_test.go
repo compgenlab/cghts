@@ -63,10 +63,10 @@ func TestReadHeaderMalformed(t *testing.T) {
 // still parses after the hardening.
 func TestReadHeaderValid(t *testing.T) {
 	raw := []byte("BAM\x01")
-	raw = append(raw, le32(0, 1)...)          // l_text=0, n_ref=1
+	raw = append(raw, le32(0, 1)...)                 // l_text=0, n_ref=1
 	raw = append(raw, le32(int32(len("c1\x00")))...) // l_name (includes NUL)
-	raw = append(raw, []byte("c1\x00")...)    // name
-	raw = append(raw, le32(1000)...)          // l_ref
+	raw = append(raw, []byte("c1\x00")...)           // name
+	raw = append(raw, le32(1000)...)                 // l_ref
 
 	b := &Reader{r: bgzfReaderFrom(t, raw)}
 	if err := b.readHeader(); err != nil {

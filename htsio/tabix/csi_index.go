@@ -31,15 +31,17 @@ type CSIIndex struct {
 	depth    int32
 	refs     []csiRefIndex
 
-	// Tabix metadata from the auxiliary data block.
-	Format    int32
-	ColSeq    int32
-	ColBeg    int32
-	ColEnd    int32
-	Meta      int32
-	Skip      int32
-	ZeroBased bool
-	Names     []string
+	// Tabix metadata from the auxiliary data block. These fields are
+	// zero-valued when the CSI is a plain coordinate index (e.g. a BAM
+	// .csi) with no tabix aux block.
+	Format    int32    // 0=generic, 1=SAM, 2=VCF
+	ColSeq    int32    // column for sequence name (1-based)
+	ColBeg    int32    // column for region start (1-based)
+	ColEnd    int32    // column for region end (1-based); 0 means same as ColBeg
+	Meta      int32    // comment character (e.g. '#'), or 0
+	Skip      int32    // number of header lines to skip
+	ZeroBased bool     // true if coordinates are 0-based
+	Names     []string // reference sequence names, in reference order
 }
 
 // LoadCSI reads a CSI index file. CSI files are BGZF-compressed.

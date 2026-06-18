@@ -30,9 +30,9 @@ type Writer struct {
 
 	// Parallel compression (zero values → single-threaded mode).
 	nWorkers int
-	workCh   chan compressJob       // uncompressed blocks → workers
+	workCh   chan compressJob         // uncompressed blocks → workers
 	drainCh  chan chan compressResult // result channels → drain goroutine (preserves order)
-	drainErr chan error              // drain goroutine final error
+	drainErr chan error               // drain goroutine final error
 }
 
 // compressJob is a unit of work sent to a compression worker.
@@ -356,8 +356,8 @@ func buildBGZFBlock(uncompressed, compressed []byte) []byte {
 	block[2] = 0x08 // CM = deflate
 	block[3] = 0x04 // FLG = FEXTRA
 	// MTIME, XFL, OS all zero
-	block[9] = 0xff // OS = unknown
-	binary.LittleEndian.PutUint16(block[10:12], 6)    // XLEN
+	block[9] = 0xff                                    // OS = unknown
+	binary.LittleEndian.PutUint16(block[10:12], 6)     // XLEN
 	block[12] = 'B'                                    // SI1
 	block[13] = 'C'                                    // SI2
 	binary.LittleEndian.PutUint16(block[14:16], 2)     // SLEN

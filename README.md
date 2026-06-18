@@ -1,8 +1,12 @@
 # hts
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/compgenlab/hts.svg)](https://pkg.go.dev/github.com/compgenlab/hts)
+
 A Go library for computational genomics: sequence I/O, alignment, and native
 SAM/BAM/CRAM/tabix handling. Particular focus on Oxford Nanopore (long-read)
 sequencing workflows.
+
+Full API documentation: <https://pkg.go.dev/github.com/compgenlab/hts>
 
 **Module:** `github.com/compgenlab/hts`
 

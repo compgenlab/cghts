@@ -99,10 +99,26 @@ func (r *TextReader) populateHeader() {
 	}
 }
 
+// Header returns the parsed [htsio.SamHeader] for the file.
+//
+// The header is read eagerly during construction (the leading @-prefixed
+// lines are consumed before the first record), so Header never returns an
+// error. It returns nil if the input contained no header lines.
 func (r *TextReader) Header() (*htsio.SamHeader, error) {
 	return r.header, nil
 }
 
+// Records returns an iterator over the alignment records in the file.
+//
+// Each non-header line is parsed into a [htsio.SamRecord]; any @-prefixed
+// lines encountered after the initial header block are appended to the
+// header and skipped. Records that do not satisfy the reader's filters
+// (via opts.PassesFilters) are silently skipped.
+//
+// On a normal end of input the iterator stops and the reader records
+// [io.EOF] internally, so a subsequent call yields (nil, io.EOF). A parse
+// failure or scanner error yields (nil, err) and stops iteration; the
+// scanner error is also retained so later calls report it again.
 func (r *TextReader) Records() iter.Seq2[*htsio.SamRecord, error] {
 	return func(yield func(*htsio.SamRecord, error) bool) {
 		if r.err != nil {
@@ -155,10 +171,19 @@ func (r *TextReader) Records() iter.Seq2[*htsio.SamRecord, error] {
 	}
 }
 
+// Query always returns an error: plain SAM text files have no index and so
+// cannot be queried by region. Use an indexed BAM/CRAM reader (or
+// [SamtoolsReader]) for region queries.
 func (r *TextReader) Query(ref string, start, end int) (iter.Seq2[*htsio.SamRecord, error], error) {
 	return nil, fmt.Errorf("sam: Query not supported on plain SAM files (no index)")
 }
 
+// Close closes the underlying source (and the gzip reader, when the input
+// was gzip-compressed).
+//
+// A gzip decompression error detected at end of stream (for example a
+// corrupt or truncated file) is surfaced, but an error closing the
+// underlying source takes precedence if both occur.
 func (r *TextReader) Close() error {
 	// Surface a gzip decompression error (e.g. a corrupt/truncated stream
 	// detected at EOF) rather than dropping it; the underlying source close

@@ -45,9 +45,9 @@ type bamRefInfo struct {
 // It implements the htsio.SamReader interface.
 type Reader struct {
 	r        *bgzf.Reader
-	src      io.ReadCloser // underlying file/reader, closed on Close()
-	filename string        // original filename (for finding .bai)
-	refs     []bamRefInfo  // reference sequences from the BAM header
+	src      io.ReadCloser  // underlying file/reader, closed on Close()
+	filename string         // original filename (for finding .bai)
+	refs     []bamRefInfo   // reference sequences from the BAM header
 	refMap   map[string]int // ref name → index
 	hdr      *htsio.SamHeader
 	opts     *htsio.SamReaderOpts
@@ -401,7 +401,7 @@ func readBamRecord(r io.Reader, refs []bamRefInfo) (*htsio.SamRecord, error) {
 	if offset+int(seqLen) > len(buf) {
 		return nil, fmt.Errorf("bam: record truncated at qual")
 	}
-	qual := decodeQual(buf[offset:offset+int(seqLen)])
+	qual := decodeQual(buf[offset : offset+int(seqLen)])
 	offset += int(seqLen)
 
 	// Auxiliary tags.

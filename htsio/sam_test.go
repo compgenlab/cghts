@@ -161,4 +161,3 @@ func TestParseRegion(t *testing.T) {
 		}
 	}
 }
-

@@ -22,9 +22,9 @@ type cramRecord struct {
 	mapQ      int32
 
 	// Mate info (detached)
-	mateFlags int32
-	mateRefID int32
-	matePos   int32
+	mateFlags    int32
+	mateRefID    int32
+	matePos      int32
 	templateSize int32
 
 	// Mate info (downstream)
@@ -571,7 +571,7 @@ func reconstructSequence(rec *cramRecord, ch *compressionHeader, refSeq []byte, 
 	}
 
 	seq := make([]byte, rec.readLen)
-	readPos := 0   // 0-based position in the read
+	readPos := 0                                // 0-based position in the read
 	refPos := int(rec.alignPos) - 1 - refOffset // 0-based position in refSeq
 
 	featureIdx := 0

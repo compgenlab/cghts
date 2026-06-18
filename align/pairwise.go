@@ -46,34 +46,29 @@ type swCell struct {
 	traceD swCellTrace
 }
 
-/*
-This is a simple Smith Waterman local aligner with affine gaps penalties.
-
-It computes a full n*m matrix and backtracks to find an alignment. There are
-many optimizations that are possible, but this is the old-school n*m matrix
-DP approach.
-
-There are two things that do make this particular method a bit more complex...
-
-First, there are affine gaps. This means that the gap open/extension penalties
-are not the same. Typically this means that opening a gap is more expensive
-that extending a gap, but this is configurable.
-
-Second, we will allow for discounts for homopolymer indels. If a gap is found
-in a homopolymer (HP) region, we will (optionally) discount the penalty based
-upon how long the HP is.
-*/
+// NewLocalAligner returns a Smith-Waterman local aligner configured with opts.
+//
+// It computes the full n*m dynamic-programming matrix and backtracks to find
+// the best-scoring local alignment, reporting the unaligned ends of the query
+// as soft clips (S) in the CIGAR. Two features add complexity beyond the
+// textbook algorithm:
+//
+//   - Affine gaps: gap open and gap extend penalties differ (opening is
+//     typically more expensive than extending), and are configurable per
+//     insertion and deletion.
+//   - Homopolymer discounts: indels inside a homopolymer run can be discounted
+//     based on the run length, which is important for Oxford Nanopore data.
 func NewLocalAligner(opts *alignmentOptions) *pairwise {
 	ret := &pairwise{opts: opts, mode: modeLocal}
 	ret.precalc()
 	return ret
 }
 
-/*
-This is a global aligner, which means that the best alignment must include
-the end of both the query and target. This is implemented by changing the
-initialization and backtracking conditions.
-*/
+// NewGlobalAligner returns a global aligner configured with opts, in which the
+// best alignment must span the full length of both the query and the target.
+// This is achieved by changing the matrix initialization and backtracking
+// conditions. Soft clipping is disabled (it is meaningless for global
+// alignment), so opts is mutated to clear its clipping penalties.
 func NewGlobalAligner(opts *alignmentOptions) *pairwise {
 	opts.ClippingDisable() // global alignment doesn't make sense with clipping
 	ret := &pairwise{opts: opts, mode: modeGlobal}
@@ -81,11 +76,12 @@ func NewGlobalAligner(opts *alignmentOptions) *pairwise {
 	return ret
 }
 
-/*
-Semi-global aligner: the query is fully aligned end-to-end, but the target
-can have free end gaps on both sides. This is useful for aligning a read
-(query) to a longer consensus (target) where the read may be truncated.
-*/
+// NewSemiGlobalAligner returns a semi-global aligner configured with opts: the
+// query is aligned end to end, but the target may have free end gaps on both
+// sides (no penalty for unaligned target prefix/suffix). This is useful for
+// placing a read (query) inside a longer consensus or reference (target) where
+// the read may be truncated. Soft clipping is disabled, so opts is mutated to
+// clear its clipping penalties.
 func NewSemiGlobalAligner(opts *alignmentOptions) *pairwise {
 	opts.ClippingDisable()
 	ret := &pairwise{opts: opts, mode: modeSemiGlobal}
@@ -128,6 +124,12 @@ func rowColToIdx(row int, col int, colLen int) int {
 	return row*colLen + col
 }
 
+// Align aligns query against target using the aligner's mode (local, global,
+// or semi-global), scoring matrix, affine gap penalties, and any homopolymer
+// discounts. It fills the dynamic-programming matrix, backtracks the optimal
+// path, and returns a [PairwiseAlignment] with 0-based half-open coordinates,
+// the score, and a condensed CIGAR string. Align satisfies [PairwiseAligner]
+// and is safe to call concurrently from multiple goroutines.
 func (sw *pairwise) Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAlignment {
 	queryStr := query.Seq()
 	targetStr := target.Seq()

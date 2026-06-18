@@ -458,8 +458,8 @@ func (p *MSAAlignment) Expanded(withConsensus bool) *MSAAlignment {
 	// Walk the compressed columns once, recording per-row HP lengths,
 	// the consensus base and chosen length, and the per-column max
 	// width of the expanded block.
-	rowLens := make([][]int, numCols) // rowLens[c][i] = original HP run length for row i at column c; 0 for gaps
-	maxLens := make([]int, numCols)   // total sub-columns at expanded column c
+	rowLens := make([][]int, numCols)  // rowLens[c][i] = original HP run length for row i at column c; 0 for gaps
+	maxLens := make([]int, numCols)    // total sub-columns at expanded column c
 	consBases := make([]byte, numCols) // consBases[c] = majority base at column c, 0 if none
 	consLens := make([]int, numCols)   // consLens[c] = chosen HP length for the consensus at column c
 

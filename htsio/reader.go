@@ -13,6 +13,9 @@ import (
 // TagFilterOp specifies the comparison operation for a tag filter.
 type TagFilterOp int
 
+// Tag filter operations recognized by [TagFilter]. The numeric operations
+// (TagLt, TagGt, TagLte, TagGte) only apply to integer ('i') and float ('f')
+// tags; comparisons against other tag types evaluate to false.
 const (
 	TagEq          TagFilterOp = iota // equals
 	TagNotEq                          // not equals
@@ -131,7 +134,7 @@ type SamReaderOpts struct {
 	minMapQ    int
 	threads    int
 	tagFilters []*TagFilter
-	refPath    string              // reference FASTA path (used by CRAM)
+	refPath    string                // reference FASTA path (used by CRAM)
 	refReader  seqio.ReferenceReader // pre-opened reference (takes priority over refPath)
 }
 
@@ -193,19 +196,51 @@ func (r *SamReaderOpts) PassesFilters(rec *SamRecord) bool {
 	return true
 }
 
-func (r *SamReaderOpts) FlagReqValue() int    { return r.flagReq }
-func (r *SamReaderOpts) FlagFilterValue() int  { return r.flagFilter }
-func (r *SamReaderOpts) MinMapQValue() int     { return r.minMapQ }
-func (r *SamReaderOpts) ThreadsValue() int     { return r.threads }
-func (r *SamReaderOpts) RefPathValue() string                    { return r.refPath }
-func (r *SamReaderOpts) RefReaderValue() seqio.ReferenceReader   { return r.refReader }
+// FlagReqValue returns the required-flags mask set by FlagRequired (0 if unset).
+func (r *SamReaderOpts) FlagReqValue() int { return r.flagReq }
 
+// FlagFilterValue returns the excluded-flags mask set by FlagFilter (0 if unset).
+func (r *SamReaderOpts) FlagFilterValue() int { return r.flagFilter }
+
+// MinMapQValue returns the minimum mapping quality set by MinMapQ (0 if unset).
+func (r *SamReaderOpts) MinMapQValue() int { return r.minMapQ }
+
+// ThreadsValue returns the worker-thread count set by Threads (0 if unset).
+func (r *SamReaderOpts) ThreadsValue() int { return r.threads }
+
+// RefPathValue returns the reference FASTA path set by RefPath (used for CRAM).
+func (r *SamReaderOpts) RefPathValue() string { return r.refPath }
+
+// RefReaderValue returns the pre-opened reference set by Ref, which takes
+// priority over RefPath. Returns nil if none was set.
+func (r *SamReaderOpts) RefReaderValue() seqio.ReferenceReader { return r.refReader }
+
+// FlagRequired sets the SAM flag bits that a record must have to pass filtering
+// (every bit in flag must be set). It returns r for chaining.
 func (r *SamReaderOpts) FlagRequired(flag int) *SamReaderOpts { r.flagReq = flag; return r }
-func (r *SamReaderOpts) FlagFilter(flag int) *SamReaderOpts   { r.flagFilter = flag; return r }
-func (r *SamReaderOpts) MinMapQ(mapq int) *SamReaderOpts      { r.minMapQ = mapq; return r }
-func (r *SamReaderOpts) Threads(n int) *SamReaderOpts         { r.threads = n; return r }
-func (r *SamReaderOpts) RefPath(path string) *SamReaderOpts                  { r.refPath = path; return r }
-func (r *SamReaderOpts) Ref(ref seqio.ReferenceReader) *SamReaderOpts        { r.refReader = ref; return r }
+
+// FlagFilter sets the SAM flag bits that exclude a record from filtering (a
+// record fails if any bit in flag is set). It returns r for chaining.
+func (r *SamReaderOpts) FlagFilter(flag int) *SamReaderOpts { r.flagFilter = flag; return r }
+
+// MinMapQ sets the minimum mapping quality; records below mapq are filtered out.
+// It returns r for chaining.
+func (r *SamReaderOpts) MinMapQ(mapq int) *SamReaderOpts { r.minMapQ = mapq; return r }
+
+// Threads sets the number of worker threads a reader may use. It returns r for
+// chaining.
+func (r *SamReaderOpts) Threads(n int) *SamReaderOpts { r.threads = n; return r }
+
+// RefPath sets the reference FASTA path used to decode CRAM files. It returns r
+// for chaining.
+func (r *SamReaderOpts) RefPath(path string) *SamReaderOpts { r.refPath = path; return r }
+
+// Ref sets a pre-opened reference reader used to decode CRAM files. It takes
+// priority over RefPath. It returns r for chaining.
+func (r *SamReaderOpts) Ref(ref seqio.ReferenceReader) *SamReaderOpts { r.refReader = ref; return r }
+
+// AddTagFilter appends a [TagFilter] that records must satisfy to pass
+// filtering. It returns r for chaining.
 func (r *SamReaderOpts) AddTagFilter(f *TagFilter) *SamReaderOpts {
 	r.tagFilters = append(r.tagFilters, f)
 	return r

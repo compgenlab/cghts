@@ -10,9 +10,9 @@ import (
 // Based on the htslib reference implementation.
 
 const (
-	ransTFShift = 12                  // frequency table precision (bottom bits of state)
-	ransTotFreq = 1 << ransTFShift    // 4096: frequencies sum to this
-	ransL       = 1 << 23            // 8388608: renormalization threshold (RANS_BYTE_L)
+	ransTFShift = 12               // frequency table precision (bottom bits of state)
+	ransTotFreq = 1 << ransTFShift // 4096: frequencies sum to this
+	ransL       = 1 << 23          // 8388608: renormalization threshold (RANS_BYTE_L)
 )
 
 // ransDecSymbol holds precomputed decode info for one symbol.
@@ -21,6 +21,18 @@ type ransDecSymbol struct {
 	freq    uint32 // symbol frequency
 }
 
+// DecodeRans4x8 decodes a complete rANS 4x8 block (the order-0/order-1 codec
+// used by CRAM v3.0+) and returns the uncompressed bytes.
+//
+// The first input byte is the order selector (0 or 1). It is followed by the
+// compressed and uncompressed sizes (little-endian uint32 each), a
+// frequency-table section, and four interleaved 32-bit rANS states whose shared
+// byte stream is consumed during renormalization. Order-1 uses a separate
+// frequency table per preceding-byte context.
+//
+// It returns an error on empty or truncated input, an unsupported order byte,
+// or a frequency table whose cumulative total exceeds the 12-bit precision
+// (4096).
 func DecodeRans4x8(data []byte) ([]byte, error) {
 	if len(data) < 1 {
 		return nil, fmt.Errorf("rans: empty data")

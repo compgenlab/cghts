@@ -12,14 +12,30 @@ import (
 	"github.com/compgenlab/hts/support/utils"
 )
 
+// PairwiseAligner aligns a single query sequence against a single target
+// sequence and returns the resulting [PairwiseAlignment]. It is implemented by
+// the aligners returned from [NewLocalAligner], [NewGlobalAligner], and
+// [NewSemiGlobalAligner].
 type PairwiseAligner interface {
 	Align(query seqio.SeqQual, target seqio.SeqQual) *PairwiseAlignment
 }
 
+// ScoringMatrix scores the alignment of one query base against one target base.
+// ScorePair returns the (signed) score for aligning bytes one and two; positive
+// values reward matches and negative values penalize mismatches.
 type ScoringMatrix interface {
 	ScorePair(one byte, two byte) float32
 }
 
+// PairwiseAlignment is the result of aligning a query against a target.
+//
+// QueryStart/QueryEnd and TargetStart/TargetEnd are 0-based, half-open
+// coordinates (start inclusive, end exclusive) into the respective sequences,
+// delimiting the aligned region. Score is the alignment score under the
+// configured scoring matrix and gap penalties. CIGAR is the run-length-encoded
+// alignment (for example "5M1D2M") using the operations M (match/mismatch),
+// I (insertion in the query relative to the target), D (deletion relative to
+// the target), and S (soft clip).
 type PairwiseAlignment struct {
 	Query         seqio.SeqQual
 	Target        seqio.SeqQual
@@ -52,6 +68,12 @@ type alignmentOptions struct {
 	verbose               bool
 }
 
+// DnaAlignmentDefaults returns alignment options tuned for Illumina short
+// reads: match +1, mismatch -2, affine gap penalties of open 6 / extend 1 for
+// both insertions and deletions, and soft-clipping penalties of open 5 /
+// extend 1. Homopolymer discounts are disabled, since homopolymer-length errors
+// are uncommon with short reads. The returned value can be customized via its
+// fluent setter methods.
 func DnaAlignmentDefaults() *alignmentOptions {
 	// default short-read alignment scoring
 	return &alignmentOptions{
@@ -72,6 +94,14 @@ func DnaAlignmentDefaults() *alignmentOptions {
 	}
 }
 
+// OntAlignmentDefaults returns alignment options tuned for Oxford Nanopore
+// long reads: match +1, mismatch -1, looser affine gap penalties (insertions
+// open 2 / extend 1; deletions open 3 / extend 1), soft-clipping penalties of
+// open 5 / extend 1, and enabled homopolymer discounts. The homopolymer
+// discounts reduce the cost of indels inside homopolymer runs (scaled by the
+// log of the run length and capped) so that a long run makes a single indel
+// nearly free. The returned value can be customized via its fluent setter
+// methods.
 func OntAlignmentDefaults() *alignmentOptions {
 	// default short-read alignment scoring
 	return &alignmentOptions{
@@ -92,14 +122,19 @@ func OntAlignmentDefaults() *alignmentOptions {
 	}
 }
 
-// The scoring matrix (match/mismatch scoring) to use
+// ScoringMatrix sets the match/mismatch scoring matrix to use and returns the
+// options for chaining.
 func (a *alignmentOptions) ScoringMatrix(matrix ScoringMatrix) *alignmentOptions {
 	a.scoringMatrix = matrix
 	return a
 }
 
-// decay the gap extension length by the length of the homopolymer
-// gap_penalty = (gap_open / hp_length) + n * (gap_extend / hp_length)
+// HomopolymerDiscount configures the discount applied to gap open and extend
+// penalties for indels that fall inside a homopolymer run. The discount for a
+// run of length L is min(cap, scale*log2(L)) and is subtracted from the gap
+// penalty; openScale/openCap apply to gap opening and extendScale/extendCap to
+// gap extension. Setting all values to 0 disables the discount. Returns the
+// options for chaining.
 func (a *alignmentOptions) HomopolymerDiscount(openScale, openCap, extendScale, extendCap float32) *alignmentOptions {
 	a.hpOpenScale = openScale
 	a.hpOpenCap = openCap
@@ -108,47 +143,62 @@ func (a *alignmentOptions) HomopolymerDiscount(openScale, openCap, extendScale, 
 	return a
 }
 
-// penalty for opening a gap (insertion)
-// gap_penalty = gap_open + (n * gap_extend)
+// GapPenaltyIns sets the affine gap penalties for insertions (query bases not
+// present in the target). The penalty for a gap of length n is
+// open + (n-1)*extend. The absolute values of open and extend are used (the
+// penalties are subtracted internally). Returns the options for chaining.
 func (a *alignmentOptions) GapPenaltyIns(open, extend float32) *alignmentOptions {
 	a.gapOpenPenaltyIns = float32(math.Abs(float64(open)))
 	a.gapExtendPenaltyIns = float32(math.Abs(float64(extend)))
 	return a
 }
 
-// penalty for opening a gap (deletions)
-// gap_penalty = gap_open + (n * gap_extend)
+// GapPenaltyDel sets the affine gap penalties for deletions (target bases not
+// present in the query). The penalty for a gap of length n is
+// open + (n-1)*extend. The absolute values of open and extend are used (the
+// penalties are subtracted internally). Returns the options for chaining.
 func (a *alignmentOptions) GapPenaltyDel(open, extend float32) *alignmentOptions {
 	a.gapOpenPenaltyDel = float32(math.Abs(float64(open)))
 	a.gapExtendPenaltyDel = float32(math.Abs(float64(extend)))
 	return a
 }
 
-// penalty for opening a 5' or 3' soft clipping gap
-// gap_penalty = gap_open + (n * gap_extend)
+// ClippingPenalty sets the affine penalties for soft-clipping query bases at
+// the 5' or 3' end (local alignment only). The penalty for clipping n bases is
+// open + (n-1)*extend. The absolute values of open and extend are used. Returns
+// the options for chaining.
 func (a *alignmentOptions) ClippingPenalty(open, extend float32) *alignmentOptions {
 	a.clippingOpenPenalty = float32(math.Abs(float64(open)))
 	a.clippingExtendPenalty = float32(math.Abs(float64(extend)))
 	return a
 }
 
-// penalty for opening a 5' or 3' soft clipping gap
-// gap_penalty = gap_open + (n * gap_extend)
+// ClippingDisable turns off soft clipping by setting the clipping penalties to
+// a negative sentinel, forcing the query to be aligned end to end. It is
+// applied automatically by [NewGlobalAligner] and [NewSemiGlobalAligner].
+// Returns the options for chaining.
 func (a *alignmentOptions) ClippingDisable() *alignmentOptions {
 	a.clippingOpenPenalty = -1
 	a.clippingExtendPenalty = -1
 	return a
 }
 
+// Verbose enables or disables debug output (the DP matrix and backtrack trace)
+// printed during alignment. Returns the options for chaining.
 func (a *alignmentOptions) Verbose(verbose bool) *alignmentOptions {
 	a.verbose = verbose
 	return a
 }
 
+// MatchMismatchScoring returns a [ScoringMatrix] that awards match for matching
+// bases and -|mismatch| for mismatches. Base comparison honors IUPAC ambiguity
+// codes, so for example N matches any base.
 func MatchMismatchScoring(match int, mismatch int) *matchMismatch {
 	return &matchMismatch{match: float32(match), mismatch: float32(math.Abs(float64(mismatch)))}
 }
 
+// ScorePair returns the match reward when one and two match (per IUPAC
+// matching) and the negated mismatch penalty otherwise.
 func (m *matchMismatch) ScorePair(one byte, two byte) float32 {
 	if sequtils.DNAMatches(one, two) {
 		return m.match
@@ -182,10 +232,12 @@ func hpDiscount(hpLen int, scale, cap float32) float32 {
 	return ret
 }
 
-// take an extended cigar string and convert
-// it into a condensed string:
+// CigarCondense converts an expanded (per-base) CIGAR string into run-length
+// encoded form, for example:
 //
-// IIMMMMMDMM => 2I5M1D2M
+//	IIMMMMMDMM => 2I5M1D2M
+//
+// An empty input returns an empty string.
 func CigarCondense(s string) string {
 	if len(s) == 0 {
 		return ""
@@ -206,10 +258,13 @@ func CigarCondense(s string) string {
 	return ret.String()
 }
 
-// take an extended cigar string and convert
-// it into a condensed string:
+// CigarExpand converts a run-length encoded CIGAR string into expanded
+// (per-base) form, the inverse of [CigarCondense], for example:
 //
-// 2I5M1D2M => IIMMMMMDMM
+//	2I5M1D2M => IIMMMMMDMM
+//
+// It returns an error if the string is malformed (for example a trailing count
+// with no operation, or a non-numeric count).
 func CigarExpand(s string) (string, error) {
 	countBuf := ""
 	var ret strings.Builder
@@ -234,6 +289,10 @@ func CigarExpand(s string) (string, error) {
 	return ret.String(), nil
 }
 
+// String returns a human-readable, multi-line rendering of the alignment: the
+// gapped query and target rows with a middle line marking matches ('|') and
+// mismatches ('.'), followed by the CIGAR string and score. Coordinates in the
+// row labels are 1-based and oriented to the strand of each sequence.
 func (a *PairwiseAlignment) String() string {
 	// fmt.Printf("qPos: %d-%d, tPos: %d-%d\n", a.QueryStart, a.QueryEnd, a.TargetStart, a.TargetEnd)
 	// fmt.Printf("CIGAR: %s\n", a.CIGAR)
@@ -302,6 +361,9 @@ Score: %s`, qStr, aStr, tStr, a.CIGAR, utils.TrimFloat(float64(a.Score), 2))
 	return ret
 }
 
+// Matches returns the number of aligned positions where the query and target
+// bases match (per IUPAC matching). Insertions, deletions, and soft clips do
+// not count.
 func (a *PairwiseAlignment) Matches() int {
 	qPos := a.QueryStart
 	tPos := a.TargetStart
@@ -326,6 +388,9 @@ func (a *PairwiseAlignment) Matches() int {
 	return matches
 }
 
+// TargetAlignedStr returns the target sequence over the aligned region with
+// gap characters ('-') inserted for insertions and a space for soft-clipped
+// columns, so it lines up column-for-column with [PairwiseAlignment.QueryAlignedStr].
 func (a *PairwiseAlignment) TargetAlignedStr() string {
 	var tBuf strings.Builder
 	qPos := a.QueryStart
@@ -351,7 +416,9 @@ func (a *PairwiseAlignment) TargetAlignedStr() string {
 	return tBuf.String()
 }
 
-// Return the target string, relative to the plus strand
+// TargetStrPlus returns the aligned target substring oriented to the plus
+// strand: if the target is reverse-complemented, the reverse complement of the
+// aligned region is returned.
 func (a *PairwiseAlignment) TargetStrPlus() string {
 	if a.Target.IsRevComp() {
 		return sequtils.ReverseComplement(a.Target.Seq()[a.TargetStart:a.TargetEnd])
@@ -359,15 +426,22 @@ func (a *PairwiseAlignment) TargetStrPlus() string {
 	return a.Target.Seq()[a.TargetStart:a.TargetEnd]
 }
 
+// TargetSub returns the aligned region of the target as a [seqio.SeqQual]
+// (the subsequence from TargetStart to TargetEnd).
 func (a *PairwiseAlignment) TargetSub() seqio.SeqQual {
 	return a.Target.Sub(a.TargetStart, a.TargetEnd)
 }
 
-// Return the target string
+// TargetStr returns the aligned target substring (TargetStart to TargetEnd) as
+// stored, without reorienting to the plus strand.
 func (a *PairwiseAlignment) TargetStr() string {
 	return a.Target.Seq()[a.TargetStart:a.TargetEnd]
 }
 
+// QueryAlignedStr returns the query sequence over the aligned region with gap
+// characters ('-') inserted for deletions, so it lines up column-for-column
+// with [PairwiseAlignment.TargetAlignedStr]. Soft-clipped query bases are
+// included.
 func (a *PairwiseAlignment) QueryAlignedStr() string {
 	var qBuf strings.Builder
 	qPos := a.QueryStart
@@ -393,7 +467,9 @@ func (a *PairwiseAlignment) QueryAlignedStr() string {
 	return qBuf.String()
 }
 
-// Return the query string, relative to the plus strand
+// QueryStrPlus returns the aligned query substring oriented to the plus strand:
+// if the query is reverse-complemented, the reverse complement of the aligned
+// region is returned.
 func (a *PairwiseAlignment) QueryStrPlus() string {
 	if a.Query.IsRevComp() {
 		return sequtils.ReverseComplement(a.Query.Seq()[a.QueryStart:a.QueryEnd])
@@ -401,14 +477,21 @@ func (a *PairwiseAlignment) QueryStrPlus() string {
 	return a.Query.Seq()[a.QueryStart:a.QueryEnd]
 }
 
+// QuerySub returns the aligned region of the query as a [seqio.SeqQual] (the
+// subsequence from QueryStart to QueryEnd).
 func (a *PairwiseAlignment) QuerySub() seqio.SeqQual {
 	return a.Query.Sub(a.QueryStart, a.QueryEnd)
 }
 
+// QueryStr returns the aligned query substring (QueryStart to QueryEnd) as
+// stored, without reorienting to the plus strand.
 func (a *PairwiseAlignment) QueryStr() string {
 	return a.Query.Seq()[a.QueryStart:a.QueryEnd]
 }
 
+// PairwiseAlignmentPromise holds the pending results of an [AlignBatch] call.
+// Call its Result method to block until every alignment completes and obtain
+// the single best-scoring alignment.
 type PairwiseAlignmentPromise struct {
 	results []*PairwiseAlignment
 	wg      sync.WaitGroup
@@ -433,6 +516,9 @@ func (pap *PairwiseAlignmentPromise) setResult(idx int, aln *PairwiseAlignment) 
 	pap.results[idx] = aln
 }
 
+// Result blocks until all batched alignments have finished and returns the
+// alignment with the highest score. It returns nil if the batch produced no
+// alignments.
 func (pap *PairwiseAlignmentPromise) Result() *PairwiseAlignment {
 	pap.wg.Wait()
 
@@ -449,6 +535,11 @@ func (pap *PairwiseAlignmentPromise) Result() *PairwiseAlignment {
 	return bestAln
 }
 
+// AlignBatch aligns every query against every target concurrently, using
+// aligner for each pairwise alignment. The sem semaphore bounds the number of
+// alignments running at once. AlignBatch returns immediately with a
+// [PairwiseAlignmentPromise]; call its Result method to wait for completion and
+// retrieve the highest-scoring alignment across all query/target pairs.
 func AlignBatch(aligner PairwiseAligner, sem utils.Semaphore, queries []seqio.SeqQual, targets []seqio.SeqQual) *PairwiseAlignmentPromise {
 	// We will be doing all of the calls in parallel.
 	// The semaphore will keep track of the number of concurrent jobs and

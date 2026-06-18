@@ -23,9 +23,17 @@ type Version struct {
 	major, minor byte
 }
 
+// Predefined CRAM versions accepted by [WriterOpts.SetVersion].
 var (
-	V2  = Version{2, 1}
-	V3  = Version{3, 0}
+	// V2 is CRAM v2.1. Container and block headers carry no CRC32, and the
+	// record counter is encoded as ITF8.
+	V2 = Version{2, 1}
+	// V3 is CRAM v3.0. Container and block headers are CRC32-protected and the
+	// record counter is encoded as LTF8.
+	V3 = Version{3, 0}
+	// V31 is CRAM v3.1 and is the writer default. It is otherwise structured
+	// like [V3] but permits the newer block codecs (rANS Nx16, adaptive
+	// arithmetic, fqzcomp, name tokenizer).
 	V31 = Version{3, 1}
 )
 
@@ -47,29 +55,44 @@ func NewWriterOpts() *WriterOpts {
 	}
 }
 
-func (o *WriterOpts) SetVersion(v Version) *WriterOpts         { o.version = v; return o }
-func (o *WriterOpts) Reference(path string) *WriterOpts        { o.refPath = path; return o }
-func (o *WriterOpts) Level(n int) *WriterOpts                  { o.level = n; return o }
-func (o *WriterOpts) RecordsPerSlice(n int) *WriterOpts        { o.recordsPerSlice = n; return o }
-func (o *WriterOpts) EmbedRef(v bool) *WriterOpts              { o.embedRef = v; return o }
+// SetVersion sets the CRAM version to emit (for example [V2], [V3], or [V31])
+// and returns o for chaining.
+func (o *WriterOpts) SetVersion(v Version) *WriterOpts { o.version = v; return o }
+
+// Reference sets the path to the reference FASTA used to compute read-vs-reference
+// differences and returns o for chaining.
+func (o *WriterOpts) Reference(path string) *WriterOpts { o.refPath = path; return o }
+
+// Level sets the block compression level (0-9, where 0 is fastest and 9 is
+// smallest) and returns o for chaining.
+func (o *WriterOpts) Level(n int) *WriterOpts { o.level = n; return o }
+
+// RecordsPerSlice sets the maximum number of records buffered per slice before a
+// container is flushed and returns o for chaining.
+func (o *WriterOpts) RecordsPerSlice(n int) *WriterOpts { o.recordsPerSlice = n; return o }
+
+// EmbedRef controls whether the reference bases are stored inside the CRAM file
+// (an embedded reference) rather than referenced externally, and returns o for
+// chaining.
+func (o *WriterOpts) EmbedRef(v bool) *WriterOpts { o.embedRef = v; return o }
 
 // Writer writes CRAM files. Implements htsio.SamWriter.
 // It is safe for concurrent use by multiple goroutines.
 type Writer struct {
-	mu             sync.Mutex
-	w              io.Writer
-	closer         io.Closer
-	opts           *WriterOpts
-	header         *htsio.SamHeader
-	refs           []refInfo
-	refMap         map[string]int32
-	readGroupMap   map[string]int32
-	ref            seqio.ReferenceReader
-	recordBuf      []*htsio.SamRecord
-	recordCounter  int64
-	headerWritten  bool
-	closed         bool
-	closeErr       error
+	mu            sync.Mutex
+	w             io.Writer
+	closer        io.Closer
+	opts          *WriterOpts
+	header        *htsio.SamHeader
+	refs          []refInfo
+	refMap        map[string]int32
+	readGroupMap  map[string]int32
+	ref           seqio.ReferenceReader
+	recordBuf     []*htsio.SamRecord
+	recordCounter int64
+	headerWritten bool
+	closed        bool
+	closeErr      error
 }
 
 // NewWriter creates a CRAM writer. If filename is "-", writes to stdout.
@@ -148,7 +171,7 @@ func newWriter(w io.Writer, closer io.Closer, header *htsio.SamHeader, opts *Wri
 	return cw, nil
 }
 
-func (cw *Writer) version() Version { return cw.opts.version }
+func (cw *Writer) version() Version   { return cw.opts.version }
 func (cw *Writer) majorVersion() byte { return cw.opts.version.major }
 
 // Write buffers a record and flushes when the buffer is full.
@@ -463,7 +486,7 @@ func (cw *Writer) buildFeatures(rec *htsio.SamRecord, cr *cramRecord) []cramFeat
 	}
 
 	var features []cramFeature
-	readPos := 0  // 0-based position in read
+	readPos := 0                   // 0-based position in read
 	refPos := int(cr.alignPos) - 1 // 0-based ref position
 
 	// Parse CIGAR.
@@ -664,49 +687,49 @@ func tagComboFromRecord(rec cramRecord) []tagKey {
 
 // Data series block IDs.
 const (
-	blockIDBF = 1
-	blockIDCF = 2
-	blockIDRI = 3
-	blockIDRL = 4
-	blockIDAP = 5
-	blockIDRG = 6
-	blockIDRN = 7
-	blockIDMF = 8
-	blockIDNS = 9
-	blockIDNP = 10
-	blockIDTS = 11
-	blockIDNF = 12
-	blockIDBA = 13
-	blockIDQS = 14
-	blockIDBS = 15
-	blockIDIN = 16
-	blockIDSC = 17
-	blockIDDL = 18
-	blockIDRS = 19
-	blockIDHC = 20
-	blockIDPD = 21
-	blockIDMQ = 22
-	blockIDTL = 23
-	blockIDFN = 24
-	blockIDFC = 25
-	blockIDFP = 26
-	blockIDBB = 27
-	blockIDQQ = 28
-	blockIDEmbeddedRef = 99 // embedded reference block
+	blockIDBF          = 1
+	blockIDCF          = 2
+	blockIDRI          = 3
+	blockIDRL          = 4
+	blockIDAP          = 5
+	blockIDRG          = 6
+	blockIDRN          = 7
+	blockIDMF          = 8
+	blockIDNS          = 9
+	blockIDNP          = 10
+	blockIDTS          = 11
+	blockIDNF          = 12
+	blockIDBA          = 13
+	blockIDQS          = 14
+	blockIDBS          = 15
+	blockIDIN          = 16
+	blockIDSC          = 17
+	blockIDDL          = 18
+	blockIDRS          = 19
+	blockIDHC          = 20
+	blockIDPD          = 21
+	blockIDMQ          = 22
+	blockIDTL          = 23
+	blockIDFN          = 24
+	blockIDFC          = 25
+	blockIDFP          = 26
+	blockIDBB          = 27
+	blockIDQQ          = 28
+	blockIDEmbeddedRef = 99  // embedded reference block
 	blockIDTagBase     = 100 // tags start at 100+
 )
 
 type writerCompressionHeader struct {
-	readNamesPreserved bool
-	apDelta            bool
-	refRequired        bool
+	readNamesPreserved  bool
+	apDelta             bool
+	refRequired         bool
 	dataSeriesEncodings map[string]encodingDescriptor
-	tagEncodings       map[int32]encodingDescriptor
+	tagEncodings        map[int32]encodingDescriptor
 }
 
 type encodingDescriptor struct {
-	codecID  int32
-	params   []byte
+	codecID int32
+	params  []byte
 }
 
 func (cw *Writer) buildCompressionHeader(subMatrix [5][4]byte, tagDict [][]tagKey, records []cramRecord, refID int32) *writerCompressionHeader {
@@ -718,9 +741,9 @@ func (cw *Writer) buildCompressionHeader(subMatrix [5][4]byte, tagDict [][]tagKe
 		// as substitution features against it (reference required); without one,
 		// bases are stored explicitly (reference not required). So keying RR on
 		// reference presence accurately describes the emitted records.
-		refRequired:        cw.ref != nil,
+		refRequired:         cw.ref != nil,
 		dataSeriesEncodings: make(map[string]encodingDescriptor),
-		tagEncodings:       make(map[int32]encodingDescriptor),
+		tagEncodings:        make(map[int32]encodingDescriptor),
 	}
 
 	// All data series use external encoding.

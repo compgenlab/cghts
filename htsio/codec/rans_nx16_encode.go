@@ -690,7 +690,7 @@ func encodeRansNx16WithRLE(data []byte, order int) []byte {
 
 	var out []byte
 	out = append(out, flags)
-	out = varPutU32Slice(out, uint32(len(data)))    // original size
+	out = varPutU32Slice(out, uint32(len(data)))     // original size
 	out = varPutU32Slice(out, uMetaSize)             // meta size (odd = uncompressed)
 	out = varPutU32Slice(out, uint32(len(literals))) // rleLen (core decode output size)
 	out = append(out, rleMeta...)
