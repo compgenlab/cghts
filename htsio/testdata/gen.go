@@ -7,8 +7,8 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/compgen-io/cgkit/htsio"
-	"github.com/compgen-io/cgkit/htsio/bam"
+	"github.com/compgenlab/hts/htsio"
+	"github.com/compgenlab/hts/htsio/bam"
 )
 
 func main() {

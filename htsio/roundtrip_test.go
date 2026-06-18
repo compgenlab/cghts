@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/compgen-io/cgkit/htsio"
-	"github.com/compgen-io/cgkit/htsio/bam"
-	_ "github.com/compgen-io/cgkit/htsio/cram"
-	_ "github.com/compgen-io/cgkit/htsio/sam"
+	"github.com/compgenlab/hts/htsio"
+	"github.com/compgenlab/hts/htsio/bam"
+	_ "github.com/compgenlab/hts/htsio/cram"
+	_ "github.com/compgenlab/hts/htsio/sam"
 )
 
 // samtoolsViewSHA1 returns the SHA1 of `samtools view <file>` output (records only).

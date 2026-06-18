@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/compgen-io/cgkit/htsio"
+	"github.com/compgenlab/hts/htsio"
 )
 
 func minimalHeader() *htsio.SamHeader {

@@ -3,10 +3,10 @@ package htsio_test
 import (
 	"testing"
 
-	"github.com/compgen-io/cgkit/htsio"
-	_ "github.com/compgen-io/cgkit/htsio/bam"
-	_ "github.com/compgen-io/cgkit/htsio/cram"
-	_ "github.com/compgen-io/cgkit/htsio/sam"
+	"github.com/compgenlab/hts/htsio"
+	_ "github.com/compgenlab/hts/htsio/bam"
+	_ "github.com/compgenlab/hts/htsio/cram"
+	_ "github.com/compgenlab/hts/htsio/sam"
 )
 
 func TestBamReaderQuery(t *testing.T) {

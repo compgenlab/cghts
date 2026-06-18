@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/compgen-io/cgkit/htsio"
-	"github.com/compgen-io/cgkit/seqio"
+	"github.com/compgenlab/hts/htsio"
+	"github.com/compgenlab/hts/seqio"
 )
 
 func init() {

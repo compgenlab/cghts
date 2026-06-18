@@ -4,8 +4,8 @@ import (
 	"errors"
 	"iter"
 
-	"github.com/compgen-io/cgkit/support/sequtils"
-	"github.com/compgen-io/cgkit/support/stringutils"
+	"github.com/compgenlab/hts/support/sequtils"
+	"github.com/compgenlab/hts/support/stringutils"
 )
 
 var DirtySeqReaderError = errors.New("input reader is busy")

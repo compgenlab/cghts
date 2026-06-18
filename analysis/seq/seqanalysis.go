@@ -1,6 +1,6 @@
 package seqanalysis
 
-import "github.com/compgen-io/cgkit/seqio"
+import "github.com/compgenlab/hts/seqio"
 
 func CalcGC(s seqio.SeqRecord) float64 {
 	gcCount := 0

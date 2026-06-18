@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/compgen-io/cgkit/seqio"
-	"github.com/compgen-io/cgkit/support/sequtils"
+	"github.com/compgenlab/hts/seqio"
+	"github.com/compgenlab/hts/support/sequtils"
 )
 
 type alignMode int
