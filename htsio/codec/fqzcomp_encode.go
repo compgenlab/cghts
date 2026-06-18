@@ -251,9 +251,10 @@ func fqzWriteParam1(pm *fqzParam) []byte {
 
 // fqzWriteArray encodes an array using double-RLE (reverse of fqzReadArray).
 // The array maps positions → symbol values. The encoding is:
-//   Inner layer: for each symbol 0,1,2,..., count its run length.
-//     Runs > 255 are split into 255-byte continuation segments.
-//   Outer layer: compress the resulting byte stream with consecutive-duplicate RLE.
+//
+//	Inner layer: for each symbol 0,1,2,..., count its run length.
+//	  Runs > 255 are split into 255-byte continuation segments.
+//	Outer layer: compress the resulting byte stream with consecutive-duplicate RLE.
 func fqzWriteArray(array []uint, size int) []byte {
 	// Step 1: Build inner RLE parts.
 	// For each symbol value in order, count how many consecutive positions have that value.

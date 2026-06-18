@@ -91,6 +91,12 @@ func (r *SamtoolsReader) start() error {
 	return nil
 }
 
+// Header returns the parsed [htsio.SamHeader] for the file.
+//
+// On the first call it lazily starts the samtools subprocess (samtools
+// view -h) and consumes the leading @-prefixed header lines from its
+// output. Any error starting samtools or building the command is returned
+// here. The returned header may be nil if the file has no header lines.
 func (r *SamtoolsReader) Header() (*htsio.SamHeader, error) {
 	if err := r.start(); err != nil {
 		return nil, err
@@ -113,6 +119,21 @@ func (r *SamtoolsReader) populateHeader() {
 	}
 }
 
+// Records returns an iterator over the alignment records in the file.
+//
+// It starts the samtools subprocess if it has not already been started
+// (via a prior call to [SamtoolsReader.Header]), then parses each
+// non-header line into a [htsio.SamRecord]. Records that do not satisfy
+// the reader's filters (flag required/filter and minimum mapping quality,
+// applied via opts.PassesFilters) are silently skipped.
+//
+// Iteration stops when the subprocess output is exhausted. If a line fails
+// to parse, or the underlying scanner reports an error, the iterator yields
+// a nil record together with that error and then stops. Errors from
+// starting samtools are likewise yielded as the first (nil, err) pair.
+//
+// Records does not close the reader; call [SamtoolsReader.Close] when done
+// to wait on the subprocess and release its pipes.
 func (r *SamtoolsReader) Records() iter.Seq2[*htsio.SamRecord, error] {
 	return func(yield func(*htsio.SamRecord, error) bool) {
 		if err := r.start(); err != nil {
@@ -162,6 +183,12 @@ func (r *SamtoolsReader) Records() iter.Seq2[*htsio.SamRecord, error] {
 	}
 }
 
+// Close shuts down the samtools subprocess and releases its pipes.
+//
+// It closes stdout, drains and closes stderr, and waits for the process to
+// exit, returning the process's exit status (a non-zero samtools exit is
+// reported as the error from cmd.Wait). If the subprocess was never started,
+// Close is a no-op and returns nil.
 func (r *SamtoolsReader) Close() error {
 	if !r.started {
 		return nil
@@ -179,6 +206,18 @@ func (r *SamtoolsReader) Close() error {
 	return nil
 }
 
+// Query returns an iterator over records overlapping the region
+// [start, end) on reference ref. The start and end coordinates are
+// 0-based half-open and are converted to the 1-based, closed region
+// string (ref:start+1-end) that samtools expects.
+//
+// Query launches an independent samtools subprocess for the region (it
+// does not affect the reader's own streaming state), inheriting the
+// thread, flag, and mapping-quality options of the parent reader. This
+// requires an index for the underlying file, as samtools region queries
+// do. The returned iterator closes its subprocess automatically when
+// iteration finishes or is stopped early, and yields (nil, err) if a line
+// fails to parse or the scanner errors.
 func (r *SamtoolsReader) Query(ref string, start, end int) (iter.Seq2[*htsio.SamRecord, error], error) {
 	region := fmt.Sprintf("%s:%d-%d", ref, start+1, end)
 

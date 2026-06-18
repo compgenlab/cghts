@@ -47,8 +47,11 @@ func NewRemoteFastaReader(url string) (*RemoteFastaReader, error) {
 	}, nil
 }
 
+// Names returns the ordered sequence names from the remote .fai index.
 func (r *RemoteFastaReader) Names() []string { return r.names }
 
+// SequenceLength returns the length of the named sequence, or false if it is
+// not present in the .fai index.
 func (r *RemoteFastaReader) SequenceLength(name string) (int, bool) {
 	entry, ok := r.fai[name]
 	if !ok {
@@ -57,6 +60,10 @@ func (r *RemoteFastaReader) SequenceLength(name string) (int, bool) {
 	return entry.Length, true
 }
 
+// GetSequenceRange returns the bases for [start, end) (0-based, half-open) of
+// the named sequence, fetching any needed 10MB chunks via HTTP Range requests
+// and caching them. The result is uppercased; coordinates are clamped to the
+// sequence bounds. It is safe for concurrent use.
 func (r *RemoteFastaReader) GetSequenceRange(name string, start, end int) ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -102,6 +109,8 @@ func (r *RemoteFastaReader) GetSequenceRange(name string, start, end int) ([]byt
 	return result, nil
 }
 
+// GetSequence returns the full named sequence, uppercased. Prefer
+// [RemoteFastaReader.GetSequenceRange] when only a sub-range is needed.
 func (r *RemoteFastaReader) GetSequence(name string) ([]byte, error) {
 	entry, ok := r.fai[name]
 	if !ok {
@@ -110,6 +119,7 @@ func (r *RemoteFastaReader) GetSequence(name string) ([]byte, error) {
 	return r.GetSequenceRange(name, 0, entry.Length)
 }
 
+// Close releases resources. For a remote reader this is a no-op.
 func (r *RemoteFastaReader) Close() error { return nil }
 
 // loadChunk fetches a single chunk via HTTP Range request, using the cache.

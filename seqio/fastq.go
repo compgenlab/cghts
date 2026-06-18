@@ -10,6 +10,9 @@ import (
 	"strings"
 )
 
+// FastqReader is a streaming, forward-only FASTQ parser. It implements
+// [SeqReader]. Only single-line sequence and quality records are supported
+// (the common case). A FastqReader is not safe for concurrent use.
 type FastqReader struct {
 	filename string
 	file     *os.File
@@ -20,6 +23,8 @@ type FastqReader struct {
 	lastByte byte
 }
 
+// Close closes the underlying file (if the reader was opened from a file) and
+// marks the reader closed. Subsequent reads return [ClosedSeqReaderError].
 func (r *FastqReader) Close() {
 	if r.file != nil {
 		r.file.Close()
@@ -27,6 +32,9 @@ func (r *FastqReader) Close() {
 	r.closed = true
 }
 
+// NewFastqFile opens the named FASTQ file for streaming reads. If the file
+// begins with the gzip magic bytes it is transparently decompressed. The
+// caller should [FastqReader.Close] the reader when done.
 func NewFastqFile(filename string) (*FastqReader, error) {
 	f, err := os.Open(filename) // read-only
 	if err != nil {
@@ -58,6 +66,9 @@ func NewFastqFile(filename string) (*FastqReader, error) {
 	}, nil
 }
 
+// NewFastqReader returns a streaming FASTQ parser over rd. Unlike
+// [NewFastqFile], the input is not inspected for gzip compression. Returns
+// [io.ErrUnexpectedEOF] if rd is nil.
 func NewFastqReader(rd io.Reader) (*FastqReader, error) {
 	if rd == nil {
 		return nil, io.ErrUnexpectedEOF
@@ -72,6 +83,11 @@ func NewFastqReader(rd io.Reader) (*FastqReader, error) {
 	}, nil
 }
 
+// NextFastqSeq returns the next record as a concrete [*FastqSeqRecord]. It
+// returns [io.EOF] at end of input, [ClosedSeqReaderError] if the reader is
+// closed, and [io.ErrUnexpectedEOF] for a malformed record (e.g. a missing
+// "+" separator line). Only single-line sequence/quality records are
+// supported.
 func (r *FastqReader) NextFastqSeq() (*FastqSeqRecord, error) {
 	if r.closed {
 		return nil, ClosedSeqReaderError
@@ -140,10 +156,15 @@ func (r *FastqReader) NextFastqSeq() (*FastqSeqRecord, error) {
 	}
 }
 
+// NextSeq returns the next record as a [SeqRecord], satisfying [SeqReader]. It
+// is a thin wrapper around [FastqReader.NextFastqSeq].
 func (r *FastqReader) NextSeq() (SeqRecord, error) {
 	return r.NextFastqSeq()
 }
 
+// Names returns an iterator over the record names in the file. Because a FASTQ
+// stream cannot be rewound, iterating consumes the reader and closes it when
+// finished. Returns [ClosedSeqReaderError] if the reader is already closed.
 func (r *FastqReader) Names() (iter.Seq[string], error) {
 	if r.closed {
 		return nil, ClosedSeqReaderError
@@ -159,6 +180,10 @@ func (r *FastqReader) Names() (iter.Seq[string], error) {
 	}, nil
 }
 
+// FetchRecord scans forward for the record with the given name and returns it.
+// As the stream cannot be rewound, scanning consumes the reader and closes it;
+// it returns [io.EOF] if no matching record is found and [ClosedSeqReaderError]
+// if the reader is already closed.
 func (r *FastqReader) FetchRecord(name string) (SeqRecord, error) {
 	if r.closed {
 		return nil, ClosedSeqReaderError
@@ -174,7 +199,9 @@ func (r *FastqReader) FetchRecord(name string) (SeqRecord, error) {
 	return nil, io.EOF
 }
 
-// FASTQ records store the full record in memory
+// FastqSeqRecord is a [SeqRecord] produced by [FastqReader]. Unlike FASTA
+// records, a FASTQ record holds its full sequence and quality strings in
+// memory.
 type FastqSeqRecord struct {
 	name    string
 	comment string
@@ -182,6 +209,7 @@ type FastqSeqRecord struct {
 	qual    string
 }
 
+// FullSeq returns the record's sequence and quality as a single [SeqQual].
 func (r *FastqSeqRecord) FullSeq() SeqQual {
 	return SeqQual{
 		name: r.name,
@@ -191,7 +219,8 @@ func (r *FastqSeqRecord) FullSeq() SeqQual {
 	}
 }
 
-// GetChunk implements [SeqRecord].
+// Chunks implements [SeqRecord], yielding the in-memory sequence and quality
+// in pieces of at most length bases each.
 func (r *FastqSeqRecord) Chunks(length int) iter.Seq[SeqQual] {
 	return func(yield func(SeqQual) bool) {
 		curPos := 0
@@ -210,10 +239,12 @@ func (r *FastqSeqRecord) Chunks(length int) iter.Seq[SeqQual] {
 	}
 }
 
+// Name returns the record identifier from the header line.
 func (r *FastqSeqRecord) Name() string {
 	return r.name
 }
 
+// Comment returns any text following the name on the header line.
 func (r *FastqSeqRecord) Comment() string {
 	return r.comment
 }

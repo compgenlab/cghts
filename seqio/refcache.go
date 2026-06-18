@@ -76,13 +76,21 @@ func NewRefCacheReader(md5s map[string]string, lengths map[string]int, names []s
 	return r, nil
 }
 
+// Names returns the ordered sequence names.
 func (r *RefCacheReader) Names() []string { return r.names }
 
+// SequenceLength returns the recorded length of the named sequence, or false
+// if it is unknown.
 func (r *RefCacheReader) SequenceLength(name string) (int, bool) {
 	l, ok := r.lengths[name]
 	return l, ok
 }
 
+// GetSequenceRange returns the bases for [start, end) (0-based, half-open) of
+// the named sequence. The full sequence is resolved on first access via the
+// REF_PATH/REF_CACHE/refget lookup chain and then cached in memory; subsequent
+// ranges are served from that copy. Coordinates are clamped to the sequence
+// bounds. It is safe for concurrent use.
 func (r *RefCacheReader) GetSequenceRange(name string, start, end int) ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -118,6 +126,8 @@ func (r *RefCacheReader) GetSequenceRange(name string, start, end int) ([]byte, 
 	return seq[start:end], nil
 }
 
+// GetSequence returns a copy of the full named sequence, uppercased, resolving
+// it through the REF_PATH/REF_CACHE/refget lookup chain if not already cached.
 func (r *RefCacheReader) GetSequence(name string) ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -131,6 +141,7 @@ func (r *RefCacheReader) GetSequence(name string) ([]byte, error) {
 	return result, nil
 }
 
+// Close releases resources. For a refcache reader this is a no-op.
 func (r *RefCacheReader) Close() error { return nil }
 
 // loadSequence resolves and loads a sequence by name. Must be called with mu held.

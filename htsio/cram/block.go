@@ -14,10 +14,10 @@ import (
 
 // Block compression methods.
 const (
-	blockMethodRaw    = 0
-	blockMethodGzip   = 1
-	blockMethodBzip2  = 2
-	blockMethodLzma   = 3
+	blockMethodRaw      = 0
+	blockMethodGzip     = 1
+	blockMethodBzip2    = 2
+	blockMethodLzma     = 3
 	blockMethodRans4x8  = 4
 	blockMethodRans4x16 = 5
 	blockMethodAdaptive = 6
@@ -27,21 +27,21 @@ const (
 
 // Block content types.
 const (
-	blockContentFileHeader       = 0
+	blockContentFileHeader        = 0
 	blockContentCompressionHeader = 1
-	blockContentSliceHeader      = 2
-	blockContentReserved         = 3
-	blockContentExternalData     = 4
-	blockContentCoreData         = 5
+	blockContentSliceHeader       = 2
+	blockContentReserved          = 3
+	blockContentExternalData      = 4
+	blockContentCoreData          = 5
 )
 
 // block represents a single CRAM block.
 type block struct {
-	method     byte
+	method      byte
 	contentType byte
-	contentID  int32
-	rawSize    int32
-	data       []byte // decompressed data
+	contentID   int32
+	rawSize     int32
+	data        []byte // decompressed data
 }
 
 // readBlock reads and decompresses a single CRAM block.
@@ -181,4 +181,3 @@ func decompressLzma(data []byte) ([]byte, error) {
 	}
 	return io.ReadAll(r)
 }
-

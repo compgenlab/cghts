@@ -4,29 +4,32 @@ import (
 	"strings"
 )
 
-/*
-Convert a DNA base to a number for easier ambiguity checking
-
-bits:
-3210
-TGCA
-
-	0x1 A : Adenine
-	0x2 C : Cytosine
-	0x4 G : Guanine
-	0x8 T : Thymine
-	0x5 R : puRine (A or G)
-	0xA Y : pYrimidine (C or T)
-	0x3 M : aMino (A or C)
-	0xC K : Keto (G or T)
-	0x6 S : Strong interaction (G or C)
-	0x9 W : Weak interaction (A or T)
-	0xE B : not A (C, G, or T)
-	0xD D : not C (A, G, or T)
-	0xB H : not G (A, C, or T)
-	0x7 V : not T (A, C, or G)
-	0xF N : Any nucleotide (A, C, G, or T)
-*/
+// ConvertDNATo4Bit maps a single DNA base (including IUPAC ambiguity codes) to
+// a 4-bit value where each bit represents one of the four standard
+// nucleotides. The bit layout is:
+//
+//	bit 3210
+//	    TGCA
+//
+// An ambiguity code sets the bit for every base it can represent, so two codes
+// "match" when their values share any bit (a bitwise AND greater than zero).
+// Only uppercase bases are recognized; any unrecognized byte returns 0x0.
+//
+//	0x1 A : Adenine
+//	0x2 C : Cytosine
+//	0x4 G : Guanine
+//	0x8 T : Thymine
+//	0x5 R : puRine (A or G)
+//	0xA Y : pYrimidine (C or T)
+//	0x3 M : aMino (A or C)
+//	0xC K : Keto (G or T)
+//	0x6 S : Strong interaction (G or C)
+//	0x9 W : Weak interaction (A or T)
+//	0xE B : not A (C, G, or T)
+//	0xD D : not C (A, G, or T)
+//	0xB H : not G (A, C, or T)
+//	0x7 V : not T (A, C, or G)
+//	0xF N : Any nucleotide (A, C, G, or T)
 func ConvertDNATo4Bit(r byte) byte {
 	switch r {
 	case 'A':
@@ -140,6 +143,11 @@ func dnaComplement(r byte) byte {
 	return r
 }
 
+// ReverseComplement returns the reverse complement of a DNA sequence. Each
+// base is complemented (including IUPAC ambiguity codes) and the order is
+// reversed, so the result reads 5'->3' on the opposite strand. Case is
+// preserved, and any byte that is not a recognized base is passed through
+// unchanged.
 func ReverseComplement(seq string) string {
 	b := []byte(seq)
 	for i := 0; i < len(seq); i++ {
@@ -155,6 +163,12 @@ func byteToUpperASCII(b byte) byte {
 	return b
 }
 
+// DNAMatches reports whether two DNA bases are compatible, accounting for
+// IUPAC ambiguity codes. Comparison is case-insensitive: an exact match
+// (after upper-casing) always returns true, and otherwise the bases match when
+// their 4-bit representations from [ConvertDNATo4Bit] share at least one bit.
+// For example 'A' matches 'R' (A or G) and 'M' (A or C) matches 'C', while
+// 'A' does not match 'C'.
 func DNAMatches(one byte, two byte) bool {
 	one = byteToUpperASCII(one)
 	two = byteToUpperASCII(two)

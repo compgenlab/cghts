@@ -27,6 +27,23 @@ const (
 	ransNx16TotFreq = 1 << ransNx16TFShift
 )
 
+// DecodeRansNx16 decodes a complete rANS Nx16 block (CRAM v3.1 method 5) and
+// returns the uncompressed bytes.
+//
+// The input begins with a one-byte flags field whose low bit selects the model
+// order (0 or 1) and whose remaining bits enable optional transforms applied by
+// the encoder:
+//
+//   - STRIPE: the payload is split into N interleaved sub-streams, each decoded
+//     independently and re-interleaved.
+//   - PACK: symbols from a small alphabet are bit-packed and expanded via a
+//     packing map carried in the header.
+//   - RLE: literal runs are modelled separately from the run lengths.
+//   - CAT: the payload is stored verbatim (no entropy coding).
+//
+// Unless the NOSIZE flag is set, the uncompressed length is read from a varint
+// in the header. The state width is 16-bit and uses 12-bit frequency precision.
+// It returns an error on empty, truncated, or inconsistent input.
 func DecodeRansNx16(data []byte) ([]byte, error) {
 	return decodeRansNx16WithSize(data, 0)
 }

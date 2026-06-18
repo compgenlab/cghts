@@ -413,7 +413,7 @@ func (o *MSAOptions) RefName(refName string) *MSAOptions {
 //     b. Pick the seed pair (highest score, tiebreak longest aligned length).
 //     c. Build the 2-row starting alignment from the seed.
 //     d. Repeatedly compute the consensus, align each remaining read to it
-//        semi-globally, and append the best-scoring read.
+//     semi-globally, and append the best-scoring read.
 //  4. If a reference was supplied, globally align it to the finished
 //     consensus and append it with AddSequence. Global alignment is used
 //     because the ref is expected to span the full locus; we want every

@@ -38,6 +38,10 @@ func NewWriterOpts() *WriterOpts {
 	}
 }
 
+// Columns sets the 1-based column numbers for the sequence name, region
+// start, and region end fields. Passing 0 for end means the records have no
+// explicit end column and the end is treated as start+1. It returns o to
+// allow method chaining.
 func (o *WriterOpts) Columns(seq, beg, end int) *WriterOpts {
 	o.colSeq = int32(seq)
 	o.colBeg = int32(beg)
@@ -45,26 +49,40 @@ func (o *WriterOpts) Columns(seq, beg, end int) *WriterOpts {
 	return o
 }
 
+// Meta sets the comment/meta character (such as '#'). Lines beginning with
+// this character are treated as comments and are not indexed. It returns o to
+// allow method chaining.
 func (o *WriterOpts) Meta(ch byte) *WriterOpts {
 	o.meta = int32(ch)
 	return o
 }
 
+// Skip sets the number of leading header lines to skip when indexing. It
+// returns o to allow method chaining.
 func (o *WriterOpts) Skip(n int) *WriterOpts {
 	o.skip = int32(n)
 	return o
 }
 
+// ZeroBased marks the input start coordinates as 0-based (as in BED). By
+// default coordinates are treated as 1-based and are decremented internally to
+// the 0-based convention used by the index. It returns o to allow method
+// chaining.
 func (o *WriterOpts) ZeroBased() *WriterOpts {
 	o.zeroBased = true
 	return o
 }
 
+// AutoIndex enables generation of a companion .tbi index alongside the output
+// file when the Writer is closed. It returns o to allow method chaining.
 func (o *WriterOpts) AutoIndex() *WriterOpts {
 	o.autoIndex = true
 	return o
 }
 
+// BED configures the options for BED files: sequence in column 1, start in
+// column 2, end in column 3, no meta character, and 0-based coordinates. It
+// returns o to allow method chaining.
 func (o *WriterOpts) BED() *WriterOpts {
 	o.colSeq = 1
 	o.colBeg = 2
@@ -74,6 +92,9 @@ func (o *WriterOpts) BED() *WriterOpts {
 	return o
 }
 
+// VCF configures the options for VCF files: sequence in column 1, position in
+// column 2, no end column, '#' meta character, and 1-based coordinates. It
+// returns o to allow method chaining.
 func (o *WriterOpts) VCF() *WriterOpts {
 	o.colSeq = 1
 	o.colBeg = 2
@@ -83,6 +104,9 @@ func (o *WriterOpts) VCF() *WriterOpts {
 	return o
 }
 
+// GFF configures the options for GFF/GTF files: sequence in column 1, start in
+// column 4, end in column 5, '#' meta character, and 1-based coordinates. It
+// returns o to allow method chaining.
 func (o *WriterOpts) GFF() *WriterOpts {
 	o.colSeq = 1
 	o.colBeg = 4
@@ -132,10 +156,24 @@ func NewWriter(filename string, opts *WriterOpts) *Writer {
 	}
 }
 
+// WriteHeader queues a header line to be emitted, in order, ahead of the
+// sorted data lines when the Writer is closed. The line is written verbatim
+// (a trailing newline is added) and is not sorted or indexed. Header lines
+// should be added before any data lines are written.
 func (tw *Writer) WriteHeader(line string) {
 	tw.headerLines = append(tw.headerLines, line)
 }
 
+// Write buffers a single data line for output. The line's reference name and
+// start coordinate are parsed using the configured columns (start is
+// decremented to 0-based unless ZeroBased is set) so the line can be sorted by
+// reference order of first appearance and then by start position. Lines are
+// held in memory and spilled to temporary BGZF files once the in-memory buffer
+// exceeds the memory limit; the final sorted, BGZF-compressed output (and
+// optional .tbi index) is produced by Close.
+//
+// Write is safe for concurrent use. It returns an error if the writer is
+// already closed, if a prior error occurred, or if the line cannot be parsed.
 func (tw *Writer) Write(line string) error {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
@@ -170,6 +208,12 @@ func (tw *Writer) Write(line string) error {
 	return nil
 }
 
+// Close finalizes the output. It sorts any buffered lines, merges any spilled
+// temporary files via a k-way merge, writes the header lines followed by the
+// sorted data lines to the BGZF output file, and (if AutoIndex was set) writes
+// a companion .tbi index. Temporary files are removed afterward. Close is
+// idempotent: calling it more than once returns nil after the first call. It
+// returns the first error encountered during writing or merging.
 func (tw *Writer) Close() error {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()

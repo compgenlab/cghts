@@ -10,6 +10,10 @@ import (
 	"strings"
 )
 
+// FastaReader is a streaming, forward-only FASTA parser. It implements
+// [SeqReader]. Records are read one at a time with [FastaReader.NextSeq] and
+// stream their sequence on demand, so very large sequences need not be held in
+// memory. A FastaReader is not safe for concurrent use.
 type FastaReader struct {
 	filename string
 	file     *os.File
@@ -20,6 +24,8 @@ type FastaReader struct {
 	lastByte byte
 }
 
+// Close closes the underlying file (if the reader was opened from a file) and
+// marks the reader closed. Subsequent reads return [ClosedSeqReaderError].
 func (r *FastaReader) Close() {
 	if r.file != nil {
 		r.file.Close()
@@ -27,6 +33,10 @@ func (r *FastaReader) Close() {
 	r.closed = true
 }
 
+// NewFastaFile opens the named FASTA file for streaming reads. If the file
+// begins with the gzip magic bytes it is transparently decompressed. The
+// caller should [FastaReader.Close] the reader when done. For random access by
+// name and position, use [NewIndexedFastaReader] instead.
 func NewFastaFile(filename string) (*FastaReader, error) {
 	f, err := os.Open(filename) // read-only
 	if err != nil {
@@ -62,6 +72,9 @@ func NewFastaFile(filename string) (*FastaReader, error) {
 	}, nil
 }
 
+// NewFastaReader returns a streaming FASTA parser over rd. Unlike
+// [NewFastaFile], the input is not inspected for gzip compression; wrap rd in a
+// gzip reader yourself if needed. Returns [io.ErrUnexpectedEOF] if rd is nil.
 func NewFastaReader(rd io.Reader) (*FastaReader, error) {
 	if rd == nil {
 		return nil, io.ErrUnexpectedEOF
@@ -76,6 +89,11 @@ func NewFastaReader(rd io.Reader) (*FastaReader, error) {
 	}, nil
 }
 
+// NextSeq returns the next FASTA record as a [SeqRecord], or an error. It
+// returns [io.EOF] at end of input and [ClosedSeqReaderError] if the reader is
+// closed. The returned record streams its sequence from the same underlying
+// reader, so it must be consumed (via FullSeq or Chunks) before the next call
+// to NextSeq.
 func (r *FastaReader) NextSeq() (SeqRecord, error) {
 	if r.closed {
 		return nil, ClosedSeqReaderError
@@ -118,6 +136,9 @@ func (r *FastaReader) NextSeq() (SeqRecord, error) {
 	}
 }
 
+// Names returns an iterator over the record names in the file. Because a
+// FASTA stream cannot be rewound, iterating consumes the reader and closes it
+// when finished. Returns [ClosedSeqReaderError] if the reader is already closed.
 func (r *FastaReader) Names() (iter.Seq[string], error) {
 	if r.closed {
 		return nil, ClosedSeqReaderError
@@ -133,6 +154,10 @@ func (r *FastaReader) Names() (iter.Seq[string], error) {
 	}, nil
 }
 
+// FetchRecord scans forward for the record with the given name and returns it.
+// As the stream cannot be rewound, scanning consumes the reader and closes it;
+// it returns [io.EOF] if no matching record is found and [ClosedSeqReaderError]
+// if the reader is already closed.
 func (r *FastaReader) FetchRecord(name string) (SeqRecord, error) {
 	if r.closed {
 		return nil, ClosedSeqReaderError
@@ -148,9 +173,10 @@ func (r *FastaReader) FetchRecord(name string) (SeqRecord, error) {
 	return nil, io.EOF
 }
 
-// FASTA records will extract the seq from a reader,
-// so they don't have to be fully loaded into memory at once
-// (FASTA records can be very large).
+// FastaSeqRecord is a [SeqRecord] produced by [FastaReader]. It extracts its
+// sequence from the underlying reader on demand rather than loading it up
+// front, so arbitrarily large records can be streamed. Its sequence must be
+// consumed before the parent reader advances to the next record.
 type FastaSeqRecord struct {
 	name    string
 	comment string
@@ -161,6 +187,9 @@ type FastaSeqRecord struct {
 	lastByte byte
 }
 
+// FullSeq reads the record's entire sequence into memory and returns it as a
+// [SeqQual] (with no quality). Newlines are stripped. The reader is left
+// positioned at the start of the next record's header.
 func (r *FastaSeqRecord) FullSeq() SeqQual {
 	// Read the entire sequence into memory
 	var buf strings.Builder
@@ -247,10 +276,12 @@ func (r *FastaSeqRecord) Chunks(length int) iter.Seq[SeqQual] {
 	}
 }
 
+// Name returns the record identifier from the header line.
 func (r *FastaSeqRecord) Name() string {
 	return r.name
 }
 
+// Comment returns any text following the name on the header line.
 func (r *FastaSeqRecord) Comment() string {
 	return r.comment
 }

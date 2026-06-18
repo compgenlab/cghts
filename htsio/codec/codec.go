@@ -1,20 +1,3 @@
-// Package codec provides general-purpose byte-level codecs used by CRAM
-// and potentially other HTS formats.
-//
-// Each codec supports both a simple []byte API and streaming io.Reader/io.Writer
-// interfaces. The streaming interfaces read/write complete compressed blocks —
-// they do not support incremental compression across multiple blocks.
-//
-// Decoder usage:
-//
-//	decoder := codec.NewRans4x8Decoder(compressedReader)
-//	decoded, err := io.ReadAll(decoder)
-//
-// Encoder usage:
-//
-//	encoder := codec.NewRans4x8Encoder(outputWriter, codec.Order0)
-//	encoder.Write(data)
-//	encoder.Close() // compresses and flushes to outputWriter
 package codec
 
 import (

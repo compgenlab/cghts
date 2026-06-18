@@ -13,8 +13,12 @@ import (
 // Chunk represents a contiguous range of BGZF virtual offsets containing
 // alignment records or text lines.
 type Chunk struct {
+	// Begin is the BGZF virtual offset of the first byte of the chunk
+	// (inclusive).
 	Begin bgzf.VirtualOffset
-	End   bgzf.VirtualOffset
+	// End is the BGZF virtual offset just past the last byte of the chunk
+	// (exclusive).
+	End bgzf.VirtualOffset
 }
 
 // binIndex holds the bins and linear index for one reference sequence.

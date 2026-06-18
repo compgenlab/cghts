@@ -24,6 +24,25 @@ const (
 
 const arithMaxRun = 4
 
+// DecodeArithDynamic decodes a complete adaptive arithmetic-coded block
+// (CRAM v3.1 method 6) and returns the uncompressed bytes.
+//
+// The input must begin with a one-byte flags field whose low two bits select
+// the model order (0 or 1) and whose remaining bits enable the optional
+// transforms applied by the encoder:
+//
+//   - STRIPE: the payload is split into N interleaved sub-streams, each
+//     decoded independently and re-interleaved.
+//   - PACK: symbols drawn from a small alphabet are bit-packed; a packing map
+//     in the header is used to expand them.
+//   - RLE: run lengths are modelled separately from literal symbols.
+//   - CAT: the payload is stored verbatim (no entropy coding).
+//   - EXT: the payload is bzip2-compressed.
+//
+// Unless the NOSIZE flag is set, the uncompressed length is read from a varint
+// in the header. It returns an error if the data is empty, truncated, or
+// internally inconsistent (for example a STRIPE sub-stream that decodes to the
+// wrong length).
 func DecodeArithDynamic(data []byte) ([]byte, error) {
 	return decodeArithDynamicWithSize(data, 0)
 }
@@ -363,4 +382,3 @@ func arithUncompressO1RLE(data []byte, outSize uint32) ([]byte, error) {
 	}
 	return out, nil
 }
-

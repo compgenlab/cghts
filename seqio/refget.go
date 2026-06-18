@@ -10,7 +10,8 @@ import (
 )
 
 const (
-	// Default EBI refget endpoint for CRAM reference sequences.
+	// DefaultRefgetServer is the default EBI refget endpoint used to resolve
+	// CRAM reference sequences by MD5 when no other server is configured.
 	DefaultRefgetServer = "https://www.ebi.ac.uk/ena/cram/md5"
 )
 
@@ -64,13 +65,21 @@ func NewRefgetReader(md5s map[string]string, lengths map[string]int, names []str
 	return r, nil
 }
 
+// Names returns the ordered sequence names.
 func (r *RefgetReader) Names() []string { return r.names }
 
+// SequenceLength returns the known length of the named sequence, or false if
+// no length is recorded for it.
 func (r *RefgetReader) SequenceLength(name string) (int, bool) {
 	l, ok := r.lengths[name]
 	return l, ok
 }
 
+// GetSequenceRange returns the bases for [start, end) (0-based, half-open) of
+// the named sequence, fetching any needed chunks from the refget server and
+// caching them. If the sequence length is unknown it is first retrieved from
+// the server's metadata endpoint. The result is uppercased and coordinates are
+// clamped. It is safe for concurrent use.
 func (r *RefgetReader) GetSequenceRange(name string, start, end int) ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -127,6 +136,9 @@ func (r *RefgetReader) GetSequenceRange(name string, start, end int) ([]byte, er
 	return result, nil
 }
 
+// GetSequence returns the full named sequence, uppercased. It requires the
+// sequence length to be known; prefer [RefgetReader.GetSequenceRange] when only
+// a sub-range is needed.
 func (r *RefgetReader) GetSequence(name string) ([]byte, error) {
 	length, ok := r.lengths[name]
 	if !ok {
@@ -135,6 +147,7 @@ func (r *RefgetReader) GetSequence(name string) ([]byte, error) {
 	return r.GetSequenceRange(name, 0, length)
 }
 
+// Close releases resources. For a refget reader this is a no-op.
 func (r *RefgetReader) Close() error { return nil }
 
 // loadChunk fetches a chunk from the refget server, using the cache.

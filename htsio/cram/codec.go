@@ -8,16 +8,16 @@ import (
 
 // Codec IDs from the CRAM spec.
 const (
-	codecNull         = 0
-	codecExternal     = 1
-	codecGolomb       = 2 // not used in v3
-	codecHuffman      = 3
-	codecByteArrayLen = 4
+	codecNull          = 0
+	codecExternal      = 1
+	codecGolomb        = 2 // not used in v3
+	codecHuffman       = 3
+	codecByteArrayLen  = 4
 	codecByteArrayStop = 5
-	codecBeta         = 6
-	codecSubexp       = 7
-	codecGolombRice   = 8 // not used in v3
-	codecGamma        = 9
+	codecBeta          = 6
+	codecSubexp        = 7
+	codecGolombRice    = 8 // not used in v3
+	codecGamma         = 9
 )
 
 // dataCodec is the interface for all CRAM data series encoding codecs.

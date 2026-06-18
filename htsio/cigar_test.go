@@ -4,16 +4,16 @@ import "testing"
 
 func TestCigarQueryLen(t *testing.T) {
 	cases := map[string]int{
-		"*":         0,
-		"":          0,
-		"10M":       10,
-		"5M1I4M":    10, // M+I+M consume query
-		"3S10M2S":   15, // soft clips consume query
-		"10M5D10M":  20, // D does not consume query
-		"10M3N10M":  20, // N does not consume query
-		"5H10M5H":   10, // hard clips do not consume query
-		"4M2P4M":    8,  // padding does not consume query
-		"100M":      100,
+		"*":        0,
+		"":         0,
+		"10M":      10,
+		"5M1I4M":   10, // M+I+M consume query
+		"3S10M2S":  15, // soft clips consume query
+		"10M5D10M": 20, // D does not consume query
+		"10M3N10M": 20, // N does not consume query
+		"5H10M5H":  10, // hard clips do not consume query
+		"4M2P4M":   8,  // padding does not consume query
+		"100M":     100,
 	}
 	for cigar, want := range cases {
 		if got := CigarQueryLen(cigar); got != want {
@@ -27,7 +27,7 @@ func TestValidateCigarSeq(t *testing.T) {
 		cigar, seq string
 		wantErr    bool
 	}{
-		{"10M", "ACGTACGTAC", false},   // 10 == 10
+		{"10M", "ACGTACGTAC", false},    // 10 == 10
 		{"5M1I4M", "ACGTAACGTA", false}, // query len 10 == 10
 		{"3S7M", "ACGTACGTAC", false},   // 10 == 10
 		{"*", "ACGT", false},            // unspecified CIGAR — skip

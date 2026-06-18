@@ -7,15 +7,15 @@ import (
 
 // sliceHeader holds metadata for a CRAM slice.
 type sliceHeader struct {
-	refSeqID       int32
-	alignmentStart int32
-	alignmentSpan  int32
-	numRecords     int32
-	recordCounter  int64
-	numBlocks      int32
+	refSeqID        int32
+	alignmentStart  int32
+	alignmentSpan   int32
+	numRecords      int32
+	recordCounter   int64
+	numBlocks       int32
 	blockContentIDs []int32
-	embeddedRefID  int32
-	referenceMD5   [16]byte
+	embeddedRefID   int32
+	referenceMD5    [16]byte
 }
 
 func readSliceHeader(data []byte) (*sliceHeader, error) {

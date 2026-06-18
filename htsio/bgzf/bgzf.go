@@ -1,10 +1,3 @@
-// Package bgzf implements reading and writing of BGZF (Blocked GNU Zip Format)
-// files as defined in the SAM/BAM specification. BGZF is a multi-member gzip
-// format where each member (block) contains at most 64 KiB of uncompressed data
-// and carries an extra field (BSIZE) recording the total block size minus one.
-//
-// Virtual offsets encode both the compressed block offset and the uncompressed
-// offset within the block as (blockOffset << 16 | withinBlockOffset).
 package bgzf
 
 import (
@@ -48,6 +41,8 @@ var bgzfEOFBlock = []byte{
 // VirtualOffset encodes a position in a BGZF file as the compressed block
 // offset in the upper 48 bits and the uncompressed offset within the block
 // in the lower 16 bits.
+//
+// Concretely, the value is (blockOffset << 16 | withinBlockOffset).
 type VirtualOffset uint64
 
 // NewVirtualOffset creates a VirtualOffset from a block offset and an

@@ -33,15 +33,15 @@ const (
 )
 
 type fqzParam struct {
-	context  uint16
-	pflags   uint
-	doSel    bool
-	doDedup  bool
+	context   uint16
+	pflags    uint
+	doSel     bool
+	doDedup   bool
 	storeQmap bool
-	fixedLen bool
-	useQtab  bool
-	useDtab  bool
-	usePtab  bool
+	fixedLen  bool
+	useQtab   bool
+	useDtab   bool
+	usePtab   bool
 
 	qbits, qloc uint
 	ploc, dloc  uint
@@ -58,13 +58,13 @@ type fqzParam struct {
 }
 
 type fqzGParams struct {
-	vers    int
-	gflags  uint
-	nparam  int
-	maxSel  int
-	stab    [256]uint
-	maxSym  int
-	p       []fqzParam
+	vers   int
+	gflags uint
+	nparam int
+	maxSel int
+	stab   [256]uint
+	maxSym int
+	p      []fqzParam
 }
 
 type fqzState struct {

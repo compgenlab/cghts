@@ -54,6 +54,19 @@ type descriptor struct {
 	pos  int
 }
 
+// DecodeNameTokenizer decodes a tok3 name-tokenizer block (CRAM v3.1 method 8)
+// and returns the reconstructed read names, each terminated by a NUL byte.
+//
+// The block begins with a 9-byte header: the uncompressed length and the read
+// count (both little-endian uint32) followed by a flag byte selecting the
+// entropy backend. Only the rANS Nx16 backend is supported; a block flagged for
+// arithmetic coding is rejected. The header is followed by per-token descriptor
+// streams, each compressed with [DecodeRansNx16], which are replayed to rebuild
+// names token by token using DUP, DIFF, MATCH, and delta operations against
+// previously decoded names.
+//
+// It returns an error on a short or truncated block, an implausible read count,
+// an out-of-range descriptor reference, or any malformed token stream.
 func DecodeNameTokenizer(data []byte) ([]byte, error) {
 	if len(data) < 9 {
 		return nil, fmt.Errorf("tok3: data too short")

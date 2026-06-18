@@ -93,16 +93,16 @@ func TestFqzcompRoundtripLargerFixed(t *testing.T) {
 		quals[i] = byte(30 + i%5)
 	}
 	readLengths := []int{100, 100}
-	
+
 	encoded := EncodeFqzcomp(quals, readLengths)
 	decoded, err := DecodeFqzcomp(encoded)
 	if err != nil {
 		t.Fatalf("decode error: %v", err)
 	}
-	
+
 	for i := 0; i < len(quals); i++ {
 		if decoded[i] != quals[i] {
-			t.Errorf("mismatch at %d: got %d, want %d (read %d, pos %d)", 
+			t.Errorf("mismatch at %d: got %d, want %d (read %d, pos %d)",
 				i, decoded[i], quals[i], i/100, i%100)
 			if i > 20 {
 				t.FailNow()
