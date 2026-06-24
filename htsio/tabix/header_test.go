@@ -56,6 +56,41 @@ func TestColumnNamesFromSkippedHeader(t *testing.T) {
 	}
 }
 
+func TestColumnNamesMetaCommentButNoSkip(t *testing.T) {
+	// A '#'-comment header line with Skip=0 is NOT a column header: without a
+	// skipped line there is no header, even though the comment line exists.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "meta.tab.gz")
+	w := NewWriter(path, NewWriterOpts().Columns(1, 2, 0).Meta('#').AutoIndex()) // Skip defaults to 0
+	w.WriteHeader("#chrom\tpos\tref\talt\tscore")
+	if err := w.Write("chr1\t100\tA\tG\t0.9"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	names, err := r.ColumnNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 0 {
+		t.Errorf("ColumnNames = %v, want none (Skip=0 => no header)", names)
+	}
+	if _, err := r.ColumnByName("alt"); err == nil {
+		t.Error("expected error: a meta comment without a skipped line is not a header")
+	}
+	// The comment line must not break data queries.
+	if got := queryLines(t, r, "chr1", 99, 100); len(got) != 1 {
+		t.Errorf("query rows = %v, want 1", got)
+	}
+}
+
 func TestColumnNamesNoHeader(t *testing.T) {
 	// No skipped line => no column header, even with a meta character.
 	dir := t.TempDir()

@@ -172,6 +172,17 @@ func TestTabixColumnByNameMissing(t *testing.T) {
 	}
 }
 
+func TestTabixColumnByNameNoHeaderFile(t *testing.T) {
+	// scores.tab.gz has no header line (no skipped line); requesting a column by
+	// name must fail.
+	_, err := NewTabixAnnotator(TabixOptions{
+		Name: "X", Filename: "testdata/scores.tab.gz", ColName: "score",
+	})
+	if err == nil {
+		t.Error("expected error: cannot resolve a column name on a headerless file")
+	}
+}
+
 func TestTabixExtend(t *testing.T) {
 	// chr1:115 is just outside the BED region [90,110); --extend reaches it.
 	h, recs := bedRecs(t, "chr1\t115\t.\tA\tG\t.\tPASS\t.\tGT\t0/1")
