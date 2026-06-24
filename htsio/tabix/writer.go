@@ -354,12 +354,13 @@ func (tw *Writer) writeFinal(lines []tabixLine) error {
 	}
 
 	for _, l := range lines {
-		if ib != nil {
-			ib.addRecord(l, w.VirtualTell())
-		}
+		begin := w.VirtualTell()
 		if _, err := io.WriteString(w, l.line+"\n"); err != nil {
 			w.Close()
 			return err
+		}
+		if ib != nil {
+			ib.addRecord(l, begin, w.VirtualTell())
 		}
 	}
 
@@ -432,12 +433,13 @@ func (tw *Writer) mergeFiles() error {
 
 	for h.Len() > 0 {
 		item := h.pop()
-		if ib != nil {
-			ib.addRecord(item.line, outFile.VirtualTell())
-		}
+		begin := outFile.VirtualTell()
 		if _, err := io.WriteString(outFile, item.line.line+"\n"); err != nil {
 			outFile.Close()
 			return err
+		}
+		if ib != nil {
+			ib.addRecord(item.line, begin, outFile.VirtualTell())
 		}
 
 		r := readers[item.readerIdx]
@@ -487,7 +489,11 @@ func newTBIIndexBuilder(opts *WriterOpts, refOrder []string) *tbiIndexBuilder {
 	}
 }
 
-func (ib *tbiIndexBuilder) addRecord(l tabixLine, vo bgzf.VirtualOffset) {
+// addRecord records one data line in the index. begin is the virtual offset of
+// the start of the line and end is the virtual offset just past it (the start of
+// the next line); end is used to close the chunk so that the final record of a
+// reference is covered by a non-empty chunk.
+func (ib *tbiIndexBuilder) addRecord(l tabixLine, begin, end bgzf.VirtualOffset) {
 	rb, ok := ib.refs[l.ref]
 	if !ok {
 		rb = &tbiRefBuilder{
@@ -497,34 +503,34 @@ func (ib *tbiIndexBuilder) addRecord(l tabixLine, vo bgzf.VirtualOffset) {
 		ib.refs[l.ref] = rb
 	}
 
-	end := l.start + 1
+	recEnd := l.start + 1
 	fields := strings.Split(l.line, "\t")
 	colEnd := int(ib.opts.colEnd) - 1
 	if ib.opts.colEnd != 0 && colEnd >= 0 && colEnd < len(fields) {
 		if e, err := strconv.Atoi(fields[colEnd]); err == nil {
-			end = e
+			recEnd = e
 		}
 	}
 
-	bin := Reg2Bin(l.start, end)
+	bin := Reg2Bin(l.start, recEnd)
 
 	chunks := rb.bins[uint32(bin)]
 	if len(chunks) > 0 {
 		last := &chunks[len(chunks)-1]
-		if vo.BlockOffset() == last.End.BlockOffset() || vo == last.End {
-			last.End = vo
+		if begin.BlockOffset() == last.End.BlockOffset() || begin == last.End {
+			last.End = end
 		} else {
-			chunks = append(chunks, Chunk{Begin: vo, End: vo})
+			chunks = append(chunks, Chunk{Begin: begin, End: end})
 		}
 	} else {
-		chunks = append(chunks, Chunk{Begin: vo, End: vo})
+		chunks = append(chunks, Chunk{Begin: begin, End: end})
 	}
 	rb.bins[uint32(bin)] = chunks
-	rb.lastVO = vo
+	rb.lastVO = end
 
 	window := l.start >> 14
-	if existing, ok := rb.linearIdx[window]; !ok || vo < existing {
-		rb.linearIdx[window] = vo
+	if existing, ok := rb.linearIdx[window]; !ok || begin < existing {
+		rb.linearIdx[window] = begin
 	}
 }
 

@@ -1,0 +1,4 @@
+chr1	100	A	G	0.9	hotspot
+chr1	100	A	T	0.5	other
+chr1	150	A	C	0.7	cold
+chr2	500	C	A	0.3	deepC

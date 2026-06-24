@@ -67,6 +67,20 @@ func formatDef(id, number, typ, desc string) *vcf.AnnotationDef {
 	return &vcf.AnnotationDef{IsInfo: false, ID: id, Number: number, Type: typ, Description: desc}
 }
 
+// infoDefSrc builds an ##INFO definition with a Source (the originating file).
+func infoDefSrc(id, number, typ, desc, source string) *vcf.AnnotationDef {
+	d := infoDef(id, number, typ, desc)
+	d.Source = source
+	return d
+}
+
+// formatDefSrc builds an ##FORMAT definition with a Source (the originating file).
+func formatDefSrc(id, number, typ, desc, source string) *vcf.AnnotationDef {
+	d := formatDef(id, number, typ, desc)
+	d.Source = source
+	return d
+}
+
 // headerSetuper is the common header step of Annotator and StreamWrapper.
 type headerSetuper interface {
 	SetupHeader(h *vcf.VcfHeader) error
