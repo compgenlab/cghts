@@ -1,0 +1,9 @@
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FILTER=<ID=rej,Description="rejected">
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele freq">
+##INFO=<ID=GENE,Number=1,Type=String,Description="gene">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	100	rsA	A	G	.	PASS	AF=0.20;GENE=BRCA
+chr1	150	rsB	A	C	.	rej	AF=0.10;GENE=TP53
+chr2	500	rsC	CAT	C	.	PASS	GENE=MYC
