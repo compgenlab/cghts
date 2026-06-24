@@ -43,8 +43,12 @@ func (w *VcfWriter) WriteHeader(h *VcfHeader) error {
 	return err
 }
 
-// WriteRecord writes a record's raw line verbatim.
+// WriteRecord writes a record. An unmodified record is emitted verbatim; a
+// modified one (see [VcfRecord.Dirty]) is reconstructed from its parsed model.
 func (w *VcfWriter) WriteRecord(rec *VcfRecord) error {
+	if rec.dirty {
+		return w.WriteLine(rec.serialize())
+	}
 	return w.WriteLine(rec.Line())
 }
 

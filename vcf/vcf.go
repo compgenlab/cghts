@@ -162,6 +162,29 @@ func (a *Attributes) put(key string, v AttrValue) {
 	a.vals[key] = v
 }
 
+// Set adds or replaces a key with a raw string value.
+func (a *Attributes) Set(key, value string) { a.put(key, AttrValue{raw: value}) }
+
+// SetFlag adds a key as a bare flag (empty value).
+func (a *Attributes) SetFlag(key string) { a.put(key, AttrValue{raw: ""}) }
+
+// SetValue adds or replaces a key with an [AttrValue].
+func (a *Attributes) SetValue(key string, v AttrValue) { a.put(key, v) }
+
+// Remove deletes a key.
+func (a *Attributes) Remove(key string) {
+	if _, ok := a.vals[key]; !ok {
+		return
+	}
+	delete(a.vals, key)
+	for i, k := range a.keys {
+		if k == key {
+			a.keys = append(a.keys[:i], a.keys[i+1:]...)
+			break
+		}
+	}
+}
+
 // Get returns the value for key. The boolean is false when the key is absent
 // (distinct from a present-but-missing "." value).
 func (a *Attributes) Get(key string) (AttrValue, bool) {
@@ -189,6 +212,48 @@ func (a *Attributes) FindKeys(glob string) []string {
 	return out
 }
 
+// infoString renders the attributes as a VCF INFO field: bare key for a flag,
+// "key=value" otherwise, in insertion order; "." when empty. Ports
+// VCFAttributes.toString.
+func (a *Attributes) infoString() string {
+	if len(a.keys) == 0 {
+		return missing
+	}
+	parts := make([]string, 0, len(a.keys))
+	for _, k := range a.keys {
+		v := a.vals[k]
+		if v.IsEmpty() {
+			parts = append(parts, k)
+		} else {
+			parts = append(parts, k+"="+v.raw)
+		}
+	}
+	return strings.Join(parts, ";")
+}
+
+// formatString renders the attributes as a per-sample FORMAT value for the given
+// ordered format keys: missing ("." ) for absent keys, GT kept if present, and
+// trailing missing values trimmed. Ports VCFAttributes.toString(format).
+func (a *Attributes) formatString(format []string) string {
+	vals := make([]string, len(format))
+	for i, k := range format {
+		if v, ok := a.vals[k]; ok {
+			vals[i] = v.raw
+		} else {
+			vals[i] = missing
+		}
+	}
+	limit := 0
+	if len(format) > 0 && format[0] == "GT" {
+		limit = 1
+	}
+	end := len(vals)
+	for end > limit && vals[end-1] == missing {
+		end--
+	}
+	return strings.Join(vals[:end], ":")
+}
+
 // VcfRecord is a single VCF data line. The leading CHROM/POS/REF columns are
 // parsed eagerly; everything else is parsed on first access and cached. See the
 // package documentation for the lazy-parsing contract.
@@ -199,9 +264,16 @@ type VcfRecord struct {
 	tabs  [8]int // byte offsets of the first up-to-8 tab characters
 	ntabs int
 
+	// dirty is set by any mutation; a dirty record is reconstructed from the
+	// parsed model on write rather than emitted verbatim.
+	dirty bool
+
 	Chrom string
 	Pos   int // 1-based
 	Ref   string
+
+	idDone bool
+	id     string
 
 	altDone bool
 	alt     []string
@@ -294,6 +366,29 @@ func newRecord(line string, header *VcfHeader) (*VcfRecord, error) {
 	return r, nil
 }
 
+// NewRecord builds a VcfRecord from a bare CHROM/POS/REF/ALT tuple, with no ID,
+// QUAL, FILTER (PASS), INFO, or samples. The record is "dirty" — it has no
+// backing line, so it is always serialized from its model on write. Annotators
+// can mutate it like any parsed record. This lets annotation code run on plain
+// variant tuples, not just parsed VCF lines.
+func NewRecord(chrom string, pos int, ref string, alt []string) *VcfRecord {
+	return &VcfRecord{
+		Chrom:    chrom,
+		Pos:      pos,
+		Ref:      ref,
+		dirty:    true,
+		idDone:   true,
+		altDone:  true,
+		alt:      append([]string(nil), alt...),
+		qualDone: true,
+		qual:     -1,
+		filtDone: true, // nil filters => PASS
+		infoDone: true,
+		info:     newAttributes(),
+		fmtDone:  true, // no samples
+	}
+}
+
 // Line returns the raw source line (without a trailing newline).
 func (r *VcfRecord) Line() string { return r.line }
 
@@ -302,11 +397,15 @@ func (r *VcfRecord) Header() *VcfHeader { return r.header }
 
 // ID returns the ID column, or "" when it is the missing marker ".".
 func (r *VcfRecord) ID() string {
-	s, _ := r.fixedCol(2)
-	if s == missing {
-		return ""
+	if !r.idDone {
+		s, _ := r.fixedCol(2)
+		if s == missing {
+			s = ""
+		}
+		r.id = s
+		r.idDone = true
 	}
-	return s
+	return r.id
 }
 
 // AltOrig returns the raw ALT column verbatim.
@@ -482,6 +581,101 @@ func (r *VcfRecord) SampleByName(name string) (*Attributes, error) {
 
 // ZeroBasedStart returns Pos-1, the 0-based start used for BED-style output.
 func (r *VcfRecord) ZeroBasedStart() int { return r.Pos - 1 }
+
+// Dirty reports whether the record has been modified since it was read (and so
+// must be reconstructed on write rather than emitted verbatim).
+func (r *VcfRecord) Dirty() bool { return r.dirty }
+
+// MarkDirty flags the record as modified. Call this after mutating Info() or a
+// Sample() in place; the record-level mutators below do it for you.
+func (r *VcfRecord) MarkDirty() { r.dirty = true }
+
+// SetID sets the ID column (use "" to clear it to ".").
+func (r *VcfRecord) SetID(id string) {
+	r.id = id
+	r.idDone = true
+	r.dirty = true
+}
+
+// ClearID clears the ID column to ".".
+func (r *VcfRecord) ClearID() { r.SetID("") }
+
+// AddInfo sets an INFO key to a value.
+func (r *VcfRecord) AddInfo(key, value string) {
+	r.Info().Set(key, value)
+	r.dirty = true
+}
+
+// AddInfoFlag sets an INFO flag (bare key, no value).
+func (r *VcfRecord) AddInfoFlag(key string) {
+	r.Info().SetFlag(key)
+	r.dirty = true
+}
+
+// AddFormat sets a FORMAT key to a value for the given sample. The key is
+// appended to that sample's fields (and becomes part of the FORMAT column on
+// write). Annotators that add a per-sample field call this for every sample.
+func (r *VcfRecord) AddFormat(sampleIdx int, key, value string) error {
+	s, err := r.Sample(sampleIdx)
+	if err != nil {
+		return err
+	}
+	s.Set(key, value)
+	r.dirty = true
+	return nil
+}
+
+// filterField renders the FILTER column: PASS when no filters, "." when the
+// column was explicitly missing, else the codes joined by ";". Ports the FILTER
+// logic in VCFRecord.write.
+func (r *VcfRecord) filterField() string {
+	f := r.Filters()
+	if f == nil {
+		return pass
+	}
+	if len(f) == 0 {
+		return missing
+	}
+	return strings.Join(f, ";")
+}
+
+// serialize reconstructs the full VCF line from the parsed model. It is used for
+// records that have been modified; it ports ngsutilsj VCFRecord.write (ID/ALT/
+// QUAL/FILTER/INFO rules, FORMAT keys derived from the first sample, per-sample
+// trailing-missing trim).
+func (r *VcfRecord) serialize() string {
+	cols := make([]string, 0, 8+r.NumSamples()+1)
+	cols = append(cols, r.Chrom, strconv.Itoa(r.Pos))
+	if id := r.ID(); id == "" {
+		cols = append(cols, missing)
+	} else {
+		cols = append(cols, id)
+	}
+	cols = append(cols, r.Ref)
+	if alt := r.Alt(); len(alt) == 0 {
+		cols = append(cols, missing)
+	} else {
+		cols = append(cols, strings.Join(alt, ","))
+	}
+	if q := r.Qual(); q == -1 {
+		cols = append(cols, missing)
+	} else {
+		cols = append(cols, formatFloat(q))
+	}
+	cols = append(cols, r.filterField())
+	cols = append(cols, r.Info().infoString())
+
+	if n := r.NumSamples(); n > 0 {
+		s0, _ := r.Sample(0)
+		formatKeys := s0.Keys()
+		cols = append(cols, strings.Join(formatKeys, ":"))
+		for i := 0; i < n; i++ {
+			si, _ := r.Sample(i)
+			cols = append(cols, si.formatString(formatKeys))
+		}
+	}
+	return strings.Join(cols, "\t")
+}
 
 // IsIndel reports whether the REF or any ALT allele is longer than one base.
 func (r *VcfRecord) IsIndel() bool {
