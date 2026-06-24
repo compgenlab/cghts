@@ -37,6 +37,9 @@ type Reader struct {
 	f    *os.File
 	idx  tabixIndex
 	meta tabixMeta
+
+	colNames     []string
+	colNamesRead bool
 }
 
 // Record holds a single parsed line from a tabix query along with the
@@ -117,6 +120,65 @@ func (tr *Reader) Close() error {
 // Meta returns the tabix metadata (column definitions, coordinate system).
 func (tr *Reader) Meta() tabixMeta {
 	return tr.meta
+}
+
+// ColumnNames returns the column names from the file's header line, with a
+// leading meta character (e.g. '#') stripped. The header is identified the
+// tabix way: the last of the index's skipped lines. A file with no skipped
+// lines (Skip == 0) has no column header and this returns nil. The result is
+// cached.
+func (tr *Reader) ColumnNames() ([]string, error) {
+	if tr.colNamesRead {
+		return tr.colNames, nil
+	}
+	tr.colNamesRead = true
+
+	if tr.meta.Skip <= 0 {
+		return nil, nil // no skipped line => no header
+	}
+	if err := tr.ir.SeekToVirtualOffset(0); err != nil {
+		return nil, fmt.Errorf("tabix: reading header: %w", err)
+	}
+	sc := bufio.NewScanner(tr.ir)
+	sc.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+
+	header := ""
+	for n := 0; n < int(tr.meta.Skip); n++ {
+		if !sc.Scan() {
+			break
+		}
+		header = sc.Text()
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("tabix: reading header: %w", err)
+	}
+	if header == "" {
+		return nil, nil
+	}
+	if tr.meta.Meta != 0 && header[0] == byte(tr.meta.Meta) {
+		header = header[1:]
+	}
+	tr.colNames = strings.Split(header, "\t")
+	return tr.colNames, nil
+}
+
+// ColumnByName returns the 1-based column number for the named column, matching
+// it against the header (see [Reader.ColumnNames]). It returns an error when the
+// file has no header or the name is not found.
+func (tr *Reader) ColumnByName(name string) (int, error) {
+	names, err := tr.ColumnNames()
+	if err != nil {
+		return 0, err
+	}
+	if len(names) == 0 {
+		return 0, fmt.Errorf("tabix: file has no column header to resolve %q", name)
+	}
+	for i, n := range names {
+		if n == name {
+			return i + 1, nil
+		}
+	}
+	return 0, fmt.Errorf("tabix: column %q not found in header", name)
 }
 
 // Query returns an iterator over Records overlapping the 0-based

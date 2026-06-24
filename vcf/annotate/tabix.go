@@ -20,6 +20,9 @@ type TabixOptions struct {
 	Col      int    // 1-based value column; 0 = presence flag
 	AltCol   int    // 1-based ALT-match column; 0 = none
 	RefCol   int    // 1-based REF-match column; 0 = none
+	ColName  string // value column by header name (overrides Col when set)
+	AltName  string // ALT-match column by header name (overrides AltCol)
+	RefName  string // REF-match column by header name (overrides RefCol)
 	IsNumber bool   // declare the value Float (required by Max)
 	Collapse bool   // join unique values with ","
 	First    bool   // keep only the first value
@@ -42,11 +45,31 @@ type TabixAnnotator struct {
 	sampleIdx int
 }
 
-// NewTabixAnnotator opens the tabix-indexed file and returns the annotator.
+// NewTabixAnnotator opens the tabix-indexed file and returns the annotator. Any
+// column specified by name (ColName/AltName/RefName) is resolved against the
+// file's header.
 func NewTabixAnnotator(opts TabixOptions) (*TabixAnnotator, error) {
 	r, err := tabix.NewReader(opts.Filename)
 	if err != nil {
 		return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+	}
+	for _, res := range []struct {
+		name string
+		col  *int
+	}{
+		{opts.ColName, &opts.Col},
+		{opts.AltName, &opts.AltCol},
+		{opts.RefName, &opts.RefCol},
+	} {
+		if res.name == "" {
+			continue
+		}
+		n, err := r.ColumnByName(res.name)
+		if err != nil {
+			r.Close()
+			return nil, fmt.Errorf("annotate: %w", err)
+		}
+		*res.col = n
 	}
 	return &TabixAnnotator{
 		opts:      opts,

@@ -145,6 +145,33 @@ func TestTabixColMultiAndAggregate(t *testing.T) {
 	}
 }
 
+func TestTabixColumnByName(t *testing.T) {
+	// scores_hdr.tab.gz has a header (#chrom pos ref alt score label) indexed
+	// with Skip(1), so columns can be referenced by name.
+	h, recs := bedRecs(t, "chr1\t100\t.\tA\tG\t.\tPASS\t.\tGT\t0/1")
+	a := runTabix(t, TabixOptions{
+		Name:     "LBL",
+		Filename: "testdata/scores_hdr.tab.gz",
+		ColName:  "label",
+		AltName:  "alt",
+		RefName:  "ref",
+	}, h, recs)
+	defer a.Close()
+	// chr1:100 A>G -> the "hot" row (alt=G), label column.
+	if v, ok := recs[0].Info().Get("LBL"); !ok || v.String() != "hot" {
+		t.Errorf("LBL by name = %q ok=%v, want hot", v.String(), ok)
+	}
+}
+
+func TestTabixColumnByNameMissing(t *testing.T) {
+	_, err := NewTabixAnnotator(TabixOptions{
+		Name: "X", Filename: "testdata/scores_hdr.tab.gz", ColName: "nope",
+	})
+	if err == nil {
+		t.Error("expected error for unknown column name")
+	}
+}
+
 func TestTabixExtend(t *testing.T) {
 	// chr1:115 is just outside the BED region [90,110); --extend reaches it.
 	h, recs := bedRecs(t, "chr1\t115\t.\tA\tG\t.\tPASS\t.\tGT\t0/1")
