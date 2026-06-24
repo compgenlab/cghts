@@ -625,6 +625,28 @@ func (r *VcfRecord) AddFormat(sampleIdx int, key, value string) error {
 	return nil
 }
 
+// AddFilter appends a FILTER code to the record (marking it as failing that
+// filter). A record with no codes is PASS.
+func (r *VcfRecord) AddFilter(code string) {
+	_ = r.Filters() // ensure parsed
+	r.filters = append(r.filters, code)
+	r.dirty = true
+}
+
+// ClearFilters removes all FILTER codes, returning the record to PASS.
+func (r *VcfRecord) ClearFilters() {
+	r.filters = nil
+	r.filtDone = true
+	r.dirty = true
+}
+
+// SetFilters replaces the FILTER codes (an empty slice clears to PASS).
+func (r *VcfRecord) SetFilters(codes []string) {
+	r.filters = append([]string(nil), codes...)
+	r.filtDone = true
+	r.dirty = true
+}
+
 // filterField renders the FILTER column: PASS when no filters, "." when the
 // column was explicitly missing, else the codes joined by ";". Ports the FILTER
 // logic in VCFRecord.write.
