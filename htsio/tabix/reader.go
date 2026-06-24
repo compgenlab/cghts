@@ -122,6 +122,11 @@ func (tr *Reader) Meta() tabixMeta {
 	return tr.meta
 }
 
+// HasRef reports whether the index contains the given reference name.
+func (tr *Reader) HasRef(ref string) bool {
+	return tr.idx.RefID(ref) >= 0
+}
+
 // ColumnNames returns the column names from the file's header line, with a
 // leading meta character (e.g. '#') stripped. The header is identified the
 // tabix way: the last of the index's skipped lines. A file with no skipped

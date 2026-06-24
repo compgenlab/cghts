@@ -73,6 +73,12 @@ func (r *IndexedVcfReader) Query(ref string, start, end int) (iter.Seq2[*VcfReco
 	}, nil
 }
 
+// HasRef reports whether the index contains the given reference. Use it to skip
+// a query that would otherwise fail for a reference absent from this file.
+func (r *IndexedVcfReader) HasRef(ref string) bool {
+	return r.tr.HasRef(ref)
+}
+
 // Close releases resources held by the reader.
 func (r *IndexedVcfReader) Close() error {
 	return r.tr.Close()
