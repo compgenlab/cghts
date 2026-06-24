@@ -250,9 +250,15 @@ func (tw *Writer) Close() error {
 }
 
 func (tw *Writer) parseLine(line string) (tabixLine, error) {
+	return parseTabixLine(line, tw.opts)
+}
+
+// parseTabixLine extracts the reference name and 0-based start coordinate from a
+// data line using the column/coordinate settings in opts.
+func parseTabixLine(line string, opts *WriterOpts) (tabixLine, error) {
 	fields := strings.Split(line, "\t")
-	colSeq := int(tw.opts.colSeq) - 1
-	colBeg := int(tw.opts.colBeg) - 1
+	colSeq := int(opts.colSeq) - 1
+	colBeg := int(opts.colBeg) - 1
 
 	if colSeq < 0 || colSeq >= len(fields) {
 		return tabixLine{}, fmt.Errorf("tabix: seq column %d out of range for line with %d fields", colSeq+1, len(fields))
@@ -267,7 +273,7 @@ func (tw *Writer) parseLine(line string) (tabixLine, error) {
 		return tabixLine{}, fmt.Errorf("tabix: parsing start: %w", err)
 	}
 
-	if !tw.opts.zeroBased {
+	if !opts.zeroBased {
 		beg--
 	}
 
