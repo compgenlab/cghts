@@ -1,0 +1,18 @@
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##FILTER=<ID=lowqual,Description="Low quality, score < 30">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total Depth">
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele Frequency">
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=END,Number=1,Type=Integer,Description="End position">
+##INFO=<ID=DB,Number=0,Type=Flag,Description="dbSNP membership">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##contig=<ID=chr1,length=248956422>
+##contig=<ID=chr2,length=242193529>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	NORMAL	TUMOR
+chr1	100	rs1	A	G	50.0	PASS	DP=30;AF=0.5;DB	GT:AD	0/0:28,2	0/1:15,15
+chr1	200	.	C	T	20.0	lowqual	DP=10;AF=0.1	GT:AD	0/0:9,1	0/1:5,5
+chr1	300	.	G	GA	40.0	PASS	DP=25	GT:AD	0/0:25,0	0/1:12,13
+chr2	500	.	A	<DEL>	99.0	PASS	SVTYPE=DEL;END=900	GT	0/0	0/1
+chr2	1000	bnd1	T	T[chr5:2000[	60.0	PASS	SVTYPE=BND	GT	0/0	0/1

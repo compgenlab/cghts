@@ -85,15 +85,20 @@ func (h *SamHeader) ReadGroups() []string {
 	return rgs
 }
 
-// AddPGLine appends a @PG header line with PN:{pn} and the current command line.
-// The id is used for the ID field. If a @PG line with the same ID already exists
-// in the header, a numeric suffix (.1, .2, etc.) is appended to make it unique.
-// Extra tab-delimited fields (e.g. "DS:...") can be appended via extras.
-func (h *SamHeader) AddPGLine(id string, pn string, extras ...string) {
+// AddPGLine appends a @PG header line with PN:{pn}, an optional VN:{vn} program
+// version, and the current command line. The id is used for the ID field. If a
+// @PG line with the same ID already exists in the header, a numeric suffix (.1,
+// .2, etc.) is appended to make it unique. A blank vn omits the VN field. Extra
+// tab-delimited fields (e.g. "DS:...") can be appended via extras.
+func (h *SamHeader) AddPGLine(id, pn, vn string, extras ...string) {
 	uniqueID := h.uniquePGID(id)
 	cl := strings.Join(os.Args, " ")
 	var line strings.Builder
-	line.WriteString(fmt.Sprintf("@PG\tID:%s\tPN:%s\tCL:%s", uniqueID, pn, cl))
+	line.WriteString(fmt.Sprintf("@PG\tID:%s\tPN:%s", uniqueID, pn))
+	if vn != "" {
+		line.WriteString("\tVN:" + vn)
+	}
+	line.WriteString("\tCL:" + cl)
 	for _, extra := range extras {
 		line.WriteString("\t" + extra)
 	}
