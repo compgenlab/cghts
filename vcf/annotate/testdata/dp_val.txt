@@ -1,0 +1,2 @@
+30	common
+25	rare
