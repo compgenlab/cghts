@@ -262,6 +262,66 @@ func (h *VcfHeader) RemoveContig(id string) {
 	}
 }
 
+// RemoveInfo drops an ##INFO definition.
+func (h *VcfHeader) RemoveInfo(id string) {
+	if _, ok := h.infoDefs[id]; !ok {
+		return
+	}
+	delete(h.infoDefs, id)
+	h.infoOrder = removeID(h.infoOrder, id)
+}
+
+// RemoveFormat drops an ##FORMAT definition.
+func (h *VcfHeader) RemoveFormat(id string) {
+	if _, ok := h.formatDefs[id]; !ok {
+		return
+	}
+	delete(h.formatDefs, id)
+	h.formatOrd = removeID(h.formatOrd, id)
+}
+
+// RemoveFilter drops an ##FILTER definition.
+func (h *VcfHeader) RemoveFilter(id string) {
+	if _, ok := h.filterDefs[id]; !ok {
+		return
+	}
+	delete(h.filterDefs, id)
+	h.filterOrd = removeID(h.filterOrd, id)
+}
+
+// FilterIDs returns the ##FILTER IDs in header order.
+func (h *VcfHeader) FilterIDs() []string { return h.filterOrd }
+
+// RenameSample renames an existing sample. old may be a sample name or a 1-based
+// number (as accepted by SampleIndex). It errors if old is not found or if new
+// already names a different sample.
+func (h *VcfHeader) RenameSample(old, new string) error {
+	i := h.SampleIndex(old)
+	if i < 0 || i >= len(h.samples) {
+		return fmt.Errorf("vcf: sample not found: %s", old)
+	}
+	if h.samples[i] == new {
+		return nil
+	}
+	if _, exists := h.sampleIdx[new]; exists {
+		return fmt.Errorf("vcf: sample already exists: %s", new)
+	}
+	delete(h.sampleIdx, h.samples[i])
+	h.samples[i] = new
+	h.sampleIdx[new] = i
+	return nil
+}
+
+// removeID returns order with the first occurrence of id removed.
+func removeID(order []string, id string) []string {
+	for i, v := range order {
+		if v == id {
+			return append(order[:i], order[i+1:]...)
+		}
+	}
+	return order
+}
+
 // AddAlt registers (or replaces) an ##ALT definition.
 func (h *VcfHeader) AddAlt(d *AltDef) {
 	if _, ok := h.altDefs[d.ID]; !ok {

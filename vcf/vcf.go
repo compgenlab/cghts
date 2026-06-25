@@ -590,6 +590,88 @@ func (r *VcfRecord) Dirty() bool { return r.dirty }
 // Sample() in place; the record-level mutators below do it for you.
 func (r *VcfRecord) MarkDirty() { r.dirty = true }
 
+// SetChrom replaces the CHROM column.
+func (r *VcfRecord) SetChrom(chrom string) {
+	r.Chrom = chrom
+	r.dirty = true
+}
+
+// SubsetSamples rebuilds the record's sample columns to the given 0-based column
+// indices (in order). An empty slice drops all sample (and FORMAT) columns. An
+// out-of-range index emits ".". It ports the sample-column projection used by
+// vcf-reorder/vcf-strip; serialize() then emits the kept samples.
+func (r *VcfRecord) SubsetSamples(indices []int) {
+	r.ensureFormat()
+	raw := make([]string, 0, len(indices))
+	parsed := make([]*Attributes, 0, len(indices))
+	for _, idx := range indices {
+		if idx >= 0 && idx < len(r.sampleRaw) {
+			raw = append(raw, r.sampleRaw[idx])
+			parsed = append(parsed, r.samples[idx])
+		} else {
+			raw = append(raw, missing)
+			parsed = append(parsed, nil)
+		}
+	}
+	r.sampleRaw = raw
+	r.samples = parsed
+	r.dirty = true
+}
+
+// GenotypeBases resolves the GT of sample i to ref/alt bases (e.g. "A/G"),
+// using REF and the parsed ALT alleles. It returns ok=false when GT is absent,
+// not diploid, has a missing allele, or references an unknown allele index. It
+// ports vcf-sample-export's --gt conversion (output is always "/"-joined).
+func (r *VcfRecord) GenotypeBases(i int) (string, bool) {
+	s, err := r.Sample(i)
+	if err != nil {
+		return "", false
+	}
+	gt, ok := s.Get("GT")
+	if !ok {
+		return "", false
+	}
+	return resolveGenotypeBases(gt.String(), r.Ref, r.Alt())
+}
+
+func resolveGenotypeBases(gt, ref string, alts []string) (string, bool) {
+	var parts []string
+	switch {
+	case strings.Contains(gt, "/"):
+		parts = strings.Split(gt, "/")
+	case strings.Contains(gt, "|"):
+		parts = strings.Split(gt, "|")
+	default:
+		return "", false
+	}
+	if len(parts) != 2 || parts[0] == missing || parts[1] == missing {
+		return "", false
+	}
+	a0, ok := alleleBase(parts[0], ref, alts)
+	if !ok {
+		return "", false
+	}
+	a1, ok := alleleBase(parts[1], ref, alts)
+	if !ok {
+		return "", false
+	}
+	return a0 + "/" + a1, true
+}
+
+func alleleBase(s, ref string, alts []string) (string, bool) {
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return "", false
+	}
+	if n == 0 {
+		return ref, true
+	}
+	if n-1 < len(alts) {
+		return alts[n-1], true
+	}
+	return "", false
+}
+
 // SetID sets the ID column (use "" to clear it to ".").
 func (r *VcfRecord) SetID(id string) {
 	r.id = id
@@ -643,6 +725,28 @@ func (r *VcfRecord) ClearFilters() {
 // SetFilters replaces the FILTER codes (an empty slice clears to PASS).
 func (r *VcfRecord) SetFilters(codes []string) {
 	r.filters = append([]string(nil), codes...)
+	r.filtDone = true
+	r.dirty = true
+}
+
+// RetainFilters keeps only the FILTER codes for which keep returns true,
+// removing the rest in place. Unlike SetFilters it preserves the PASS-vs-"."
+// distinction: a PASS record (no codes) is left untouched, while a record that
+// already carried codes stays non-PASS (rendering ".") even when emptied. This
+// matches ngsutilsj's parse-time filter stripping (vcf-strip). Marks dirty when
+// the record carried codes.
+func (r *VcfRecord) RetainFilters(keep func(code string) bool) {
+	cur := r.Filters()
+	if cur == nil {
+		return
+	}
+	kept := cur[:0]
+	for _, f := range cur {
+		if keep(f) {
+			kept = append(kept, f)
+		}
+	}
+	r.filters = kept
 	r.filtDone = true
 	r.dirty = true
 }
