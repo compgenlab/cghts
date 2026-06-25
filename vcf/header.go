@@ -180,6 +180,20 @@ func (h *VcfHeader) InfoIDs() []string { return h.infoOrder }
 // FormatIDs returns the ##FORMAT field IDs in header order.
 func (h *VcfHeader) FormatIDs() []string { return h.formatOrd }
 
+// AltIDs returns the ##ALT IDs in header order.
+func (h *VcfHeader) AltIDs() []string { return h.altOrd }
+
+// AltDef returns the ##ALT definition for id, if present.
+func (h *VcfHeader) AltDef(id string) (*AltDef, bool) {
+	d, ok := h.altDefs[id]
+	return d, ok
+}
+
+// OtherLines returns the preserved non-structured ## metadata lines (anything
+// that is not a recognized INFO/FILTER/FORMAT/contig/ALT/fileformat line), in
+// original order.
+func (h *VcfHeader) OtherLines() []string { return h.otherLines }
+
 // MatchInfoIDs returns the ##INFO IDs matching the given glob (* and ?), in
 // header order.
 func (h *VcfHeader) MatchInfoIDs(glob string) []string {
