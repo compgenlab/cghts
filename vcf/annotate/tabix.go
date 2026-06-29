@@ -130,6 +130,9 @@ func (a *TabixAnnotator) Annotate(rec *vcf.VcfRecord) error {
 		}
 	}
 
+	if !a.reader.HasRef(chrom) {
+		return nil // contig not in this file → nothing to annotate
+	}
 	seq, err := a.reader.Query(chrom, pos-1-a.opts.Extend, endpos+a.opts.Extend)
 	if err != nil {
 		return err
