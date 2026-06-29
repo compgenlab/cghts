@@ -86,6 +86,18 @@ func TestTabixBED(t *testing.T) {
 	}
 }
 
+// TestTabixUnknownContigNoOp: a record on a contig absent from the file annotates
+// nothing and returns no error, so a multi-file source can run every file's
+// annotator per record.
+func TestTabixUnknownContigNoOp(t *testing.T) {
+	h, recs := bedRecs(t, "chrZ\t100\t.\tA\tG\t.\tPASS\t.\tGT\t0/1") // chrZ not in regions.bed.gz
+	a := runTabix(t, TabixOptions{Name: "REGION", Filename: "testdata/regions.bed.gz", Col: 4}, h, recs)
+	defer a.Close()
+	if _, ok := recs[0].Info().Get("REGION"); ok {
+		t.Error("record on an absent contig should not be annotated")
+	}
+}
+
 func TestTabixBedFlag(t *testing.T) {
 	h, recs := bedRecs(t,
 		"chr1\t100\t.\tA\tG\t.\tPASS\t.\tGT\t0/1",
