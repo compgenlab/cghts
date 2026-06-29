@@ -1,6 +1,9 @@
 package vcf
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // ToUCSC converts a chromosome name to UCSC form: a "chr" prefix is added, and
 // the mitochondrial contig "MT" becomes "chrM". Names already starting with
@@ -43,4 +46,52 @@ var PrimaryHumanContigs = map[string]bool{
 // human contig.
 func IsPrimaryHuman(chrom string) bool {
 	return PrimaryHumanContigs[strings.TrimPrefix(chrom, "chr")]
+}
+
+// CanonicalContig returns a canonical chromosome key (Ensembl-style: "1".."22",
+// "X", "Y", "MT") for a human primary contig named in UCSC ("chr1"/"chrM"),
+// Ensembl ("1"/"MT"/"M"), or NCBI RefSeq ("NC_000001.11") form. ok is false for
+// names outside the primary set (unplaced scaffolds, alt loci, NCBI NT_/NW_,
+// non-human accessions); callers fall back to exact-name matching. It underpins
+// [ContigConverter] and the vcf-annotate --auto-convert option.
+func CanonicalContig(name string) (key string, ok bool) {
+	// UCSC/Ensembl: strip a "chr" prefix, normalize the mitochondrion to "MT".
+	s := strings.ToUpper(strings.TrimPrefix(name, "chr"))
+	if s == "M" {
+		s = "MT"
+	}
+	if PrimaryHumanContigs[s] {
+		return s, true
+	}
+	return ncbiCanonical(name)
+}
+
+// ncbiCanonical maps a human NCBI RefSeq accession to its canonical key. The
+// primary chromosomes are NC_000001..NC_000024 (1-22, then 23=X, 24=Y) and the
+// rCRS mitochondrion is NC_012920. The accession version (".11") is ignored, so
+// the mapping is assembly-independent (GRCh37 and GRCh38 both resolve).
+func ncbiCanonical(name string) (string, bool) {
+	const prefix = "NC_"
+	if !strings.HasPrefix(name, prefix) {
+		return "", false
+	}
+	digits := name[len(prefix):]
+	if i := strings.IndexByte(digits, '.'); i >= 0 {
+		digits = digits[:i] // drop the version suffix
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil {
+		return "", false
+	}
+	switch {
+	case n == 12920:
+		return "MT", true
+	case n >= 1 && n <= 22:
+		return strconv.Itoa(n), true
+	case n == 23:
+		return "X", true
+	case n == 24:
+		return "Y", true
+	}
+	return "", false
 }

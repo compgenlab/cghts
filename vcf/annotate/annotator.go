@@ -51,6 +51,16 @@ type CoordAware interface {
 	SetEndPos(key string)
 }
 
+// ContigMatcher is implemented by annotators that query an external file by
+// genomic locus and can tolerate cross-scheme contig naming (UCSC/Ensembl/NCBI).
+// The CLI calls EnableContigMatching on every annotator that implements it when
+// --auto-convert is set. Equivalently, a library consumer sets AutoConvert in the
+// annotator's options. Both build a [vcf.ContigConverter] from the source file's
+// contig names.
+type ContigMatcher interface {
+	EnableContigMatching()
+}
+
 // closeNoop is embedded by annotators with no resources to release.
 type closeNoop struct{}
 

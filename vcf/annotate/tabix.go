@@ -29,6 +29,10 @@ type TabixOptions struct {
 	Max      bool   // keep the numeric maximum (".0"-trimmed)
 	Extend   int    // widen the query by N bases on each side
 	NoHeader bool   // do not add a ##INFO/##FORMAT def
+
+	// AutoConvert matches contig names across UCSC/Ensembl/NCBI naming (human
+	// primary contigs 1-22,X,Y,MT) instead of requiring an exact-string match.
+	AutoConvert bool
 }
 
 // TabixAnnotator adds INFO or FORMAT annotations from a tabix-indexed file. It
@@ -43,6 +47,7 @@ type TabixAnnotator struct {
 	altCol    int // 0-based; -1 = none
 	refCol    int // 0-based; -1 = none
 	sampleIdx int
+	conv      *vcf.ContigConverter // non-nil when contig-name matching is enabled
 }
 
 // NewTabixAnnotator opens the tabix-indexed file and returns the annotator. Any
@@ -71,14 +76,25 @@ func NewTabixAnnotator(opts TabixOptions) (*TabixAnnotator, error) {
 		}
 		*res.col = n
 	}
-	return &TabixAnnotator{
+	a := &TabixAnnotator{
 		opts:      opts,
 		reader:    r,
 		col:       opts.Col - 1,
 		altCol:    opts.AltCol - 1,
 		refCol:    opts.RefCol - 1,
 		sampleIdx: -1,
-	}, nil
+	}
+	if opts.AutoConvert {
+		a.EnableContigMatching()
+	}
+	return a, nil
+}
+
+// EnableContigMatching turns on cross-scheme contig-name matching (UCSC/Ensembl/
+// NCBI) by building a converter from the source file's contig names. It
+// implements [ContigMatcher] so the CLI's --auto-convert flag can enable it.
+func (a *TabixAnnotator) EnableContigMatching() {
+	a.conv = vcf.NewContigConverter(a.reader.RefNames())
 }
 
 // SetupHeader resolves the sample (for FORMAT) and adds the ##INFO/##FORMAT def.
@@ -130,7 +146,11 @@ func (a *TabixAnnotator) Annotate(rec *vcf.VcfRecord) error {
 		}
 	}
 
-	if !a.reader.HasRef(chrom) {
+	if a.conv != nil {
+		if chrom, ok = a.conv.Resolve(chrom); !ok {
+			return nil // no contig in this file shares the query's identity
+		}
+	} else if !a.reader.HasRef(chrom) {
 		return nil // contig not in this file → nothing to annotate
 	}
 	seq, err := a.reader.Query(chrom, pos-1-a.opts.Extend, endpos+a.opts.Extend)

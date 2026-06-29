@@ -18,6 +18,10 @@ type VcfOptions struct {
 	Passing  bool   // only consider source records that pass filters
 	Unique   bool   // de-duplicate (sorted) when multiple values match
 	NoHeader bool   // do not add a ##INFO def
+
+	// AutoConvert matches contig names across UCSC/Ensembl/NCBI naming (human
+	// primary contigs 1-22,X,Y,MT) instead of requiring an exact-string match.
+	AutoConvert bool
 }
 
 // VcfAnnotation annotates a record from a tabix-indexed source VCF: it adds a
@@ -28,7 +32,8 @@ type VcfAnnotation struct {
 	base
 	opts   VcfOptions
 	reader *vcf.IndexedVcfReader
-	isID   bool // Name == "@ID": copy the source ID into the record ID
+	isID   bool                 // Name == "@ID": copy the source ID into the record ID
+	conv   *vcf.ContigConverter // non-nil when contig-name matching is enabled
 }
 
 // NewVcfAnnotation opens the source VCF and returns the annotator.
@@ -41,7 +46,18 @@ func NewVcfAnnotation(opts VcfOptions) (*VcfAnnotation, error) {
 	if isID {
 		opts.Exact = true // ID copy is exact-match only
 	}
-	return &VcfAnnotation{opts: opts, reader: r, isID: isID}, nil
+	a := &VcfAnnotation{opts: opts, reader: r, isID: isID}
+	if opts.AutoConvert {
+		a.EnableContigMatching()
+	}
+	return a, nil
+}
+
+// EnableContigMatching turns on cross-scheme contig-name matching (UCSC/Ensembl/
+// NCBI) by building a converter from the source VCF's contig names. It
+// implements [ContigMatcher] so the CLI's --auto-convert flag can enable it.
+func (a *VcfAnnotation) EnableContigMatching() {
+	a.conv = vcf.NewContigConverter(a.reader.RefNames())
 }
 
 // SetupHeader adds the ##INFO def (none for @ID or NoHeader).
@@ -66,7 +82,11 @@ func (a *VcfAnnotation) Annotate(rec *vcf.VcfRecord) error {
 	if !ok {
 		return nil
 	}
-	if !a.reader.HasRef(chrom) {
+	if a.conv != nil {
+		if chrom, ok = a.conv.Resolve(chrom); !ok {
+			return nil
+		}
+	} else if !a.reader.HasRef(chrom) {
 		return nil
 	}
 	// Exact-position query (no deletion shift): a VCF:VCF comparison matches the

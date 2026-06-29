@@ -79,6 +79,13 @@ func (r *IndexedVcfReader) HasRef(ref string) bool {
 	return r.tr.HasRef(ref)
 }
 
+// RefNames returns the contig names present in the index, in reference order.
+// Pass the result to [vcf.NewContigConverter] to match query contigs against
+// this file's naming scheme.
+func (r *IndexedVcfReader) RefNames() []string {
+	return r.tr.RefNames()
+}
+
 // Close releases resources held by the reader.
 func (r *IndexedVcfReader) Close() error {
 	return r.tr.Close()

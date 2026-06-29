@@ -16,6 +16,7 @@ import (
 type tabixIndex interface {
 	Query(refID int, start, end int) []Chunk
 	RefID(name string) int
+	RefNames() []string
 }
 
 // tabixMeta holds the column definitions and coordinate metadata from
@@ -125,6 +126,12 @@ func (tr *Reader) Meta() tabixMeta {
 // HasRef reports whether the index contains the given reference name.
 func (tr *Reader) HasRef(ref string) bool {
 	return tr.idx.RefID(ref) >= 0
+}
+
+// RefNames returns the reference sequence names present in the index, in
+// reference order. It is the contig list used to build a contig-name converter.
+func (tr *Reader) RefNames() []string {
+	return tr.idx.RefNames()
 }
 
 // ColumnNames returns the column names from the file's header line, with a
