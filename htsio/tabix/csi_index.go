@@ -270,3 +270,6 @@ func (idx *CSIIndex) RefID(name string) int {
 	}
 	return -1
 }
+
+// RefNames returns the reference sequence names, in reference order.
+func (idx *CSIIndex) RefNames() []string { return idx.Names }

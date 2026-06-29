@@ -86,6 +86,32 @@ func TestTabixBED(t *testing.T) {
 	}
 }
 
+// TestTabixAutoConvert: with AutoConvert, Ensembl- and NCBI-named records match a
+// UCSC-named (chr1/chr2) annotation source; without it they would not.
+func TestTabixAutoConvert(t *testing.T) {
+	h, recs := bedRecs(t,
+		"1\t100\t.\tA\tG\t.\tPASS\t.\tGT\t0/1",            // Ensembl -> chr1
+		"NC_000001.11\t150\t.\tA\tC\t.\tPASS\t.\tGT\t0/1", // NCBI -> chr1
+		"2\t500\t.\tC\tA\t.\tPASS\t.\tGT\t0/1")            // Ensembl -> chr2
+	a := runTabix(t, TabixOptions{Name: "REGION", Filename: "testdata/regions.bed.gz", Col: 4, AutoConvert: true}, h, recs)
+	defer a.Close()
+	want := []string{"geneA", "enhB", "geneC"}
+	for i, w := range want {
+		v, ok := recs[i].Info().Get("REGION")
+		if !ok || v.String() != w {
+			t.Errorf("rec %d REGION = %q (ok=%v), want %q", i, v.String(), ok, w)
+		}
+	}
+
+	// Same records without AutoConvert: exact-string match, so nothing annotates.
+	h2, recs2 := bedRecs(t, "1\t100\t.\tA\tG\t.\tPASS\t.\tGT\t0/1")
+	a2 := runTabix(t, TabixOptions{Name: "REGION", Filename: "testdata/regions.bed.gz", Col: 4}, h2, recs2)
+	defer a2.Close()
+	if _, ok := recs2[0].Info().Get("REGION"); ok {
+		t.Error("without AutoConvert, Ensembl '1' should not match UCSC 'chr1'")
+	}
+}
+
 // TestTabixUnknownContigNoOp: a record on a contig absent from the file annotates
 // nothing and returns no error, so a multi-file source can run every file's
 // annotator per record.

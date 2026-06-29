@@ -322,6 +322,9 @@ func (idx *BinIndex) RefID(name string) int {
 	return -1
 }
 
+// RefNames returns the reference sequence names, in reference order.
+func (idx *BinIndex) RefNames() []string { return idx.Names }
+
 // Reg2Bin calculates the BAM bin for a region [beg, end) using the BAM
 // binning scheme (as defined in the SAM specification).
 func Reg2Bin(beg, end int) uint16 {
