@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/compgenlab/hts/iosource"
 )
 
 // RemoteFastaReader provides random access to a remote indexed FASTA file
@@ -21,6 +23,7 @@ import (
 // the fetched bytes need decompression — not yet supported; plain FASTA only).
 type RemoteFastaReader struct {
 	url   string
+	src   *iosource.HTTPRange
 	fai   map[string]*FaiEntry
 	names []string
 
@@ -39,8 +42,14 @@ func NewRemoteFastaReader(url string) (*RemoteFastaReader, error) {
 		return nil, fmt.Errorf("fetching remote .fai index: %w", err)
 	}
 
+	src, err := iosource.NewHTTPRange(url)
+	if err != nil {
+		return nil, fmt.Errorf("opening remote FASTA: %w", err)
+	}
+
 	return &RemoteFastaReader{
 		url:   url,
+		src:   src,
 		fai:   fai,
 		names: names,
 		cache: newFaiChunkCache(faiCacheMaxSize),
@@ -119,8 +128,8 @@ func (r *RemoteFastaReader) GetSequence(name string) ([]byte, error) {
 	return r.GetSequenceRange(name, 0, entry.Length)
 }
 
-// Close releases resources. For a remote reader this is a no-op.
-func (r *RemoteFastaReader) Close() error { return nil }
+// Close releases resources held by the reader.
+func (r *RemoteFastaReader) Close() error { return r.src.Close() }
 
 // loadChunk fetches a single chunk via HTTP Range request, using the cache.
 // Must be called with r.mu held.
@@ -143,11 +152,14 @@ func (r *RemoteFastaReader) loadChunk(name string, chunkIdx int, entry *FaiEntry
 	lastBase := baseEnd - 1
 	endByte := entry.Offset + int64(lastBase/entry.LineBases)*int64(entry.LineWidth) + int64(lastBase%entry.LineBases) + 1
 
-	// Fetch via HTTP Range request.
-	buf, err := httpRangeGet(r.url, startByte, endByte-1) // Range is inclusive
-	if err != nil {
+	// Fetch via HTTP Range request. A read that reaches EOF returns the bytes
+	// available (a trailing partial line) rather than an error.
+	buf := make([]byte, endByte-startByte)
+	n, err := r.src.ReadAt(buf, startByte)
+	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("fetching %s chunk %d: %w", name, chunkIdx, err)
 	}
+	buf = buf[:n]
 
 	// Strip newlines and uppercase.
 	bases := make([]byte, 0, baseEnd-baseStart)
@@ -227,32 +239,4 @@ func fetchFaiIndex(url string) (map[string]*FaiEntry, []string, error) {
 		return nil, nil, fmt.Errorf("empty .fai from %s", url)
 	}
 	return fai, names, nil
-}
-
-// httpRangeGet fetches bytes [start, end] (inclusive) from a URL using an HTTP Range request.
-func httpRangeGet(url string, start, end int64) ([]byte, error) {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d (expected 206 Partial Content)", resp.StatusCode)
-	}
-
-	// A well-behaved server returns exactly the requested byte range; cap the
-	// read to its size so a server that ignores the Range header and replies
-	// 200 with the whole file cannot stream an unbounded body into memory.
-	limit := end - start + 1
-	if limit <= 0 {
-		return nil, fmt.Errorf("invalid range %d-%d", start, end)
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, limit))
 }
