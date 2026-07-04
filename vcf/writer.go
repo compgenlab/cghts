@@ -2,16 +2,17 @@ package vcf
 
 import (
 	"bufio"
-	"compress/gzip"
 	"io"
 	"os"
 	"strings"
+
+	"github.com/compgenlab/hts/htsio/bgzf"
 )
 
 // VcfWriter writes a VCF header and records to an io.Writer or a file.
 type VcfWriter struct {
 	writer *bufio.Writer
-	gz     *gzip.Writer
+	gz     io.WriteCloser // BGZF compression layer, when the file is block-gzipped
 	file   *os.File
 }
 
@@ -21,15 +22,16 @@ func NewVcfWriter(w io.Writer) *VcfWriter {
 }
 
 // OpenVcfWriter creates a VcfWriter for the given filename. A filename ending in
-// ".gz" is gzip-compressed.
+// ".gz" or ".bgz" is BGZF (block-gzip) compressed, so the output is a valid bgzip
+// file that tabix can index — not plain gzip.
 func OpenVcfWriter(filename string) (*VcfWriter, error) {
 	f, err := os.Create(filename)
 	if err != nil {
 		return nil, err
 	}
 	w := &VcfWriter{file: f}
-	if strings.HasSuffix(filename, ".gz") {
-		w.gz = gzip.NewWriter(f)
+	if strings.HasSuffix(filename, ".gz") || strings.HasSuffix(filename, ".bgz") {
+		w.gz = bgzf.NewWriter(f)
 		w.writer = bufio.NewWriter(w.gz)
 	} else {
 		w.writer = bufio.NewWriter(f)
