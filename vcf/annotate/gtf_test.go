@@ -35,8 +35,8 @@ func info(t *testing.T, rec *vcf.VcfRecord, key string) (string, bool) {
 
 func TestGtfAnnotator(t *testing.T) {
 	h, recs := bedRecs(t,
-		"chr1\t120\t.\tA\tG\t.\tPASS\t.\tGT\t0/1", // GeneA only (coding exon)
-		"chr1\t170\t.\tA\tG\t.\tPASS\t.\tGT\t0/1", // GeneA + GeneB overlap
+		"chr1\t120\t.\tA\tG\t.\tPASS\t.\tGT\t0/1",  // GeneA only (coding exon)
+		"chr1\t170\t.\tA\tG\t.\tPASS\t.\tGT\t0/1",  // GeneA + GeneB overlap
 		"chr1\t9000\t.\tA\tG\t.\tPASS\t.\tGT\t0/1") // intergenic
 
 	a, err := NewGtfAnnotator(GtfOptions{Filename: writeAnnGTF(t)})

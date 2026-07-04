@@ -102,7 +102,7 @@ func (s *AnnotationSource) FindGenicRegionForPos(ref string, pos int, strand bed
 
 	var (
 		isGene, isExon, isCoding, isUtr3, isUtr5                bool
-		isCodingIntron, isUtr3Intron, isUtr5Intron             bool
+		isCodingIntron, isUtr3Intron, isUtr5Intron              bool
 		isGeneRev, isExonRev, isCodingRev, isUtr3Rev, isUtr5Rev bool
 	)
 
