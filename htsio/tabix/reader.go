@@ -41,6 +41,8 @@ type Reader struct {
 
 	colNames     []string
 	colNamesRead bool
+
+	recCache *recordCache // parsed-record LRU; nil = disabled
 }
 
 // Record holds a single parsed line from a tabix query along with the
@@ -54,7 +56,30 @@ type Record struct {
 
 // NewReader opens a BGZF-compressed file and its tabix index.
 // It looks for a .tbi index first, then falls back to .csi.
+//
+// The returned reader caches parsed records per 16 kb window
+// ([DefaultRecordCacheWindows] windows) so a position-sorted stream of queries does
+// not re-scan/re-parse the same chunk; use [NewReaderSize] to size or disable that
+// cache. The reader is not safe for concurrent use.
 func NewReader(filename string) (*Reader, error) {
+	return NewReaderSize(filename, DefaultRecordCacheWindows)
+}
+
+// NewReaderSize is [NewReader] with an explicit parsed-record cache size, in 16 kb
+// windows. A cacheWindows <= 0 disables the record cache (every query re-scans the
+// chunk, the pre-cache behavior).
+func NewReaderSize(filename string, cacheWindows int) (*Reader, error) {
+	tr, err := openReader(filename)
+	if err != nil {
+		return nil, err
+	}
+	if cacheWindows > 0 {
+		tr.recCache = newRecordCache(cacheWindows)
+	}
+	return tr, nil
+}
+
+func openReader(filename string) (*Reader, error) {
 	var idx tabixIndex
 	var meta tabixMeta
 
@@ -109,6 +134,12 @@ func NewReader(filename string) (*Reader, error) {
 		meta: meta,
 	}, nil
 }
+
+// DisableCache turns off the parsed-record cache (freeing any cached windows), so
+// every subsequent query re-scans the chunk. Used by higher layers that cache parsed
+// records themselves (e.g. vcf.IndexedVcfReader) and by tests comparing against the
+// uncached path.
+func (tr *Reader) DisableCache() { tr.recCache = nil }
 
 // Close releases resources.
 func (tr *Reader) Close() error {
@@ -201,12 +232,81 @@ func (tr *Reader) Query(ref string, start, end int) (iter.Seq2[*Record, error], 
 		return nil, fmt.Errorf("tabix: unknown reference %q", ref)
 	}
 
+	// Cache path: for a query contained in a single 16 kb window (the common
+	// point/near-point case) serve from — or hydrate — the record cache. A window's
+	// hydrated records cover every sub-query within it, so no coverage guard is
+	// needed. Wider queries (start<0, empty, or spanning windows) fall through to the
+	// direct chunk scan and are not cached.
+	if tr.recCache != nil && start >= 0 && start < end && (start>>windowShift) == ((end-1)>>windowShift) {
+		key := windowKey{refID: refID, win: start >> windowShift}
+		recs, ok := tr.recCache.get(key)
+		if !ok {
+			winStart := key.win << windowShift
+			var err error
+			recs, err = tr.hydrateWindow(refID, ref, winStart, winStart+(1<<windowShift))
+			if err != nil {
+				return nil, err
+			}
+			tr.recCache.put(key, recs)
+		}
+		return sliceSeq(recs, start, end), nil
+	}
+
 	chunks := tr.idx.Query(refID, start, end)
 	if len(chunks) == 0 {
 		return func(yield func(*Record, error) bool) {}, nil
 	}
 
 	return tr.iterChunks(chunks, ref, start, end), nil
+}
+
+// hydrateWindow scans the full 16 kb window [winStart, winEnd) once and returns
+// every record overlapping it, in file order. It reuses the same seek + scanner +
+// parse loop as iterChunks, so records straddling a bgzf block boundary reassemble
+// transparently; only the stop bound (the window, not a caller's sub-region) differs.
+func (tr *Reader) hydrateWindow(refID int, ref string, winStart, winEnd int) ([]*Record, error) {
+	chunks := tr.idx.Query(refID, winStart, winEnd)
+	if len(chunks) == 0 {
+		return nil, nil
+	}
+	if err := tr.ir.SeekToVirtualOffset(chunks[0].Begin); err != nil {
+		return nil, fmt.Errorf("tabix: seeking to chunk: %w", err)
+	}
+
+	scanner := bufio.NewScanner(tr.ir)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+
+	var out []*Record
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if line == "" {
+			continue
+		}
+		if tr.meta.Meta != 0 && line[0] == byte(tr.meta.Meta) {
+			continue
+		}
+
+		rec, err := parseTabulatedLine(line, &tr.meta)
+		if err != nil {
+			continue
+		}
+
+		if rec.Ref != ref {
+			break
+		}
+		if rec.End <= winStart {
+			continue
+		}
+		if rec.Start >= winEnd {
+			break
+		}
+		out = append(out, rec)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (tr *Reader) iterChunks(chunks []Chunk, ref string, start, end int) iter.Seq2[*Record, error] {

@@ -212,12 +212,18 @@ func (a *TabixAnnotator) Annotate(rec *vcf.VcfRecord) error {
 }
 
 func (a *TabixAnnotator) aggregate(vals []string) (string, error) {
+	return aggregateVals(vals, a.opts.Collapse, a.opts.First, a.opts.Max)
+}
+
+// aggregateVals reduces the matched column values per the collapse/first/max mode
+// (default: join with ","). Shared by TabixAnnotator and TabixAnnotationGroup.
+func aggregateVals(vals []string, collapse, first, max bool) (string, error) {
 	switch {
-	case a.opts.Collapse:
+	case collapse:
 		return strings.Join(uniqueStrings(vals), ","), nil
-	case a.opts.First:
+	case first:
 		return vals[0], nil
-	case a.opts.Max:
+	case max:
 		m, err := strconv.ParseFloat(vals[0], 64)
 		if err != nil {
 			return "", fmt.Errorf("annotate: non-numeric value %q for max: %w", vals[0], err)
@@ -240,6 +246,249 @@ func (a *TabixAnnotator) aggregate(vals []string) (string, error) {
 
 // Close releases the tabix reader.
 func (a *TabixAnnotator) Close() error { return a.reader.Close() }
+
+// TabixFieldOptions is one field rule within a [TabixAnnotationGroup]: the per-field
+// knobs of [TabixOptions]. The region-determining columns (AltCol/RefCol) and Extend
+// are shared by the group (they are source-level in practice), so they are not here.
+type TabixFieldOptions struct {
+	Name     string // INFO/FORMAT key to add
+	Sample   string // "" = INFO; otherwise a FORMAT field for this sample
+	Col      int    // 1-based value column; 0 = presence flag
+	ColName  string // value column by header name (overrides Col)
+	IsNumber bool   // declare the value Float
+	Collapse bool   // join unique values with ","
+	First    bool   // keep only the first value
+	Max      bool   // keep the numeric maximum
+	NoHeader bool   // do not add a def
+}
+
+// TabixGroupOptions configures a [TabixAnnotationGroup]: one tabix-indexed source and
+// N field rules sharing a single reader, one query, and the same alt/ref match columns
+// and Extend per input record.
+type TabixGroupOptions struct {
+	Filename    string
+	AltCol      int // 1-based ALT-match column; 0 = none (shared by all fields)
+	RefCol      int // 1-based REF-match column; 0 = none (shared by all fields)
+	AltName     string
+	RefName     string
+	Extend      int  // widen the query by N bases on each side (shared)
+	AutoConvert bool // cross-scheme contig-name matching
+	Fields      []TabixFieldOptions
+}
+
+type tabixRule struct {
+	name      string
+	sample    string
+	sampleIdx int
+	col       int // 0-based value column; -1 = flag
+	isNumber  bool
+	collapse  bool
+	first     bool
+	max       bool
+	noHeader  bool
+}
+
+// TabixAnnotationGroup adds several INFO/FORMAT annotations from one tabix source
+// using a single reader and one query per input record — the multi-field analogue of
+// [TabixAnnotator]. The alt/ref match and query region are computed once and shared;
+// each rule contributes its own value column and aggregation. All rules must use the
+// same match columns / Extend (true for a cganno source), so the region is uniform.
+type TabixAnnotationGroup struct {
+	base
+	filename string
+	reader   *tabix.Reader
+	altCol   int // 0-based; -1 = none
+	refCol   int // 0-based; -1 = none
+	extend   int
+	conv     *vcf.ContigConverter
+	rules    []tabixRule
+}
+
+// NewTabixAnnotationGroup opens the source once and returns a grouped annotator. The
+// shared match columns and each field's value column may be given by header name.
+func NewTabixAnnotationGroup(opts TabixGroupOptions) (*TabixAnnotationGroup, error) {
+	r, err := tabix.NewReader(opts.Filename)
+	if err != nil {
+		return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+	}
+	for _, res := range []struct {
+		name string
+		col  *int
+	}{
+		{opts.AltName, &opts.AltCol},
+		{opts.RefName, &opts.RefCol},
+	} {
+		if res.name == "" {
+			continue
+		}
+		n, err := r.ColumnByName(res.name)
+		if err != nil {
+			r.Close()
+			return nil, fmt.Errorf("annotate: %w", err)
+		}
+		*res.col = n
+	}
+	g := &TabixAnnotationGroup{
+		filename: opts.Filename,
+		reader:   r,
+		altCol:   opts.AltCol - 1,
+		refCol:   opts.RefCol - 1,
+		extend:   opts.Extend,
+	}
+	for _, f := range opts.Fields {
+		col := f.Col
+		if f.ColName != "" {
+			n, err := r.ColumnByName(f.ColName)
+			if err != nil {
+				r.Close()
+				return nil, fmt.Errorf("annotate: %w", err)
+			}
+			col = n
+		}
+		g.rules = append(g.rules, tabixRule{
+			name: f.Name, sample: f.Sample, sampleIdx: -1,
+			col: col - 1, isNumber: f.IsNumber,
+			collapse: f.Collapse, first: f.First, max: f.Max, noHeader: f.NoHeader,
+		})
+	}
+	if opts.AutoConvert {
+		g.EnableContigMatching()
+	}
+	return g, nil
+}
+
+// EnableContigMatching turns on cross-scheme contig-name matching for the group.
+func (g *TabixAnnotationGroup) EnableContigMatching() {
+	g.conv = vcf.NewContigConverter(g.reader.RefNames())
+}
+
+// SetupHeader resolves each rule's sample (for FORMAT) and adds its def.
+func (g *TabixAnnotationGroup) SetupHeader(h *vcf.VcfHeader) error {
+	for i := range g.rules {
+		r := &g.rules[i]
+		if r.sample != "" {
+			r.sampleIdx = h.SampleIndex(r.sample)
+			if r.sampleIdx < 0 {
+				return fmt.Errorf("annotate: missing sample: %s", r.sample)
+			}
+		}
+		if r.noHeader {
+			continue
+		}
+		if r.col < 0 {
+			h.AddInfo(infoDefSrc(r.name, "0", "Flag", "Present in Tabix file", g.filename))
+			continue
+		}
+		typ := "String"
+		if r.isNumber {
+			typ = "Float"
+		}
+		desc := fmt.Sprintf("Column %d from file", r.col+1)
+		if r.sample != "" {
+			h.AddFormat(formatDefSrc(r.name, ".", typ, desc, g.filename))
+		} else {
+			h.AddInfo(infoDefSrc(r.name, ".", typ, desc, g.filename))
+		}
+	}
+	return nil
+}
+
+// Annotate queries the source once and applies every rule. The query region and the
+// alt/ref match are computed once per input record (they are shared); each matching
+// row contributes to every rule's values. Matches [TabixAnnotator.Annotate].
+func (g *TabixAnnotationGroup) Annotate(rec *vcf.VcfRecord) error {
+	chrom, ok := g.Chrom(rec)
+	if !ok {
+		return nil
+	}
+	var pos, endpos int
+	if g.refCol >= 0 {
+		pos, endpos = rec.Pos, rec.Pos
+	} else {
+		var ok1, ok2 bool
+		if pos, ok1 = g.Pos(rec); !ok1 {
+			return nil
+		}
+		if endpos, ok2 = g.EndPos(rec); !ok2 {
+			return nil
+		}
+	}
+	if g.conv != nil {
+		if chrom, ok = g.conv.Resolve(chrom); !ok {
+			return nil
+		}
+	} else if !g.reader.HasRef(chrom) {
+		return nil
+	}
+	seq, err := g.reader.Query(chrom, pos-1-g.extend, endpos+g.extend)
+	if err != nil {
+		return err
+	}
+
+	vals := make([][]string, len(g.rules))
+	found := false
+	for tr, err := range seq {
+		if err != nil {
+			return err
+		}
+		fields := strings.Split(tr.Line, "\t")
+		if g.altCol >= 0 {
+			altOk := false
+			if g.altCol < len(fields) {
+				for _, alt := range rec.Alt() {
+					if alt == fields[g.altCol] {
+						altOk = true
+						break
+					}
+				}
+			}
+			if !altOk {
+				continue
+			}
+		}
+		if g.refCol >= 0 {
+			if !(g.refCol < len(fields) && rec.Ref == fields[g.refCol]) {
+				continue
+			}
+		}
+		found = true
+		for i := range g.rules {
+			r := &g.rules[i]
+			if r.col >= 0 && r.col < len(fields) && fields[r.col] != "" {
+				vals[i] = append(vals[i], fields[r.col])
+			}
+		}
+	}
+
+	if !found {
+		return nil
+	}
+	for i := range g.rules {
+		r := &g.rules[i]
+		if r.col < 0 { // flag
+			rec.AddInfoFlag(r.name)
+			continue
+		}
+		if len(vals[i]) == 0 {
+			continue
+		}
+		out, err := aggregateVals(vals[i], r.collapse, r.first, r.max)
+		if err != nil {
+			return err
+		}
+		if r.sample != "" {
+			if err := rec.AddFormat(r.sampleIdx, r.name, out); err != nil {
+				return err
+			}
+			continue
+		}
+		rec.AddInfo(r.name, out)
+	}
+	return nil
+}
+
+// Close releases the shared tabix reader.
+func (g *TabixAnnotationGroup) Close() error { return g.reader.Close() }
 
 // uniqueStrings returns the values with duplicates removed, preserving order.
 func uniqueStrings(vals []string) []string {
