@@ -75,6 +75,21 @@ func (r *SamRecord) SetTag(tag string, val SamTag) {
 	r.Tags[tag] = val
 }
 
+// AlignStart returns the 0-based reference position of the first aligned base.
+// Pos is 1-based, so this is simply Pos-1; it exists to pair with AlignEnd and
+// to make the coordinate convention explicit at call sites.
+func (r *SamRecord) AlignStart() int {
+	return r.Pos - 1
+}
+
+// AlignEnd returns the 0-based, half-open reference end of the alignment: the
+// first reference position past the aligned bases. AlignStart and AlignEnd
+// together give the alignment's span in the same 0-based half-open convention
+// used by ParseRegion and SamReader.Query.
+func (r *SamRecord) AlignEnd() int {
+	return CigarAlignEnd(r.Pos, r.Cigar)
+}
+
 // IsUnmapped returns true if the read is unmapped (flag 0x4).
 func (r *SamRecord) IsUnmapped() bool {
 	return r.Flag&0x4 != 0
