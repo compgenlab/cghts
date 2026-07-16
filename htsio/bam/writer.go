@@ -194,6 +194,12 @@ func (bw *Writer) Write(rec *htsio.SamRecord) error {
 	if err := htsio.ValidateCigarSeq(rec.Cigar, rec.Seq); err != nil {
 		return fmt.Errorf("bam: read %s: %w", rec.ReadName, err)
 	}
+	// Reject a malformed CIGAR here too, for the same reason: encodeCigar runs on
+	// the async encode path where an error cannot reach the caller, and silently
+	// encoding an unrecognized operation as M would corrupt the record.
+	if _, err := htsio.ParseCigar(rec.Cigar); err != nil {
+		return fmt.Errorf("bam: read %s: %w", rec.ReadName, err)
+	}
 	bw.writeCh <- rec
 	return nil
 }
@@ -344,42 +350,48 @@ func (bw *Writer) encodeRecord(rec *htsio.SamRecord) error {
 	return nil
 }
 
-// encodeCigar parses a SAM CIGAR string into packed BAM CIGAR ops.
+// cigarOpCode maps a SAM CIGAR operation character to its BAM opcode. It is the
+// inverse of cigarOpChar in reader.go. 'B' is absent on purpose: it is not a SAM
+// operation and htsio.ParseCigar rejects it.
+func cigarOpCode(op byte) (uint32, bool) {
+	switch op {
+	case 'M':
+		return bamCigarM, true
+	case 'I':
+		return bamCigarI, true
+	case 'D':
+		return bamCigarD, true
+	case 'N':
+		return bamCigarN, true
+	case 'S':
+		return bamCigarS, true
+	case 'H':
+		return bamCigarH, true
+	case 'P':
+		return bamCigarP, true
+	case '=':
+		return bamCigarEq, true
+	case 'X':
+		return bamCigarX, true
+	}
+	return 0, false
+}
+
+// encodeCigar parses a SAM CIGAR string into packed BAM CIGAR ops. It returns nil
+// for an empty, unspecified ("*"), or malformed CIGAR. Write rejects malformed
+// CIGARs synchronously, so a parse failure cannot reach here in practice.
 func encodeCigar(cigar string) []uint32 {
-	if cigar == "*" || cigar == "" {
+	parsed, err := htsio.ParseCigar(cigar)
+	if err != nil || len(parsed) == 0 {
 		return nil
 	}
-	var ops []uint32
-	num := 0
-	for i := 0; i < len(cigar); i++ {
-		c := cigar[i]
-		if c >= '0' && c <= '9' {
-			num = num*10 + int(c-'0')
-		} else {
-			var code uint32
-			switch c {
-			case 'M':
-				code = 0
-			case 'I':
-				code = 1
-			case 'D':
-				code = 2
-			case 'N':
-				code = 3
-			case 'S':
-				code = 4
-			case 'H':
-				code = 5
-			case 'P':
-				code = 6
-			case '=':
-				code = 7
-			case 'X':
-				code = 8
-			}
-			ops = append(ops, uint32(num)<<4|code)
-			num = 0
+	ops := make([]uint32, 0, len(parsed))
+	for _, op := range parsed {
+		code, ok := cigarOpCode(op.Op)
+		if !ok {
+			return nil
 		}
+		ops = append(ops, uint32(op.Len)<<4|code)
 	}
 	return ops
 }
