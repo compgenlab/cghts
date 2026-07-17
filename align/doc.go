@@ -44,7 +44,7 @@
 // # Parallel batch alignment
 //
 // [AlignBatch] aligns every query against every target concurrently, bounded
-// by a [github.com/compgenlab/hts/support/utils.Semaphore]. It returns a
+// by a [github.com/compgenlab/cghts/support/utils.Semaphore]. It returns a
 // [PairwiseAlignmentPromise]; calling its Result method blocks until all
 // alignments finish and returns the single highest-scoring [PairwiseAlignment].
 //

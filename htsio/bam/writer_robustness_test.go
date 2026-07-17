@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/compgenlab/hts/htsio"
+	"github.com/compgenlab/cghts/htsio"
 )
 
 func bamTestHeader() *htsio.SamHeader {

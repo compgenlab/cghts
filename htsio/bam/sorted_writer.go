@@ -9,7 +9,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/compgenlab/hts/htsio"
+	"github.com/compgenlab/cghts/htsio"
 )
 
 const (

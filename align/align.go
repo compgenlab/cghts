@@ -7,9 +7,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/compgenlab/hts/seqio"
-	"github.com/compgenlab/hts/support/sequtils"
-	"github.com/compgenlab/hts/support/utils"
+	"github.com/compgenlab/cghts/seqio"
+	"github.com/compgenlab/cghts/support/sequtils"
+	"github.com/compgenlab/cghts/support/utils"
 )
 
 // PairwiseAligner aligns a single query sequence against a single target

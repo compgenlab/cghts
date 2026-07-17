@@ -1,7 +1,7 @@
 // Package annotate provides a composable framework for annotating VCF variants:
 // each [Annotator] reads a [vcf.VcfRecord] (or a bare tuple built with
 // [vcf.NewRecord]) and writes INFO/FORMAT/ID fields back onto the same record.
-// Annotators are reusable from any Go code, not just the cgio CLI.
+// Annotators are reusable from any Go code, not just the cgkit CLI.
 //
 // A [Pipeline] runs a record source through a set of annotators in order,
 // mutating one record pointer in place (no copies). Most annotators implement
@@ -18,7 +18,7 @@
 package annotate
 
 import (
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // Annotator reads a variant record and writes annotations (INFO/FORMAT/ID) back

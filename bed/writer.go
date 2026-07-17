@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgenlab/hts/htsio/tabix"
+	"github.com/compgenlab/cghts/htsio/tabix"
 )
 
 // ColumnMode selects how many columns a [BedWriter] emits per record.

@@ -1,6 +1,6 @@
 package seqio
 
-import "github.com/compgenlab/hts/iosource"
+import "github.com/compgenlab/cghts/iosource"
 
 // httpClient is the shared HTTP client for all remote reference access
 // (remote FASTA, refget, and the on-disk cache fetches). It is defined in the

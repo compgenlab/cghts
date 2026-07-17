@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgenlab/hts/support/stats"
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/support/stats"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // requireSAC verifies the header declares an SAC FORMAT field (Number=".",

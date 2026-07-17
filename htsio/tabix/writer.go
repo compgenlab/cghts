@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/compgenlab/hts/htsio/bgzf"
+	"github.com/compgenlab/cghts/htsio/bgzf"
 )
 
 const (

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/compgenlab/hts/seqio"
-	"github.com/compgenlab/hts/support/utils"
+	"github.com/compgenlab/cghts/seqio"
+	"github.com/compgenlab/cghts/support/utils"
 )
 
 // MSAColumn holds the bases (or gap '-') for each sequence at one

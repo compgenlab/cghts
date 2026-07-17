@@ -3,7 +3,7 @@ package annotate
 import (
 	"testing"
 
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 func runVcfAnn(t *testing.T, opts VcfOptions, h *vcf.VcfHeader, recs []*vcf.VcfRecord) *VcfAnnotation {

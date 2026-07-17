@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // annGTF: GeneA (+, coding) over [100,200) and GeneB (-, non-coding lncRNA)
