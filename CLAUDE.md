@@ -4,13 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`hts` is a Go library for computational genomics: FASTA/FASTQ I/O, sequence
+`cghts` is a Go library for computational genomics: FASTA/FASTQ I/O, sequence
 alignment, and native SAM/BAM/CRAM/tabix handling, with particular focus on
 Oxford Nanopore (long-read) sequence processing. It is the library half of the
-former `cgkit` project; the CLI lives in the separate `cgio` repo
-(`github.com/compgenlab/cgio`).
+former `cgkit` project. The CLIs that consume it live in separate repos:
+`cgkit` (`github.com/compgenlab/cgkit`), the general genomics CLI, and `nupa`
+(`github.com/compgenlab/nupa`, private), an Oxford Nanopore UMI and poly(A)
+toolkit.
 
-**Module:** `github.com/compgenlab/hts`
+**Module:** `github.com/compgenlab/cghts`
 **Go version:** 1.23
 
 ## Commands
@@ -25,8 +27,10 @@ GOCACHE=/tmp/go-build-cache go test ./...
 go test ./align/... -run TestCigarCondense
 ```
 
-When developing alongside `cgio`, the two modules are joined by a `go.work`
-workspace in the parent directory so `cgio` resolves this checkout directly.
+When developing alongside `cgkit` and `nupa`, the modules are joined by a
+`go.work` workspace in the parent directory so those CLIs resolve this checkout
+directly. This Makefile exports `GOWORK=off`, so the library always builds
+standalone regardless of the ambient workspace.
 
 ## Architecture
 
@@ -72,4 +76,4 @@ CIGAR strings use standard ops: M (match), I (insertion), D (deletion), S (soft 
 
 This library carries no CLI dependencies (no cobra/pflag). The only third-party
 dependency is `github.com/ulikunitz/xz` (CRAM LZMA). Keep it that way — CLI
-concerns belong in `cgio`.
+concerns belong in `cgkit` or `nupa`.

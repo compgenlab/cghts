@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/compgenlab/hts/htsio"
+	"github.com/compgenlab/cghts/htsio"
 )
 
 // TestSamWriterCloseIdempotent verifies a second Close() is a no-op that returns

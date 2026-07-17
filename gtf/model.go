@@ -3,7 +3,7 @@ package gtf
 import (
 	"sort"
 
-	"github.com/compgenlab/hts/bed"
+	"github.com/compgenlab/cghts/bed"
 )
 
 // Exon is a single feature row of a transcript — an exon, a CDS segment, or a

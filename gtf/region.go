@@ -1,6 +1,6 @@
 package gtf
 
-import "github.com/compgenlab/hts/bed"
+import "github.com/compgenlab/cghts/bed"
 
 // GenicRegion classifies a position (or region/read) relative to gene
 // annotations: which part of a gene it falls in — coding exon, UTR, intron,

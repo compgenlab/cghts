@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgenlab/hts/htsio/tabix"
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/htsio/tabix"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // TabixOptions configures a [TabixAnnotator]. Columns are 1-based; Col=0 means

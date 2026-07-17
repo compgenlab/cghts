@@ -4,7 +4,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/compgenlab/hts/htsio/bgzf"
+	"github.com/compgenlab/cghts/htsio/bgzf"
 )
 
 // IndexWriter builds a tabix (.tbi) index for a file that is already

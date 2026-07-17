@@ -3,7 +3,7 @@ package annotate
 import (
 	"testing"
 
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 func runInFile(t *testing.T, opts InfoFileOptions, h *vcf.VcfHeader, recs []*vcf.VcfRecord) {

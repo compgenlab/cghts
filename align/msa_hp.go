@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/compgenlab/hts/seqio"
-	"github.com/compgenlab/hts/support/sequtils"
+	"github.com/compgenlab/cghts/seqio"
+	"github.com/compgenlab/cghts/support/sequtils"
 )
 
 // splitRefSeq pulls the reference sequence (by name) out of a sequence list.

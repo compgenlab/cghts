@@ -2,14 +2,14 @@
 // examines a record and, when the record fails the filter's test, stamps the
 // filter's ID onto the record's FILTER column (via [vcf.VcfRecord.AddFilter]).
 // A record with no stamped codes is PASS. Filters are reusable from any Go code,
-// not just the cgio CLI. It ports ngsutilsj's vcf/filter framework.
+// not just the cgkit CLI. It ports ngsutilsj's vcf/filter framework.
 package filter
 
 import (
 	"strconv"
 	"strings"
 
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // Filter tests a record and marks it (with its ID) when the record fails.

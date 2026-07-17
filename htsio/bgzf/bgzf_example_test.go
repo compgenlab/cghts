@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/compgenlab/hts/htsio/bgzf"
+	"github.com/compgenlab/cghts/htsio/bgzf"
 )
 
 // Example demonstrates a BGZF write/read round trip over an in-memory buffer.

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/compgenlab/hts/htsio"
-	"github.com/compgenlab/hts/htsio/bam"
+	"github.com/compgenlab/cghts/htsio"
+	"github.com/compgenlab/cghts/htsio/bam"
 )
 
 // Example_roundTrip writes a single alignment to an in-memory BAM stream and

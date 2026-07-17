@@ -3,7 +3,7 @@ package stringutils_test
 import (
 	"fmt"
 
-	"github.com/compgenlab/hts/support/stringutils"
+	"github.com/compgenlab/cghts/support/stringutils"
 )
 
 func ExampleReverseString() {

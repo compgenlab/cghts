@@ -3,7 +3,7 @@ package annotate
 import (
 	"testing"
 
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 func runFlanking(t *testing.T, opts FlankingOptions, h *vcf.VcfHeader, recs []*vcf.VcfRecord) {

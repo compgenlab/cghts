@@ -3,7 +3,7 @@ package annotate
 import (
 	"testing"
 
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // infoKeyEq asserts an INFO key is identical (presence + value) on two records.

@@ -1,4 +1,4 @@
-module github.com/compgenlab/hts
+module github.com/compgenlab/cghts
 
 go 1.23
 

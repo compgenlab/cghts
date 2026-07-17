@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/compgenlab/hts/htsio/sam"
+	"github.com/compgenlab/cghts/htsio/sam"
 )
 
 // ExampleTextReader demonstrates reading a small SAM document from an

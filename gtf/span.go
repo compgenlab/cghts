@@ -1,6 +1,6 @@
 package gtf
 
-import "github.com/compgenlab/hts/bed"
+import "github.com/compgenlab/cghts/bed"
 
 // span is a genomic interval, 0-based half-open [start, end), with an optional
 // strand. It ports the overlap/contains semantics of ngsutilsj GenomeSpan

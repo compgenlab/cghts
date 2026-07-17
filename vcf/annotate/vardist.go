@@ -4,7 +4,7 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // VariantDistance annotates each variant with CG_VARDIST, the distance to its
@@ -18,7 +18,7 @@ type VariantDistance struct{ closeNoop }
 func NewVariantDistance() *VariantDistance { return &VariantDistance{} }
 
 // SetupHeader declares the CG_VARDIST INFO field. (ngsutilsj registers this as a
-// FORMAT def, a bug; cgio registers it as INFO.)
+// FORMAT def, a bug; this package registers it as INFO.)
 func (a *VariantDistance) SetupHeader(h *vcf.VcfHeader) error {
 	h.AddInfo(infoDef("CG_VARDIST", "1", "Integer", "Distance to the nearest variant (absolute value)"))
 	return nil

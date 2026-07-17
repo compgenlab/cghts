@@ -3,7 +3,7 @@ package codec_test
 import (
 	"fmt"
 
-	"github.com/compgenlab/hts/htsio/codec"
+	"github.com/compgenlab/cghts/htsio/codec"
 )
 
 // ExampleEncodeRans4x8 shows a self-contained rANS 4x8 order-0 encode/decode

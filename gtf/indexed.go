@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgenlab/hts/bed"
-	"github.com/compgenlab/hts/htsio/tabix"
+	"github.com/compgenlab/cghts/bed"
+	"github.com/compgenlab/cghts/htsio/tabix"
 )
 
 // defaultGeneCacheCap bounds the per-gene model cache. A position-sorted VCF hits

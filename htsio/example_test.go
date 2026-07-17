@@ -3,12 +3,12 @@ package htsio_test
 import (
 	"fmt"
 
-	"github.com/compgenlab/hts/htsio"
+	"github.com/compgenlab/cghts/htsio"
 
 	// Blank imports register the BAM/SAM/CRAM readers with the auto-detection
 	// registry used by NewSamReader.
-	_ "github.com/compgenlab/hts/htsio/bam"
-	_ "github.com/compgenlab/hts/htsio/sam"
+	_ "github.com/compgenlab/cghts/htsio/bam"
+	_ "github.com/compgenlab/cghts/htsio/sam"
 )
 
 // ExampleNewSamReader opens a BAM file (format auto-detected from its magic

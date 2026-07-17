@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/compgenlab/hts/bed"
-	"github.com/compgenlab/hts/gtf"
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/bed"
+	"github.com/compgenlab/cghts/gtf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // GtfOptions configures a [GtfAnnotator]. The GTF file is read fully into memory

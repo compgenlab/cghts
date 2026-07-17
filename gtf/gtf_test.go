@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/compgenlab/hts/bed"
+	"github.com/compgenlab/cghts/bed"
 )
 
 // testGTF is a small synthetic GTF (1-based inclusive coordinates) exercising:

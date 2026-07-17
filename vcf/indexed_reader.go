@@ -5,7 +5,7 @@ import (
 	"iter"
 	"sort"
 
-	"github.com/compgenlab/hts/htsio/tabix"
+	"github.com/compgenlab/cghts/htsio/tabix"
 )
 
 // vcfCacheWindows bounds the parsed-VcfRecord LRU, in 16 kb windows (matching the
