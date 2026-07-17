@@ -4,13 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`cghts` is a Go library for computational genomics: FASTA/FASTQ I/O, sequence
-alignment, and native SAM/BAM/CRAM/tabix handling, with particular focus on
-Oxford Nanopore (long-read) sequence processing. It is the library half of the
-former `cgkit` project. The CLIs that consume it live in separate repos:
-`cgkit` (`github.com/compgenlab/cgkit`), the general genomics CLI, and `nupa`
-(`github.com/compgenlab/nupa`, private), an Oxford Nanopore UMI and poly(A)
-toolkit.
+`cghts` is a pure-Go library for computational genomics file formats: native
+readers and writers for FASTA/FASTQ, SAM/BAM/CRAM, BGZF/tabix, BED, GTF, VCF, and
+bigWig/bigBed, plus sequence alignment and analysis utilities. No cgo; the only
+third-party dependency is `ulikunitz/xz`. It is the library half of the former
+`cgkit` project.
+
+The CLIs that consume it live in separate repos: `cgkit`
+(`github.com/compgenlab/cgkit`), the general-purpose genomics CLI, and `nupa`
+(`github.com/compgenlab/nupa`, private), a focused Oxford Nanopore UMI and poly(A)
+toolkit. The ONT-specific commands (`trim`, `umi-cluster`, `umi-dedup`,
+`polya-site`) live in nupa, so this library stays domain-general — any
+Nanopore-specific handling here (e.g. the aligner's homopolymer discounts) is a
+reusable feature, not the library's focus.
 
 **Module:** `github.com/compgenlab/cghts`
 **Go version:** 1.23
@@ -38,9 +44,15 @@ standalone regardless of the ambient workspace.
 
 - **`seqio/`** — FASTA/FASTQ readers with gzip support. Core type is `SeqQual`, which holds sequence, quality scores, name, and strand. Readers are streaming via `NextSeq()`.
 - **`align/`** — Smith-Waterman local alignment with affine gap penalties. Includes special handling for Oxford Nanopore homopolymer error profiles, plus MSA via incremental consensus.
-- **`htsio/`** — SAM/BAM/CRAM reading and writing. Native BAM and SAM readers/writers; samtools only for CRAM. Includes BAI/TBI/CSI index parsers, tabix reader/writer, sorted BAM writer with merge sort. Subpackages: `bam`, `bgzf`, `cram`, `codec`, `sam`, `tabix`.
+- **`htsio/`** — SAM/BAM/CRAM reading and writing. Native BAM and SAM readers/writers; samtools only for CRAM. Includes BAI/TBI/CSI index parsers, tabix reader/writer, sorted BAM writer with merge sort. Subpackages: `bam`, `bgzf`, `cram`, `codec`, `sam`, `tabix`, `bbi`.
 - **`htsio/bgzf/`** — BGZF (Blocked GNU Zip Format) reader, writer, and indexed reader with LRU block cache. Used by BAM and tabix layers.
+- **`htsio/bbi/`** — Random-access reader for UCSC BBI files (bigWig/bigBed); self-indexed, standard-library only. Reader surface mirrors `htsio/tabix`.
+- **`bed/`** — Streaming and tabix-indexed BED readers plus a writer. Core type `BedRecord` (0-based half-open, BED6 fields + verbatim `Extras`).
+- **`gtf/`** — GTF gene-model parsing (genes → transcripts → exons/CDS) with an interval index and genic-region classification; a port of ngsutilsj's `GTFAnnotationSource`. `AnnotationSource` (in-memory) and `IndexedAnnotationSource` (tabix-backed).
+- **`vcf/`** — Streaming and tabix-indexed VCF reader/writer with a lazy record model (`VcfRecord` parses columns on first access; `Pos` is 1-based). Subpackages: `vcf/annotate` (composable INFO/FORMAT annotators + `Pipeline`) and `vcf/filter` (composable FILTER-stamping filters).
+- **`iosource/`** — Pluggable random-access byte sources behind a concurrency-safe `io.ReaderAt`: local-file and HTTP(S)-Range implementations, plus sibling-index resolution. Lets index-driven readers fetch byte ranges from remote files.
 - **`support/sequtils/`** — DNA utilities: IUPAC ambiguity code matching, reverse complement, homopolymer run analysis, 4-bit DNA encoding.
+- **`support/stats/`** — 2×2 Fisher exact test, Phred/log2 conversions.
 - **`support/utils/`** — General utilities: semaphore for concurrency, float formatting, position-tracking reader.
 - **`support/stringutils/`** — String helpers.
 - **`analysis/seq/`** — Sequence analysis (GC content); package `seqanalysis`.
