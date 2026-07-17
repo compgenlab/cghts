@@ -2,17 +2,18 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/compgenlab/cghts.svg)](https://pkg.go.dev/github.com/compgenlab/cghts)
 
-A Go library for computational genomics: sequence I/O, alignment, and native
-SAM/BAM/CRAM/tabix handling. Particular focus on Oxford Nanopore (long-read)
-sequencing workflows.
+A pure-Go library for computational genomics file formats: native readers and
+writers for FASTA/FASTQ, SAM/BAM/CRAM, BGZF/tabix, BED, GTF, VCF, and
+bigWig/bigBed, plus sequence alignment and analysis utilities. Minimal
+dependencies and no cgo, so it builds and cross-compiles cleanly anywhere Go runs.
 
 Full API documentation: <https://pkg.go.dev/github.com/compgenlab/cghts>
 
 **Module:** `github.com/compgenlab/cghts`
 
-This is the library half of the former `cgkit` project. The CLIs built on it live
-in separate repos: [`cgkit`](https://github.com/compgenlab/cgkit), the general
-genomics CLI, and `nupa`, a focused Oxford Nanopore UMI and poly(A) toolkit.
+This is the library half of the former `cgkit` project; the
+[`cgkit`](https://github.com/compgenlab/cgkit) command-line toolkit is built on
+it and exposes much of this functionality as CLI commands.
 
 ## Install
 
