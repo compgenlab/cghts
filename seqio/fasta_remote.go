@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/compgenlab/hts/iosource"
+	"github.com/compgenlab/cghts/iosource"
 )
 
 // RemoteFastaReader provides random access to a remote indexed FASTA file

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/compgenlab/hts/htsio/bbi"
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/htsio/bbi"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // BigBedOptions configures a [BigBedAnnotator]. Columns are 1-based over the BED

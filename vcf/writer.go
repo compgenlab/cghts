@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/compgenlab/hts/htsio/bgzf"
+	"github.com/compgenlab/cghts/htsio/bgzf"
 )
 
 // VcfWriter writes a VCF header and records to an io.Writer or a file.

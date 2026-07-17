@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 const hdr = "##fileformat=VCFv4.2\n" +

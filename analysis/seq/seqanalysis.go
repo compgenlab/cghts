@@ -1,6 +1,6 @@
 package seqanalysis
 
-import "github.com/compgenlab/hts/seqio"
+import "github.com/compgenlab/cghts/seqio"
 
 // CalcGC returns the GC content of a sequence record as a fraction in the range
 // [0, 1]. It is the count of G and C bases (case-insensitive) divided by the

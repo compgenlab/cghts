@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/compgenlab/hts/htsio/bgzf"
+	"github.com/compgenlab/cghts/htsio/bgzf"
 )
 
 // TestOpenVcfWriterBGZF: a ".gz" (or ".bgz") output is BGZF (block-gzip), not

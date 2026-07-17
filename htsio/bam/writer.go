@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/compgenlab/hts/htsio"
-	"github.com/compgenlab/hts/htsio/bgzf"
-	"github.com/compgenlab/hts/htsio/tabix"
+	"github.com/compgenlab/cghts/htsio"
+	"github.com/compgenlab/cghts/htsio/bgzf"
+	"github.com/compgenlab/cghts/htsio/tabix"
 )
 
 // Writer writes BAM files natively using the bgzf package.

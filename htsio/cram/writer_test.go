@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/compgenlab/hts/htsio"
+	"github.com/compgenlab/cghts/htsio"
 )
 
 func TestWriterRoundtrip(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/compgenlab/hts/support/stats"
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/support/stats"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 const hdr = "##fileformat=VCFv4.2\n" +

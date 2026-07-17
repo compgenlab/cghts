@@ -3,7 +3,7 @@ package gtf
 import (
 	"testing"
 
-	"github.com/compgenlab/hts/bed"
+	"github.com/compgenlab/cghts/bed"
 )
 
 // TestFindGenicRegionForPos covers every genic-region code on the synthetic GTF

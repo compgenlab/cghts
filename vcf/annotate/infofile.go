@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // InfoFileOptions configures an [InfoInFile]. The file is a plain list of keys
