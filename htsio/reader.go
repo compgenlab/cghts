@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgenlab/hts/seqio"
+	"github.com/compgenlab/cghts/seqio"
 )
 
 // TagFilterOp specifies the comparison operation for a tag filter.

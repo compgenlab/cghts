@@ -3,8 +3,8 @@ package align_test
 import (
 	"fmt"
 
-	"github.com/compgenlab/hts/align"
-	"github.com/compgenlab/hts/seqio"
+	"github.com/compgenlab/cghts/align"
+	"github.com/compgenlab/cghts/seqio"
 )
 
 // ExampleNewLocalAligner demonstrates a local alignment of two short DNA

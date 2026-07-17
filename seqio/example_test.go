@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/compgenlab/hts/seqio"
+	"github.com/compgenlab/cghts/seqio"
 )
 
 // ExampleNewFastaReader streams the records of a FASTA file, printing each

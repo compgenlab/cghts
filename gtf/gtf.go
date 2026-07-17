@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgenlab/hts/bed"
+	"github.com/compgenlab/cghts/bed"
 )
 
 // binSize is the fixed width of the interval index bins (ports

@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgenlab/hts/htsio/bbi"
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/htsio/bbi"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // BigWigOptions configures a [BigWigAnnotator]. A bigWig holds one value per base

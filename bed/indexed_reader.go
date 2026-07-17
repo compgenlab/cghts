@@ -3,7 +3,7 @@ package bed
 import (
 	"iter"
 
-	"github.com/compgenlab/hts/htsio/tabix"
+	"github.com/compgenlab/cghts/htsio/tabix"
 )
 
 // IndexedBedReader provides random access to a tabix-indexed BED file

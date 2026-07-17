@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // AutoID sets the ID column to chrom_pos_ref_alt (one per alt, ';'-joined).
@@ -70,8 +70,8 @@ type Indel struct{ closeNoop }
 func NewIndel() *Indel { return &Indel{} }
 
 // SetupHeader declares the indel INFO fields. (ngsutilsj registers these as
-// FORMAT defs, which is a bug — the values go into INFO; cgio registers them
-// correctly as INFO.)
+// FORMAT defs, which is a bug — the values go into INFO; this package registers
+// them correctly as INFO.)
 func (a *Indel) SetupHeader(h *vcf.VcfHeader) error {
 	h.AddInfo(infoDef("CG_INSERT", "0", "Flag", "Variant is an insertion"))
 	h.AddInfo(infoDef("CG_DELETE", "0", "Flag", "Variant is an deletion"))

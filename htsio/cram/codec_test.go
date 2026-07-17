@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/compgenlab/hts/htsio/codec"
+	"github.com/compgenlab/cghts/htsio/codec"
 )
 
 // stripNewlines removes all 0x0a bytes from data.

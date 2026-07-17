@@ -1,6 +1,6 @@
 package annotate
 
-import "github.com/compgenlab/hts/vcf"
+import "github.com/compgenlab/cghts/vcf"
 
 // base provides alt-coordinate resolution for annotators that query external
 // files by genomic locus. The query chromosome/position can be taken from the

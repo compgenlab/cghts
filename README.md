@@ -1,22 +1,23 @@
-# hts
+# cghts
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/compgenlab/hts.svg)](https://pkg.go.dev/github.com/compgenlab/hts)
+[![Go Reference](https://pkg.go.dev/badge/github.com/compgenlab/cghts.svg)](https://pkg.go.dev/github.com/compgenlab/cghts)
 
 A Go library for computational genomics: sequence I/O, alignment, and native
 SAM/BAM/CRAM/tabix handling. Particular focus on Oxford Nanopore (long-read)
 sequencing workflows.
 
-Full API documentation: <https://pkg.go.dev/github.com/compgenlab/hts>
+Full API documentation: <https://pkg.go.dev/github.com/compgenlab/cghts>
 
-**Module:** `github.com/compgenlab/hts`
+**Module:** `github.com/compgenlab/cghts`
 
-This is the library half of the former `cgkit` project; the CLI lives in
-[`cgio`](https://github.com/compgenlab/cgio).
+This is the library half of the former `cgkit` project. The CLIs built on it live
+in separate repos: [`cgkit`](https://github.com/compgenlab/cgkit), the general
+genomics CLI, and `nupa`, a focused Oxford Nanopore UMI and poly(A) toolkit.
 
 ## Install
 
 ```bash
-go get github.com/compgenlab/hts
+go get github.com/compgenlab/cghts
 ```
 
 ## Testing

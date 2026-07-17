@@ -3,7 +3,7 @@ package sequtils_test
 import (
 	"fmt"
 
-	"github.com/compgenlab/hts/support/sequtils"
+	"github.com/compgenlab/cghts/support/sequtils"
 )
 
 func ExampleReverseComplement() {

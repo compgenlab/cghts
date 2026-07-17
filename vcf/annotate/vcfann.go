@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // VcfOptions configures a [VcfAnnotation]. The source file must be a

@@ -4,8 +4,8 @@ import (
 	"errors"
 	"iter"
 
-	"github.com/compgenlab/hts/support/sequtils"
-	"github.com/compgenlab/hts/support/stringutils"
+	"github.com/compgenlab/cghts/support/sequtils"
+	"github.com/compgenlab/cghts/support/stringutils"
 )
 
 // DirtySeqReaderError is returned when an operation is attempted on a reader

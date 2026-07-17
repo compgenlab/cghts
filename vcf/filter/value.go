@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgenlab/hts/vcf"
+	"github.com/compgenlab/cghts/vcf"
 )
 
 // valueFilter ports ngsutilsj's VCFAbstractFilter value/flag filters: it
