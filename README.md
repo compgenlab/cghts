@@ -95,9 +95,70 @@ Format-specific subpackages backing the `htsio` facade — CRAM block codecs
 (rANS, fqzcomp, arith), and the native BAM/SAM/CRAM/tabix reader and writer
 implementations.
 
+### htsio/bbi — bigWig / bigBed
+
+Random-access reader for UCSC BBI files (bigWig and bigBed). BBI files are
+self-indexed (chromosome B+ tree + spatial R-tree), so no sidecar index is
+needed. The reader surface mirrors `htsio/tabix.Reader`.
+
+- `Open()` → `Reader`; `Query(ref, start, end)` returns `iter.Seq2` of records
+  over a 0-based half-open region (`Record.Value` for bigWig, `Record.Line` for bigBed)
+- Base-resolution values only (zoom-level summaries ignored, so results are exact)
+- Byte order auto-detected from the file magic; standard-library only
+
+### bed — BED intervals
+
+Streaming and tabix-indexed readers plus a writer for BED interval files.
+
+- `BedRecord` — reference name, 0-based half-open `[start, end)`, optional BED6
+  name/score/strand; columns past the sixth preserved verbatim in `Extras`
+- `BedReader` — forward-only parser (`NextRecord`); file constructor auto-detects gzip
+- `IndexedBedReader` — random access to a tabix-indexed BED via `Query()`
+- `BedWriter` — sorted output with optional TBI/CSI index generation
+
+### gtf — gene-model annotation
+
+Parses a GTF file into an in-memory gene model (genes → transcripts →
+exons/CDS/codons) with an interval index, and classifies genomic positions into
+genic regions (coding exon, UTR, intron, junction, …). A port of ngsutilsj's
+`GTFAnnotationSource`, reproducing its biotype derivation and region-code
+precedence.
+
+- `AnnotationSource` — in-memory model with position/region classifiers and gene iteration
+- `IndexedAnnotationSource` — tabix-backed, per-position lookup with bounded memory
+- Coordinates 0-based half-open (GTF's 1-based input converted on parse)
+
+### vcf — Variant Call Format
+
+Streaming and tabix-indexed readers, a writer, and a header/record model for VCF.
+
+- **Lazy parsing** — a `VcfRecord` parses only CHROM/POS/REF up front; ID, ALT,
+  QUAL, FILTER, INFO, FORMAT, and each sample column are parsed on first access
+  and cached independently, so wide many-sample files stay cheap
+- `VcfRecord.Pos` is 1-based (the one deliberate exception to the library's
+  0-based half-open convention, matching the file for safe round-trips)
+- **vcf/annotate** — composable framework writing INFO/FORMAT/ID fields onto
+  records; locus annotators (`Indel`, `TsTv`, `AutoID`, `VariantDistance`, …) and
+  sample annotators (`Dosage`, `VAF`, `FisherStrandBias`, …), plus bigWig/bigBed
+  and GTF-backed annotators; run in order through a `Pipeline`
+- **vcf/filter** — composable FILTER-stamping filters (comparison, list,
+  flag-present/absent, zygosity, chrom, indel), chained via `Chain`; a port of
+  ngsutilsj's vcf/filter framework
+
+### iosource — pluggable random-access I/O
+
+Random-access byte sources for genomic files behind a concurrency-safe
+`io.ReaderAt`, so index-driven readers fetch only the byte ranges they need.
+
+- Local-file and **HTTP(S)-Range** implementations (standard-library only), so a
+  BAM/CRAM/VCF/bigWig can be queried remotely without downloading the whole file
+- `ByteSource` interface for other transports (SFTP, S3, …)
+- Sibling-file resolution (`.bai`/`.tbi`/…) over both local and HTTP locators
+
 ### support packages
 
 - **support/sequtils** — IUPAC ambiguity matching, reverse complement, homopolymer run analysis, 4-bit DNA encoding
+- **support/stats** — 2×2 Fisher exact test, Phred/log2 conversions
 - **support/utils** — `Semaphore` for concurrency control, `PositionTrackingReader`, float formatting
 - **support/stringutils** — string helpers
 - **analysis/seq** — GC content calculation
