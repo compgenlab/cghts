@@ -522,12 +522,7 @@ func (ib *tbiIndexBuilder) addRecord(l tabixLine, begin, end bgzf.VirtualOffset)
 
 	chunks := rb.bins[uint32(bin)]
 	if len(chunks) > 0 {
-		last := &chunks[len(chunks)-1]
-		if begin.BlockOffset() == last.End.BlockOffset() || begin == last.End {
-			last.End = end
-		} else {
-			chunks = append(chunks, Chunk{Begin: begin, End: end})
-		}
+		chunks[len(chunks)-1].End = end
 	} else {
 		chunks = append(chunks, Chunk{Begin: begin, End: end})
 	}
@@ -599,9 +594,6 @@ func (ib *tbiIndexBuilder) writeTBI(path string) error {
 				} else {
 					merged = append(merged, chunks[i])
 				}
-			}
-			if rb.lastVO > merged[len(merged)-1].End {
-				merged[len(merged)-1].End = rb.lastVO
 			}
 			mergedBins[bin] = merged
 		}
