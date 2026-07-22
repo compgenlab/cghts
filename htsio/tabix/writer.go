@@ -534,9 +534,12 @@ func (ib *tbiIndexBuilder) addRecord(l tabixLine, begin, end bgzf.VirtualOffset)
 	rb.bins[uint32(bin)] = chunks
 	rb.lastVO = end
 
-	window := l.start >> 14
-	if existing, ok := rb.linearIdx[window]; !ok || begin < existing {
-		rb.linearIdx[window] = begin
+	startWindow := l.start >> 14
+	endWindow := (recEnd - 1) >> 14
+	for w := startWindow; w <= endWindow; w++ {
+		if existing, ok := rb.linearIdx[w]; !ok || begin < existing {
+			rb.linearIdx[w] = begin
+		}
 	}
 }
 
