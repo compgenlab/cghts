@@ -128,6 +128,21 @@ func parse(r io.Reader, requiredTags []string) (*AnnotationSource, error) {
 			gene = newGene(a.geneID, a.geneName, chrom, start, end, strand, a.bioType, a.status)
 			cache[key] = gene
 			src.genes = append(src.genes, gene)
+		} else {
+			// Backfill gene-level attributes that only appear on some rows.
+			// RefSeq carries gene_biotype on the "gene" feature line only, while
+			// transcript/exon rows omit it; if such a row seeded the gene first,
+			// the biotype (and name/status) would otherwise be lost regardless of
+			// row order. GENCODE repeats these on every row, so it is unaffected.
+			if gene.BioType == "" && a.bioType != "" {
+				gene.BioType = a.bioType
+			}
+			if gene.Status == "" && a.status != "" {
+				gene.Status = a.status
+			}
+			if gene.GeneName == "" && a.geneName != "" {
+				gene.GeneName = a.geneName
+			}
 		}
 
 		switch recordType {
