@@ -120,6 +120,33 @@ func TestParseRefSeqGeneNameFallback(t *testing.T) {
 	}
 }
 
+// TestParseRefSeqBiotypeBackfill reproduces the RefSeq layout after coordinate
+// sorting: the gene_biotype lives only on the "gene" feature line, and a
+// transcript/exon row for the same gene_id sorts ahead of it. The gene must still
+// pick up its biotype from the later "gene" row rather than being frozen with the
+// empty biotype of whichever row seeded it first.
+func TestParseRefSeqBiotypeBackfill(t *testing.T) {
+	const refseq = `chr3	BestRefSeq	transcript	101	800	.	+	.	gene_id "G5"; transcript_id "NM_1"; gene "RefFive"; transcript_biotype "mRNA";
+chr3	BestRefSeq	exon	101	200	.	+	.	gene_id "G5"; transcript_id "NM_1"; gene "RefFive"; transcript_biotype "mRNA";
+chr3	BestRefSeq	CDS	101	200	.	+	0	gene_id "G5"; transcript_id "NM_1"; gene "RefFive"; transcript_biotype "mRNA";
+chr3	BestRefSeq,Gnomon	gene	101	800	.	+	.	gene_id "G5"; gene "RefFive"; gene_biotype "protein_coding";
+`
+	s, err := NewAnnotationSource(writeGTF(t, refseq), nil)
+	if err != nil {
+		t.Fatalf("NewAnnotationSource: %v", err)
+	}
+	g5 := geneByID(s, "G5")
+	if g5 == nil {
+		t.Fatal("G5 not found")
+	}
+	if g5.BioType != "protein_coding" {
+		t.Errorf("G5 biotype = %q, want protein_coding (backfilled from the gene row)", g5.BioType)
+	}
+	if !s.hasBioType {
+		t.Error("source hasBioType = false, want true")
+	}
+}
+
 func TestRequiredTags(t *testing.T) {
 	// Only G1's rows carry tag "basic"; with the filter, only G1 survives.
 	s := loadTestGTF(t, "basic")
