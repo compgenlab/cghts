@@ -1,11 +1,35 @@
 package tabix
 
 import (
+	"fmt"
 	"io"
 	"os"
 
 	"github.com/compgenlab/cghts/htsio/bgzf"
 )
+
+// UnsortedError reports that a file cannot be indexed because its records are
+// not in coordinate order. A tabix index over an unsorted file is not an error
+// to build but is wrong to use: its linear index assumes offsets increase with
+// position, so queries silently miss records. [IndexWriter.WriteIndex] returns
+// this instead of writing such an index.
+type UnsortedError struct {
+	Line    int    // 1-based line number of the offending record
+	Ref     string // its reference/chromosome name
+	Pos     int    // its start position, in the input's coordinate base
+	PrevRef string // reference of the preceding record
+	PrevPos int    // start position of the preceding record
+	Revisit bool   // Ref reappeared after records on other references
+}
+
+func (e *UnsortedError) Error() string {
+	if e.Revisit {
+		return fmt.Sprintf("not coordinate sorted: line %d has %s:%d, but %s already gave way to %s",
+			e.Line, e.Ref, e.Pos, e.Ref, e.PrevRef)
+	}
+	return fmt.Sprintf("not coordinate sorted: line %d has %s:%d, which follows %s:%d",
+		e.Line, e.Ref, e.Pos, e.PrevRef, e.PrevPos)
+}
 
 // IndexWriter builds a tabix (.tbi) index for a file that is already
 // BGZF-compressed and sorted (the file is not modified). The column positions,
@@ -29,6 +53,10 @@ func NewIndexWriter(opts *WriterOpts) *IndexWriter {
 // (filename + ".tbi"). It walks the file block by block, recording the virtual
 // offset at the start of each data line (skipping the configured header lines
 // and meta/comment lines).
+//
+// The records must be in coordinate order: positions ascending within a
+// reference, and each reference in one contiguous block. Otherwise no index is
+// written and the error is an [*UnsortedError].
 func (iw *IndexWriter) WriteIndex(filename string) error {
 	f, err := os.Open(filename)
 	if err != nil {
@@ -40,6 +68,9 @@ func (iw *IndexWriter) WriteIndex(filename string) error {
 	ib := &tbiIndexBuilder{opts: iw.opts, refs: make(map[string]*tbiRefBuilder)}
 	refIdx := make(map[string]int)
 	var refOrder []string
+
+	// Previous record, for the order check. lastRef is "" before the first one.
+	lastRef, lastStart := "", 0
 
 	lineNo := 0
 	for {
@@ -62,10 +93,20 @@ func (iw *IndexWriter) WriteIndex(filename string) error {
 				if perr != nil {
 					return perr
 				}
-				if _, seen := refIdx[l.ref]; !seen {
+				_, seen := refIdx[l.ref]
+				switch {
+				case l.ref != lastRef:
+					// A reference that was already left behind cannot resume:
+					// the linear index assumes offsets grow with position.
+					if seen {
+						return iw.unsorted(lineNo+1, l, lastRef, lastStart, true)
+					}
 					refIdx[l.ref] = len(refOrder)
 					refOrder = append(refOrder, l.ref)
+				case l.start < lastStart:
+					return iw.unsorted(lineNo+1, l, lastRef, lastStart, false)
 				}
+				lastRef, lastStart = l.ref, l.start
 				ib.addRecord(l, begin, end)
 			}
 			lineNo++
@@ -82,6 +123,24 @@ func (iw *IndexWriter) WriteIndex(filename string) error {
 	ib.refOrder = refOrder
 	ib.refIdx = refIdx
 	return ib.writeTBI(filename + ".tbi")
+}
+
+// unsorted builds the UnsortedError for a record that breaks coordinate order,
+// reporting positions in the input's own coordinate base rather than the
+// 0-based one the index uses internally.
+func (iw *IndexWriter) unsorted(lineNo int, l tabixLine, prevRef string, prevStart int, revisit bool) error {
+	base := 0
+	if !iw.opts.zeroBased {
+		base = 1
+	}
+	return &UnsortedError{
+		Line:    lineNo,
+		Ref:     l.ref,
+		Pos:     l.start + base,
+		PrevRef: prevRef,
+		PrevPos: prevStart + base,
+		Revisit: revisit,
+	}
 }
 
 // readBGZFLine reads a single line (without the trailing newline) from r. It
