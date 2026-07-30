@@ -169,17 +169,20 @@ func (s *VcfStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 				if !p.wantsSite(loc) {
 					continue
 				}
+				// One pass over the samples, emitting each one's ALT call or its
+				// reference call, so rows are ordered by sample within the locus.
 				for _, sf := range fields {
-					if c, ok := CallFor(rec, sf.name, sf.f, j+1, alt); ok && q.Gate.Admits(c) {
-						if !emit(c) {
+					if c, ok := CallFor(rec, sf.name, sf.f, j+1, alt); ok {
+						// A carrier is never also a reference call, even when the gate
+						// rejects it: a below-gate ALT is an uncertain carrier.
+						if q.Gate.Admits(c) && !emit(c) {
 							return false, nil
 						}
+						continue
 					}
-				}
-				if !q.IncludeRef {
-					continue
-				}
-				for _, sf := range fields {
+					if !q.IncludeRef {
+						continue
+					}
 					if c, ok := homRefCallFor(rec, sf.name, sf.f, j+1, alt, q.Gate); ok {
 						if !emit(c) {
 							return false, nil
