@@ -119,6 +119,15 @@ type VcfHeader struct {
 	sampleIdx map[string]int
 }
 
+// NewVcfHeader returns an empty VCFv4.2 header, for code that synthesizes a VCF
+// rather than reading one.
+//
+// Every other route to a *VcfHeader goes through parsing, so without this a
+// writer building records from scratch has to borrow a header from some input
+// file -- and then cannot control the sample roster or the FORMAT definitions it
+// declares. Populate it with SetSamples, AddFormat, AddContig and AddLine.
+func NewVcfHeader() *VcfHeader { return newHeader() }
+
 func newHeader() *VcfHeader {
 	return &VcfHeader{
 		FileFormat: "##fileformat=VCFv4.2",
