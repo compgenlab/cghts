@@ -39,8 +39,18 @@ func NewIndexedVcfReader(filename string) (*IndexedVcfReader, error) {
 	if err != nil {
 		return nil, err
 	}
+	return NewIndexedVcfReaderFrom(tr, filename), nil
+}
+
+// NewIndexedVcfReaderFrom wraps an already-open tabix reader, so the VCF can
+// come from something other than a local file — an HTTP-Range source or an
+// object store opened with [tabix.NewReaderFromSource].
+//
+// label is used only for error messages and provenance; a URL or bucket key is
+// exactly what belongs there. Ownership of tr transfers: Close releases it.
+func NewIndexedVcfReaderFrom(tr *tabix.Reader, label string) *IndexedVcfReader {
 	tr.DisableCache() // this reader caches decoded VcfRecords itself (below)
-	return &IndexedVcfReader{tr: tr, filename: filename, cache: newVcfRecordCache(vcfCacheWindows)}, nil
+	return &IndexedVcfReader{tr: tr, filename: label, cache: newVcfRecordCache(vcfCacheWindows)}
 }
 
 // Header returns the VCF header, reading it from the start of the BGZF stream on
