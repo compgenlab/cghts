@@ -1,6 +1,7 @@
 package varstore
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -72,7 +73,7 @@ func TestPruningNeverChangesTheAnswer(t *testing.T) {
 
 			// Full scan, deliberately bypassing the pruning path.
 			var full []Call
-			if err := scanParquet(CallsPath(base), func(c Call) bool {
+			if err := scanParquet(mustMember(t, CallsPath(base)), func(c Call) bool {
 				if SameLocus(c.Locus(), l) {
 					full = append(full, c)
 				}
@@ -104,7 +105,7 @@ func TestPruningActuallySkips(t *testing.T) {
 	groups, kept := 0, 0
 	l := Locus{Chrom: "chr17", Pos: 1000, Ref: "A", Alt: "G"}
 	keep := locusFilter(l)
-	if err := eachRowGroup(CallsPath(base), func(rg parquet.RowGroup) {
+	if err := eachRowGroup(mustMember(t, CallsPath(base)), func(rg parquet.RowGroup) {
 		groups++
 		if keep(rg) {
 			kept++
@@ -172,4 +173,15 @@ func summarise(cs []Call) string {
 		out += fmt.Sprintf("%s:%d ", c.Chrom, c.Pos)
 	}
 	return out
+}
+
+// mustMember opens a store member for a test, failing the test if it cannot.
+func mustMember(t *testing.T, locator string) *member {
+	t.Helper()
+	m, err := openMember(context.Background(), locator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Close() })
+	return m
 }
