@@ -62,10 +62,14 @@ type Record struct {
 // summaries are never read — only the base-resolution data — so queried values
 // are exact.
 type Reader struct {
-	f    *os.File
-	bo   binary.ByteOrder
-	kind Kind
-	hdr  header
+	// ra is the byte source. Only ReadAt is ever used — a BBI file is pure
+	// random access — which is what lets a remote source stand in for a file
+	// with no other change.
+	ra     io.ReaderAt
+	closer io.Closer
+	bo     binary.ByteOrder
+	kind   Kind
+	hdr    header
 
 	names    []string          // reference names, in id order
 	nameToID map[string]uint32 // reference name -> chrom id
@@ -78,20 +82,55 @@ func Open(filename string) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Reader{f: f, nameToID: map[string]uint32{}, idToName: map[uint32]string{}}
-	if err := r.readHeader(); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("bbi: %s: %w", filename, err)
-	}
-	if err := r.readChromTree(); err != nil {
+	r, err := NewReaderFromSource(f, WithReaderCloser(f))
+	if err != nil {
 		f.Close()
 		return nil, fmt.Errorf("bbi: %s: %w", filename, err)
 	}
 	return r, nil
 }
 
-// Close releases the underlying file.
-func (r *Reader) Close() error { return r.f.Close() }
+// SourceOption configures a [Reader] built by [NewReaderFromSource].
+type SourceOption func(*sourceOpts)
+
+type sourceOpts struct{ closer io.Closer }
+
+// WithReaderCloser hands ownership of a resource to the reader, so
+// [Reader.Close] releases it. Without it the caller keeps ownership.
+func WithReaderCloser(c io.Closer) SourceOption {
+	return func(o *sourceOpts) { o.closer = c }
+}
+
+// NewReaderFromSource parses a BBI file from any random-access source, so a
+// bigWig or bigBed can be queried over HTTP range requests or from an object
+// store without being downloaded first.
+func NewReaderFromSource(ra io.ReaderAt, opts ...SourceOption) (*Reader, error) {
+	var o sourceOpts
+	for _, opt := range opts {
+		opt(&o)
+	}
+	r := &Reader{
+		ra:       ra,
+		closer:   o.closer,
+		nameToID: map[string]uint32{},
+		idToName: map[uint32]string{},
+	}
+	if err := r.readHeader(); err != nil {
+		return nil, err
+	}
+	if err := r.readChromTree(); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// Close releases the underlying source, if the reader owns it.
+func (r *Reader) Close() error {
+	if r.closer != nil {
+		return r.closer.Close()
+	}
+	return nil
+}
 
 // Kind reports whether this is a bigWig or bigBed file.
 func (r *Reader) Kind() Kind { return r.kind }
@@ -106,7 +145,7 @@ func (r *Reader) RefNames() []string { return r.names }
 // readAt reads exactly n bytes at the given file offset.
 func (r *Reader) readAt(off int64, n int) ([]byte, error) {
 	b := make([]byte, n)
-	if _, err := r.f.ReadAt(b, off); err != nil {
+	if _, err := r.ra.ReadAt(b, off); err != nil {
 		return nil, err
 	}
 	return b, nil

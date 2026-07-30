@@ -68,8 +68,16 @@ func LoadTBI(filename string) (*BinIndex, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return LoadTBIFrom(f)
+}
 
-	r := bgzf.NewReader(f)
+// LoadTBIFrom parses a TBI index from a raw, still-compressed stream.
+//
+// This is the seam for indexes that are not files — fetched over HTTP, read
+// from an object store — so the caller supplies the bytes and this package
+// stays out of the business of knowing where they came from.
+func LoadTBIFrom(rd io.Reader) (*BinIndex, error) {
+	r := bgzf.NewReader(rd)
 
 	var magic [4]byte
 	if _, err := io.ReadFull(r, magic[:]); err != nil {
@@ -78,7 +86,11 @@ func LoadTBI(filename string) (*BinIndex, error) {
 	if magic != [4]byte{'T', 'B', 'I', 1} {
 		return nil, fmt.Errorf("tbi: invalid magic: %x", magic)
 	}
+	return parseTBIBody(r)
+}
 
+// parseTBIBody reads a TBI index whose 4-byte magic has already been consumed.
+func parseTBIBody(r io.Reader) (*BinIndex, error) {
 	var nRef int32
 	if err := binary.Read(r, binary.LittleEndian, &nRef); err != nil {
 		return nil, fmt.Errorf("tbi: reading n_ref: %w", err)

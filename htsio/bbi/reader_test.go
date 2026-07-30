@@ -227,3 +227,94 @@ func TestBigBedQuery(t *testing.T) {
 		t.Fatalf("all: %+v", got)
 	}
 }
+
+// A BBI file is pure random access, so a remote source should behave exactly
+// like a local one. This pins that, and that queries do not pull the whole file.
+func TestNewReaderFromSourceMatchesLocal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.bw")
+	var items []wigItem
+	for i := 0; i < 5000; i++ {
+		items = append(items, wigItem{start: uint32(i * 100), end: uint32(i*100 + 100), val: float32(i)})
+	}
+	writeBigWig(t, path, "chr1", 1000000, items)
+
+	local, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	remote, err := NewReaderFromSource(f)
+	if err != nil {
+		t.Fatalf("NewReaderFromSource: %v", err)
+	}
+	defer remote.Close()
+
+	if got, want := remote.Kind(), local.Kind(); got != want {
+		t.Errorf("Kind = %v, want %v", got, want)
+	}
+	if got, want := len(remote.RefNames()), len(local.RefNames()); got != want {
+		t.Errorf("RefNames count = %d, want %d", got, want)
+	}
+	if !remote.HasRef("chr1") {
+		t.Error("HasRef(chr1) false on a source-backed reader")
+	}
+
+	lv := collect(t, local, "chr1", 1000, 2000)
+	rv := collect(t, remote, "chr1", 1000, 2000)
+	if len(lv) != len(rv) {
+		t.Fatalf("got %d intervals, local gave %d", len(rv), len(lv))
+	}
+	for i := range lv {
+		if *lv[i] != *rv[i] {
+			t.Fatalf("interval %d differs: source %+v, local %+v", i, rv[i], lv[i])
+		}
+	}
+	if len(lv) == 0 {
+		t.Fatal("query returned nothing; the comparison proves nothing")
+	}
+}
+
+// Close releases the source only when the reader was given ownership.
+func TestSourceCloserOwnership(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.bw")
+	writeBigWig(t, path, "chr1", 10000, []wigItem{{start: 0, end: 100, val: 1}})
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewReaderFromSource(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close with no owned resource: %v", err)
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		t.Errorf("reader closed a source it did not own: %v", err)
+	}
+	f.Close()
+
+	f2, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := NewReaderFromSource(f2, WithReaderCloser(f2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := f2.Seek(0, 0); err == nil {
+		t.Error("reader did not close a source it owned")
+	}
+}

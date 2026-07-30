@@ -14,6 +14,14 @@ import (
 type BigBedOptions struct {
 	Name     string // INFO/FORMAT key to add
 	Filename string // bigBed (.bb) file
+
+	// Reader, when set, is used instead of opening Filename — so a caller can
+	// supply a source that is not a local file, built with
+	// bbi.NewReaderFromSource. Filename is then only a label, used for
+	// provenance in the header definitions.
+	//
+	// Ownership transfers: Close releases it.
+	Reader   *bbi.Reader
 	Sample   string // "" = INFO; otherwise a FORMAT field for this sample
 	Col      int    // 1-based value column; 0 = presence flag
 	IsNumber bool   // declare the value Float
@@ -40,9 +48,12 @@ type BigBedAnnotator struct {
 
 // NewBigBedAnnotator opens the bigBed file and returns the annotator.
 func NewBigBedAnnotator(opts BigBedOptions) (*BigBedAnnotator, error) {
-	r, err := bbi.Open(opts.Filename)
-	if err != nil {
-		return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+	r := opts.Reader
+	if r == nil {
+		var err error
+		if r, err = bbi.Open(opts.Filename); err != nil {
+			return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+		}
 	}
 	if r.Kind() != bbi.BigBed {
 		r.Close()

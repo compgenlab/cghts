@@ -15,6 +15,14 @@ import (
 type BigWigOptions struct {
 	Name     string // INFO/FORMAT key to add
 	Filename string // bigWig (.bw) file
+
+	// Reader, when set, is used instead of opening Filename — so a caller can
+	// supply a source that is not a local file, built with
+	// bbi.NewReaderFromSource. Filename is then only a label, used for
+	// provenance in the header definitions.
+	//
+	// Ownership transfers: Close releases it.
+	Reader   *bbi.Reader
 	Sample   string // "" = INFO; otherwise a FORMAT field for this sample
 	NoHeader bool   // do not add a ##INFO/##FORMAT def
 
@@ -40,9 +48,12 @@ type BigWigAnnotator struct {
 
 // NewBigWigAnnotator opens the bigWig file and returns the annotator.
 func NewBigWigAnnotator(opts BigWigOptions) (*BigWigAnnotator, error) {
-	r, err := bbi.Open(opts.Filename)
-	if err != nil {
-		return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+	r := opts.Reader
+	if r == nil {
+		var err error
+		if r, err = bbi.Open(opts.Filename); err != nil {
+			return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+		}
 	}
 	if r.Kind() != bbi.BigWig {
 		r.Close()

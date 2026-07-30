@@ -51,8 +51,13 @@ func LoadCSI(filename string) (*CSIIndex, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return LoadCSIFrom(f)
+}
 
-	r := bgzf.NewReader(f)
+// LoadCSIFrom parses a CSI index from a raw, still-compressed stream. See
+// [LoadTBIFrom] for why this seam exists.
+func LoadCSIFrom(rd io.Reader) (*CSIIndex, error) {
+	r := bgzf.NewReader(rd)
 
 	var magic [4]byte
 	if _, err := io.ReadFull(r, magic[:]); err != nil {
@@ -61,7 +66,11 @@ func LoadCSI(filename string) (*CSIIndex, error) {
 	if magic != [4]byte{'C', 'S', 'I', 1} {
 		return nil, fmt.Errorf("csi: invalid magic: %x", magic)
 	}
+	return parseCSIBody(r)
+}
 
+// parseCSIBody reads a CSI index whose 4-byte magic has already been consumed.
+func parseCSIBody(r io.Reader) (*CSIIndex, error) {
 	idx := &CSIIndex{}
 
 	if err := binary.Read(r, binary.LittleEndian, &idx.minShift); err != nil {

@@ -27,3 +27,18 @@ type ByteSource interface {
 	// Close releases any resources held by the source.
 	Close() error
 }
+
+// ReadSeeker adapts a ByteSource to the io.ReadSeeker that block-compressed
+// readers expect.
+//
+// It exists because the two halves of the abstraction meet awkwardly: a remote
+// source is naturally random-access (ReadAt over byte ranges), while BGZF
+// decompression is naturally sequential-with-seeks. io.SectionReader bridges
+// exactly that, given a length — which is why ByteSource reports Size.
+func ReadSeeker(src ByteSource) (io.ReadSeeker, error) {
+	size, err := src.Size()
+	if err != nil {
+		return nil, err
+	}
+	return io.NewSectionReader(src, 0, size), nil
+}
