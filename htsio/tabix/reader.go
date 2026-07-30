@@ -290,6 +290,39 @@ func (tr *Reader) ColumnNames() ([]string, error) {
 	return tr.colNames, nil
 }
 
+// HeaderLines returns the leading meta lines — those beginning with the index's
+// meta character — from the start of the file.
+//
+// It reads through the same byte source as queries do, which is what lets a
+// format whose header is meta-marked rather than counted (VCF, where every line
+// up to and including #CHROM starts with '#') recover its header from a remote
+// source instead of reopening the file by name.
+//
+// Returns nil when the index declares no meta character.
+func (tr *Reader) HeaderLines() ([]string, error) {
+	if tr.meta.Meta == 0 {
+		return nil, nil
+	}
+	if err := tr.ir.SeekToVirtualOffset(0); err != nil {
+		return nil, fmt.Errorf("tabix: reading header: %w", err)
+	}
+	sc := bufio.NewScanner(tr.ir)
+	sc.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+
+	var out []string
+	for sc.Scan() {
+		line := sc.Text()
+		if line == "" || line[0] != byte(tr.meta.Meta) {
+			break // first data line: the header is done
+		}
+		out = append(out, line)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("tabix: reading header: %w", err)
+	}
+	return out, nil
+}
+
 // ColumnByName returns the 1-based column number for the named column, matching
 // it against the header (see [Reader.ColumnNames]). It returns an error when the
 // file has no header or the name is not found.

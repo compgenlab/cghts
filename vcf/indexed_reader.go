@@ -2,8 +2,10 @@ package vcf
 
 import (
 	"container/list"
+	"fmt"
 	"iter"
 	"sort"
+	"strings"
 
 	"github.com/compgenlab/cghts/htsio/tabix"
 )
@@ -57,14 +59,29 @@ func NewIndexedVcfReaderFrom(tr *tabix.Reader, label string) *IndexedVcfReader {
 // first call.
 func (r *IndexedVcfReader) Header() (*VcfHeader, error) {
 	if r.header == nil {
-		hr, err := NewVcfFile(r.filename)
+		// Read through the tabix reader rather than reopening by name. That is
+		// what makes this work for a source that is not a file at all, and it
+		// saves a second open and decompression even when it is one.
+		lines, err := r.tr.HeaderLines()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("vcf: %s: %w", r.filename, err)
 		}
-		defer hr.Close()
-		h, err := hr.Header()
+		var meta []string
+		var chromLine string
+		for _, l := range lines {
+			switch {
+			case strings.HasPrefix(l, "#CHROM"):
+				chromLine = l
+			case strings.HasPrefix(l, "##"):
+				meta = append(meta, l)
+			}
+		}
+		if chromLine == "" && len(meta) == 0 {
+			return nil, fmt.Errorf("vcf: %s: missing header", r.filename)
+		}
+		h, err := parseHeaderLines(meta, chromLine)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("vcf: %s: %w", r.filename, err)
 		}
 		r.header = h
 	}

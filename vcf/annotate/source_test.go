@@ -257,3 +257,44 @@ func TestIndexedGTFFromReader(t *testing.T) {
 		}
 	}
 }
+
+// The VCF header must come through the byte source too. This is the case that
+// silently defeated the whole remote path: everything constructed fine, then
+// the first Annotate reopened the file by name to read the header.
+func TestVcfHeaderReadFromSourceNotFilename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "src.vcf.gz")
+	writeAnnSource(t, path)
+
+	data, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idxf, err := os.Open(path + ".tbi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idxf.Close()
+	tr, err := tabix.NewReaderFromSource(data, idxf, tabix.WithCloser(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A label that is deliberately not openable: if anything reaches for the
+	// filesystem using it, this fails.
+	a, err := NewVcfAnnotation(VcfOptions{
+		Name:     "sig",
+		Field:    "SIG",
+		Filename: "s3://bucket/not/a/real/path.vcf.gz",
+		Exact:    true,
+		Reader:   tr,
+	})
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	defer a.Close()
+
+	if got := annotateOne(t, a, "chr17", 7676154, "C", "T"); got != "Pathogenic" {
+		t.Errorf("annotation = %q, want Pathogenic — the header path reached for the filename", got)
+	}
+}
