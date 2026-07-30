@@ -292,6 +292,10 @@ type VcfRecord struct {
 	formatRaw string
 	sampleRaw []string
 	samples   []*Attributes
+
+	// fmtKeysExplicit means fmtKeys was set by SetFormatKeys and must be used
+	// verbatim on write, rather than derived from sample 0. See SetFormatKeys.
+	fmtKeysExplicit bool
 }
 
 // fixedCol returns fixed column k (0..7) and whether it is present.
@@ -387,6 +391,61 @@ func NewRecord(chrom string, pos int, ref string, alt []string) *VcfRecord {
 		info:     newAttributes(),
 		fmtDone:  true, // no samples
 	}
+}
+
+// NewRecordWithSamples is NewRecord with n sample columns, for synthesizing a
+// record that carries genotypes.
+func NewRecordWithSamples(chrom string, pos int, ref string, alt []string, n int) *VcfRecord {
+	r := NewRecord(chrom, pos, ref, alt)
+	r.EnsureSamples(n)
+	return r
+}
+
+// EnsureSamples grows the record to at least n sample columns.
+//
+// NewRecord deliberately produces a record with no sample columns, and every
+// per-sample path is bounded by that count: Sample rejects every index, AddFormat
+// fails through it, and serialize emits no FORMAT column at all. So without this
+// a synthesized record cannot express a genotype -- which is what code building a
+// VCF from something other than a VCF (a genotype store, a simulator, a merger)
+// needs to do.
+//
+// New slots start with no attributes and render as "." for every FORMAT key until
+// set. Existing slots, parsed or not, are left alone.
+func (r *VcfRecord) EnsureSamples(n int) {
+	r.ensureFormat()
+	// Keep the two slices aligned before extending; a parsed record allocates
+	// samples to match sampleRaw, but nothing else guarantees it.
+	for len(r.samples) < len(r.sampleRaw) {
+		r.samples = append(r.samples, nil)
+	}
+	if n <= len(r.sampleRaw) {
+		return
+	}
+	for len(r.sampleRaw) < n {
+		r.sampleRaw = append(r.sampleRaw, missing)
+		r.samples = append(r.samples, newAttributes())
+	}
+	r.dirty = true
+}
+
+// SetFormatKeys fixes the FORMAT column keys explicitly rather than deriving them
+// from sample 0 on write.
+//
+// serialize takes the FORMAT column from Sample(0).Keys(), which is what lets an
+// annotator add a per-sample key and have it show up. The cost is that sample 0
+// decides the column for everyone, and in a genotype matrix the first sample is
+// routinely the one with no call -- its short key list would then truncate every
+// other sample's fields. Setting the keys explicitly takes that decision away
+// from whichever sample happens to be first.
+//
+// Deriving stays the default, so annotators that add a key to sample 0 are
+// unaffected.
+func (r *VcfRecord) SetFormatKeys(keys []string) {
+	r.ensureFormat()
+	r.fmtKeys = append([]string(nil), keys...)
+	r.fmtKeysExplicit = true
+	r.dirty = true
 }
 
 // Line returns the raw source line (without a trailing newline).
@@ -792,8 +851,7 @@ func (r *VcfRecord) serialize() string {
 	cols = append(cols, r.Info().infoString())
 
 	if n := r.NumSamples(); n > 0 {
-		s0, _ := r.Sample(0)
-		formatKeys := s0.Keys()
+		formatKeys := r.formatKeysForWrite()
 		cols = append(cols, strings.Join(formatKeys, ":"))
 		for i := 0; i < n; i++ {
 			si, _ := r.Sample(i)
@@ -801,6 +859,73 @@ func (r *VcfRecord) serialize() string {
 		}
 	}
 	return strings.Join(cols, "\t")
+}
+
+// formatKeysForWrite returns the FORMAT column keys for serialization: the
+// **union of the keys present across all samples**.
+//
+// It has to be the union, because not every sample carries every FORMAT field.
+// Deriving the column from sample 0 alone -- which this used to do -- silently
+// drops any key the first sample happens to lack: an annotator that writes a
+// field to one sample (bigwig, bigbed and tabix all target a single
+// --sample) produced no output at all whenever that sample was not the first,
+// and in a genotype matrix the first sample is routinely the no-call one.
+//
+// Order is chosen so existing output is unchanged wherever it was already right:
+// the record's own FORMAT order first -- keeping GT leading and columns stable --
+// then any further keys in the order samples first mention them.
+//
+// A key no sample carries is omitted, which is what lets a caller drop a field by
+// removing it from every sample (cgkit's vcf-strip does exactly that). Keys fixed
+// by SetFormatKeys are the exception: those are emitted whether or not anything
+// carries them, so a writer can guarantee a stable column across records.
+func (r *VcfRecord) formatKeysForWrite() []string {
+	seen := map[string]bool{}
+	order := make([]string, 0, len(r.fmtKeys)+2)
+	add := func(k string) {
+		if !seen[k] {
+			seen[k] = true
+			order = append(order, k)
+		}
+	}
+
+	if r.fmtKeysExplicit {
+		for _, k := range r.fmtKeys {
+			add(k)
+		}
+	}
+
+	n := r.NumSamples()
+	inSamples := make(map[string]bool, len(r.fmtKeys)+2)
+	for i := 0; i < n; i++ {
+		s, err := r.Sample(i)
+		if err != nil {
+			continue
+		}
+		for _, k := range s.Keys() {
+			inSamples[k] = true
+		}
+	}
+
+	// The record's existing FORMAT order, minus anything every sample dropped.
+	if !r.fmtKeysExplicit {
+		for _, k := range r.fmtKeys {
+			if inSamples[k] {
+				add(k)
+			}
+		}
+	}
+	// Then whatever else the samples carry, first mention first.
+	for i := 0; i < n; i++ {
+		s, err := r.Sample(i)
+		if err != nil {
+			continue
+		}
+		for _, k := range s.Keys() {
+			add(k)
+		}
+	}
+	return order
 }
 
 // IsIndel reports whether the REF or any ALT allele is longer than one base.
