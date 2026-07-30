@@ -563,10 +563,21 @@ func (s *ParquetStore) callsWithRef(p *plan, keep rowGroupFilter) ([]Call, error
 			return true
 		}
 		k := canonLocus(loc)
-		// ALT rows first, already in roster order from the scan above.
-		out = append(out, altBySite[k]...)
+		// One pass over the roster, emitting each sample's ALT call or its reference
+		// call. Interleaved rather than ALT-block-then-reference-block, so rows are
+		// genuinely ordered by sample within a locus -- which is what the Calls
+		// contract promises. Emitting the blocks separately put an ALT carrier ahead
+		// of a lower-numbered sample's reference call.
+		alt := make(map[string]Call, len(altBySite[k]))
+		for _, c := range altBySite[k] {
+			alt[c.SampleID] = c
+		}
 		delete(altBySite, k)
 		for _, name := range wanted {
+			if c, ok := alt[name]; ok {
+				out = append(out, c)
+				continue
+			}
 			if carries[name][loc.Record()] {
 				continue // carries this or another alternate of the record
 			}
