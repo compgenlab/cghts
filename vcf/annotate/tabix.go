@@ -33,6 +33,15 @@ type TabixOptions struct {
 	// AutoConvert matches contig names across UCSC/Ensembl/NCBI naming (human
 	// primary contigs 1-22,X,Y,MT) instead of requiring an exact-string match.
 	AutoConvert bool
+
+	// Reader, when set, is used instead of opening Filename — so a caller can
+	// supply a source that is not a local file (an object store, an HTTP-Range
+	// reader) built with tabix.NewReaderFromSource. Filename is then only a
+	// label, used for provenance in the header definitions.
+	//
+	// Ownership transfers: Close releases it, exactly as it would a reader this
+	// package opened itself.
+	Reader *tabix.Reader
 }
 
 // TabixAnnotator adds INFO or FORMAT annotations from a tabix-indexed file. It
@@ -54,9 +63,12 @@ type TabixAnnotator struct {
 // column specified by name (ColName/AltName/RefName) is resolved against the
 // file's header.
 func NewTabixAnnotator(opts TabixOptions) (*TabixAnnotator, error) {
-	r, err := tabix.NewReader(opts.Filename)
-	if err != nil {
-		return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+	r := opts.Reader
+	if r == nil {
+		var err error
+		if r, err = tabix.NewReader(opts.Filename); err != nil {
+			return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+		}
 	}
 	for _, res := range []struct {
 		name string
@@ -274,6 +286,10 @@ type TabixGroupOptions struct {
 	Extend      int  // widen the query by N bases on each side (shared)
 	AutoConvert bool // cross-scheme contig-name matching
 	Fields      []TabixFieldOptions
+
+	// Reader, when set, is used instead of opening Filename. See
+	// [TabixOptions.Reader]; ownership transfers the same way.
+	Reader *tabix.Reader
 }
 
 type tabixRule struct {
@@ -307,9 +323,12 @@ type TabixAnnotationGroup struct {
 // NewTabixAnnotationGroup opens the source once and returns a grouped annotator. The
 // shared match columns and each field's value column may be given by header name.
 func NewTabixAnnotationGroup(opts TabixGroupOptions) (*TabixAnnotationGroup, error) {
-	r, err := tabix.NewReader(opts.Filename)
-	if err != nil {
-		return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+	r := opts.Reader
+	if r == nil {
+		var err error
+		if r, err = tabix.NewReader(opts.Filename); err != nil {
+			return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+		}
 	}
 	for _, res := range []struct {
 		name string

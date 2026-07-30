@@ -3,6 +3,7 @@ package tabix
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"iter"
 	"os"
 	"strconv"
@@ -34,10 +35,13 @@ type tabixMeta struct {
 // Reader reads BGZF-compressed, tabix-indexed text files (BED, VCF, GFF,
 // etc.) with random access by genomic region.
 type Reader struct {
-	ir   *bgzf.IndexedReader
-	f    *os.File
-	idx  tabixIndex
-	meta tabixMeta
+	ir *bgzf.IndexedReader
+	// closer releases whatever backs the reader: the file this package opened,
+	// or a source the caller handed over with [WithCloser]. It is nil when the
+	// caller keeps ownership.
+	closer io.Closer
+	idx    tabixIndex
+	meta   tabixMeta
 
 	colNames     []string
 	colNamesRead bool
@@ -92,30 +96,14 @@ func openReader(filename string) (*Reader, error) {
 			return nil, fmt.Errorf("tabix: loading TBI index: %w", err)
 		}
 		idx = tbi
-		meta = tabixMeta{
-			Format:    tbi.Format,
-			ColSeq:    tbi.ColSeq,
-			ColBeg:    tbi.ColBeg,
-			ColEnd:    tbi.ColEnd,
-			Meta:      tbi.Meta,
-			Skip:      tbi.Skip,
-			ZeroBased: tbi.ZeroBased,
-		}
+		meta = metaOfTBI(tbi)
 	} else if _, err := os.Stat(csiPath); err == nil {
 		csi, err := LoadCSI(csiPath)
 		if err != nil {
 			return nil, fmt.Errorf("tabix: loading CSI index: %w", err)
 		}
 		idx = csi
-		meta = tabixMeta{
-			Format:    csi.Format,
-			ColSeq:    csi.ColSeq,
-			ColBeg:    csi.ColBeg,
-			ColEnd:    csi.ColEnd,
-			Meta:      csi.Meta,
-			Skip:      csi.Skip,
-			ZeroBased: csi.ZeroBased,
-		}
+		meta = metaOfCSI(csi)
 	} else {
 		return nil, fmt.Errorf("tabix: no index found (.tbi or .csi) for %s", filename)
 	}
@@ -128,11 +116,107 @@ func openReader(filename string) (*Reader, error) {
 	ir := bgzf.NewIndexedReader(f)
 
 	return &Reader{
-		ir:   ir,
-		f:    f,
-		idx:  idx,
-		meta: meta,
+		ir:     ir,
+		closer: f,
+		idx:    idx,
+		meta:   meta,
 	}, nil
+}
+
+// ReaderOption configures a [Reader] built by [NewReaderFromSource].
+type ReaderOption func(*readerOpts)
+
+type readerOpts struct {
+	cacheWindows int
+	closer       io.Closer
+}
+
+// WithRecordCacheWindows sets the parsed-record cache size, in 16 kb windows.
+// A value <= 0 disables the cache.
+func WithRecordCacheWindows(n int) ReaderOption {
+	return func(o *readerOpts) { o.cacheWindows = n }
+}
+
+// WithCloser hands ownership of a resource to the reader, so [Reader.Close]
+// releases it.
+//
+// Ownership is explicit rather than inferred from whether the data stream
+// happens to implement io.Closer: a remote source is usually wrapped in an
+// io.SectionReader by the time it gets here, which is not a Closer even though
+// the thing underneath it very much needs closing.
+func WithCloser(c io.Closer) ReaderOption {
+	return func(o *readerOpts) { o.closer = c }
+}
+
+// NewReaderFromSource opens a tabix-indexed stream that is not a local file.
+//
+// data must be seekable — BGZF decompression seeks to block boundaries, and the
+// whole point of an index is to avoid reading the rest. index is the raw,
+// still-compressed .tbi or .csi stream; which one it is is detected from its
+// magic, so a caller that resolved the sidecar by trying both suffixes does not
+// have to tell us which it found.
+//
+// For a remote source, wrap it with [iosource.ReadSeeker] and pass the source
+// itself to [WithCloser].
+func NewReaderFromSource(data io.ReadSeeker, index io.Reader, opts ...ReaderOption) (*Reader, error) {
+	o := readerOpts{cacheWindows: DefaultRecordCacheWindows}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	idx, meta, err := loadIndexFrom(index)
+	if err != nil {
+		return nil, err
+	}
+	tr := &Reader{
+		ir:     bgzf.NewIndexedReader(data),
+		closer: o.closer,
+		idx:    idx,
+		meta:   meta,
+	}
+	if o.cacheWindows > 0 {
+		tr.recCache = newRecordCache(o.cacheWindows)
+	}
+	return tr, nil
+}
+
+// loadIndexFrom parses either index format, choosing by magic.
+func loadIndexFrom(rd io.Reader) (tabixIndex, tabixMeta, error) {
+	r := bgzf.NewReader(rd)
+
+	var magic [4]byte
+	if _, err := io.ReadFull(r, magic[:]); err != nil {
+		return nil, tabixMeta{}, fmt.Errorf("tabix: reading index magic: %w", err)
+	}
+	switch magic {
+	case [4]byte{'T', 'B', 'I', 1}:
+		tbi, err := parseTBIBody(r)
+		if err != nil {
+			return nil, tabixMeta{}, fmt.Errorf("tabix: loading TBI index: %w", err)
+		}
+		return tbi, metaOfTBI(tbi), nil
+	case [4]byte{'C', 'S', 'I', 1}:
+		csi, err := parseCSIBody(r)
+		if err != nil {
+			return nil, tabixMeta{}, fmt.Errorf("tabix: loading CSI index: %w", err)
+		}
+		return csi, metaOfCSI(csi), nil
+	default:
+		return nil, tabixMeta{}, fmt.Errorf("tabix: not a TBI or CSI index (magic %x)", magic)
+	}
+}
+
+func metaOfTBI(tbi *BinIndex) tabixMeta {
+	return tabixMeta{
+		Format: tbi.Format, ColSeq: tbi.ColSeq, ColBeg: tbi.ColBeg, ColEnd: tbi.ColEnd,
+		Meta: tbi.Meta, Skip: tbi.Skip, ZeroBased: tbi.ZeroBased,
+	}
+}
+
+func metaOfCSI(csi *CSIIndex) tabixMeta {
+	return tabixMeta{
+		Format: csi.Format, ColSeq: csi.ColSeq, ColBeg: csi.ColBeg, ColEnd: csi.ColEnd,
+		Meta: csi.Meta, Skip: csi.Skip, ZeroBased: csi.ZeroBased,
+	}
 }
 
 // DisableCache turns off the parsed-record cache (freeing any cached windows), so
@@ -141,10 +225,11 @@ func openReader(filename string) (*Reader, error) {
 // uncached path.
 func (tr *Reader) DisableCache() { tr.recCache = nil }
 
-// Close releases resources.
+// Close releases resources. It is a no-op when the caller retained ownership of
+// the underlying source (see [WithCloser]).
 func (tr *Reader) Close() error {
-	if tr.f != nil {
-		return tr.f.Close()
+	if tr.closer != nil {
+		return tr.closer.Close()
 	}
 	return nil
 }
