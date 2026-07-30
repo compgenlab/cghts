@@ -1,6 +1,7 @@
 package varstore
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -281,13 +282,8 @@ func (w *Writer) Close() error {
 
 // scanParquet streams path in batches, calling fn per row. fn returns false to
 // stop early. Batching keeps a whole-genome store from having to be resident.
-func scanParquet[T any](path string, fn func(T) bool) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	r := parquet.NewGenericReader[T](f)
+func scanParquet[T any](m *member, fn func(T) bool) error {
+	r := parquet.NewGenericReader[T](m.ra)
 	defer r.Close()
 
 	buf := make([]T, 1024)
@@ -313,6 +309,9 @@ func scanParquet[T any](path string, fn func(T) bool) error {
 // ParquetStore is a Store backed by the three-file Parquet set.
 type ParquetStore struct {
 	base       string
+	calls      *member
+	sites      *member
+	regions    *member
 	samples    []string
 	hasSites   bool
 	hasRegions bool
@@ -357,22 +356,31 @@ func (s *ParquetStore) Provenance() Provenance {
 // OpenParquet opens a Parquet store. base may be given either as the base name
 // or as the path to any one of the three files.
 func OpenParquet(base string) (*ParquetStore, error) {
+	return OpenParquetContext(context.Background(), base)
+}
+
+// OpenParquetContext opens a store from any locator: a filesystem path, an
+// http(s):// URL, or any scheme registered with iosource, such as s3://.
+//
+// Parquet suits remote reading unusually well. The footer carries per-row-group
+// statistics, and this package already prunes groups by them, so a locus query
+// against a remote store skips the pruned groups without transferring them at
+// all — the same mechanism that makes it fast locally makes it cheap remotely.
+//
+// The members stay open for the life of the store, so Close matters more than
+// it used to: it now releases them rather than being a no-op.
+func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error) {
 	base = TrimStoreSuffix(base)
-	callsPath := CallsPath(base)
-	f, err := os.Open(callsPath)
+	calls, err := openMember(ctx, CallsPath(base))
 	if err != nil {
 		return nil, fmt.Errorf("opening parquet store %s: %w", base, err)
 	}
-	defer f.Close()
-	st, err := f.Stat()
+	pf, err := parquet.OpenFile(calls.ra, calls.size)
 	if err != nil {
-		return nil, err
+		calls.Close()
+		return nil, fmt.Errorf("reading %s: %w", calls.name, err)
 	}
-	pf, err := parquet.OpenFile(f, st.Size())
-	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", callsPath, err)
-	}
-	s := &ParquetStore{base: base, meta: map[string]string{}}
+	s := &ParquetStore{base: base, calls: calls, meta: map[string]string{}}
 	for _, k := range []string{MetaSource, MetaProgram, MetaCommand, MetaMinDP} {
 		if v, ok := pf.Lookup(k); ok {
 			s.meta[k] = v
@@ -391,8 +399,14 @@ func OpenParquet(base string) (*ParquetStore, error) {
 	if v, ok := pf.Lookup(MetaSpans); ok && v != "" {
 		s.spans = SpanSemantics(v)
 	}
-	s.hasSites = fileExists(SitesPath(base))
-	s.hasRegions = fileExists(RegionsPath(base))
+	// The optional members: absent is normal (a --no-callable store has no
+	// regions), so failure to open is recorded rather than returned.
+	if m, err := openMember(ctx, SitesPath(base)); err == nil {
+		s.sites, s.hasSites = m, true
+	}
+	if m, err := openMember(ctx, RegionsPath(base)); err == nil {
+		s.regions, s.hasRegions = m, true
+	}
 	return s, nil
 }
 
@@ -473,7 +487,7 @@ func (s *ParquetStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 		// The ALT-only case genuinely streams. calls.parquet is written in store
 		// order, so rows are yielded as they decode with nothing buffered.
 		return func(yield func(Call, error) bool) {
-			err := scanParquetPruned(CallsPath(s.base), keep, func(c Call) bool {
+			err := scanParquetPruned(s.calls, keep, func(c Call) bool {
 				if !p.wantsCall(c) {
 					return true
 				}
@@ -527,7 +541,7 @@ func (s *ParquetStore) callsWithRef(p *plan, keep rowGroupFilter) ([]Call, error
 	// of a multiallelic record disqualifies every site split out of it.
 	altBySite := map[Locus][]Call{}
 	carries := map[string]map[RecordKey]bool{}
-	if err := scanParquetPruned(CallsPath(s.base), keep, func(c Call) bool {
+	if err := scanParquetPruned(s.calls, keep, func(c Call) bool {
 		if !p.wantsSample(c.SampleID) {
 			return true
 		}
@@ -557,7 +571,7 @@ func (s *ParquetStore) callsWithRef(p *plan, keep rowGroupFilter) ([]Call, error
 	}
 
 	var out []Call
-	err = scanParquetPruned(SitesPath(s.base), siteScanFilter(p.q), func(site Site) bool {
+	err = scanParquetPruned(s.sites, siteScanFilter(p.q), func(site Site) bool {
 		loc := site.Locus()
 		if !p.wantsSite(loc) {
 			return true
@@ -637,7 +651,7 @@ func (s *ParquetStore) Classify(l Locus, g Gate) ([]SampleState, error) {
 	}
 
 	calls := map[string]Call{}
-	if err := scanParquetPruned(CallsPath(s.base), locusFilter(l), func(c Call) bool {
+	if err := scanParquetPruned(s.calls, locusFilter(l), func(c Call) bool {
 		if SameLocus(c.Locus(), l) {
 			calls[c.SampleID] = c
 		}
@@ -649,7 +663,7 @@ func (s *ParquetStore) Classify(l Locus, g Gate) ([]SampleState, error) {
 	// Reached only for a locus in the catalog (or a block-semantics store), so a
 	// run bracketing the position genuinely means "called here".
 	called := map[string]bool{}
-	if err := scanParquetPruned(RegionsPath(s.base), coveringFilter(l.Chrom, l.Pos), func(r CalledSiteRun) bool {
+	if err := scanParquetPruned(s.regions, coveringFilter(l.Chrom, l.Pos), func(r CalledSiteRun) bool {
 		if SameChrom(r.Chrom, l.Chrom) && l.Pos >= r.Start && l.Pos <= r.End {
 			called[r.SampleID] = true
 		}
@@ -729,7 +743,7 @@ func (s *ParquetStore) runsFor(samples []string, p *plan) (runsBySample, error) 
 		want[name] = true
 	}
 	out := runsBySample{}
-	err := scanParquetPruned(RegionsPath(s.base), runScanFilter(p.q), func(r CalledSiteRun) bool {
+	err := scanParquetPruned(s.regions, runScanFilter(p.q), func(r CalledSiteRun) bool {
 		if !want[r.SampleID] {
 			return true
 		}
@@ -756,14 +770,14 @@ func (s *ParquetStore) Sites(fn func(Site) bool) error {
 	if !s.hasSites {
 		return fmt.Errorf("%s is missing", SitesPath(s.base))
 	}
-	return scanParquet(SitesPath(s.base), fn)
+	return scanParquet(s.sites, fn)
 }
 
 // Site returns the catalog entry for a locus, if the source reported it.
 func (s *ParquetStore) Site(l Locus) (Site, bool, error) {
 	var got Site
 	found := false
-	err := scanParquetPruned(SitesPath(s.base), locusFilter(l), func(site Site) bool {
+	err := scanParquetPruned(s.sites, locusFilter(l), func(site Site) bool {
 		if SameLocus(site.Locus(), l) {
 			got, found = site, true
 			return false
@@ -782,7 +796,7 @@ func (s *ParquetStore) SiteKnown(l Locus) (bool, error) {
 		return false, fmt.Errorf("%w: %s is missing", ErrNotClassifiable, SitesPath(s.base))
 	}
 	found := false
-	err := scanParquetPruned(SitesPath(s.base), locusFilter(l), func(site Site) bool {
+	err := scanParquetPruned(s.sites, locusFilter(l), func(site Site) bool {
 		if SameLocus(site.Locus(), l) {
 			found = true
 			return false
@@ -793,4 +807,12 @@ func (s *ParquetStore) SiteKnown(l Locus) (bool, error) {
 }
 
 // Close is a no-op; ParquetStore opens files per query.
-func (s *ParquetStore) Close() error { return nil }
+func (s *ParquetStore) Close() error {
+	var first error
+	for _, m := range []*member{s.calls, s.sites, s.regions} {
+		if err := m.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}

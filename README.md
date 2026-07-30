@@ -156,6 +156,24 @@ Random-access byte sources for genomic files behind a concurrency-safe
 - `ByteSource` interface for other transports (SFTP, S3, …)
 - Sibling-file resolution (`.bai`/`.tbi`/…) over both local and HTTP locators
 - `ReadSeeker` adapts a `ByteSource` for readers that decompress sequentially
+- **`iosource.Open(ctx, locator)`** dispatches on scheme: a plain path opens a
+  file, `http(s)://` uses Range requests, and other schemes come from registered
+  transports
+
+**S3** lives in `iosource/s3`. Importing it registers the scheme, so a blank
+import is all it takes:
+
+```go
+import _ "github.com/compgenlab/cghts/iosource/s3"
+
+src, _ := iosource.Open(ctx, "s3://bucket/clinvar.vcf.gz")
+```
+
+Credentials come from the standard AWS chain — environment, `~/.aws/credentials`
+and `~/.aws/config` (honouring `AWS_PROFILE`), then a container or EC2 instance
+role — so SSO profiles, `role_arn`+`source_profile` chains and
+`credential_process` all work. `s3.WithProfile`, `WithRegion` and `WithEndpoint`
+override explicitly; `AWS_ENDPOINT_URL` targets an S3-compatible gateway.
 
 **Wired into tabix and bbi.** `tabix.NewReaderFromSource(data, index, …)` takes a
 seekable data stream and a raw `.tbi`/`.csi` stream, detecting which index format
@@ -172,6 +190,14 @@ defer r.Close()
 ```
 
 A narrow query over a 4.75 MB indexed VCF fetches ~1.8% of the file.
+
+**varstore reads remotely too.** `OpenParquetContext(ctx, locator)` opens a
+Parquet store from a path, a URL or an `s3://` prefix. Parquet suits this
+unusually well: the footer carries per-row-group statistics and the package
+already prunes groups by them, so a locus query skips pruned groups without
+transferring them at all. Store members are held open for the store's lifetime
+rather than reopened per query — which also removes a repeated footer parse on
+local reads.
 
 ### support packages
 
