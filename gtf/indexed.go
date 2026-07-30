@@ -55,13 +55,20 @@ func NewIndexedAnnotationSource(gtfPath string, requiredTags []string) (*Indexed
 	if err != nil {
 		return nil, fmt.Errorf("gtf: open indexed %s: %w", gtfPath, err)
 	}
+	return NewIndexedAnnotationSourceFrom(tr, requiredTags), nil
+}
+
+// NewIndexedAnnotationSourceFrom wraps an already-open tabix reader, so the gene
+// model can be queried from a source that is not a local file — see
+// [tabix.NewReaderFromSource]. Ownership of tr transfers: Close releases it.
+func NewIndexedAnnotationSourceFrom(tr *tabix.Reader, requiredTags []string) *IndexedAnnotationSource {
 	return &IndexedAnnotationSource{
 		tr:    tr,
 		tags:  requiredTags,
 		cap:   defaultGeneCacheCap,
 		ll:    list.New(),
 		cache: make(map[geneKey]*list.Element),
-	}, nil
+	}
 }
 
 // RefNames returns the chromosomes present in the index, mirroring

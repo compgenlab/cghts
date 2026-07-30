@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/compgenlab/cghts/htsio/tabix"
 	"github.com/compgenlab/cghts/vcf"
 )
 
@@ -22,6 +23,14 @@ type VcfOptions struct {
 	// AutoConvert matches contig names across UCSC/Ensembl/NCBI naming (human
 	// primary contigs 1-22,X,Y,MT) instead of requiring an exact-string match.
 	AutoConvert bool
+
+	// Reader, when set, is used instead of opening Filename — so the source can
+	// be an object store or HTTP-Range reader built with
+	// tabix.NewReaderFromSource. Filename is then only a label, recorded as the
+	// annotation's provenance in the header definition.
+	//
+	// Ownership transfers: Close releases it.
+	Reader *tabix.Reader
 }
 
 // VcfAnnotation annotates a record from a tabix-indexed source VCF: it adds a
@@ -38,9 +47,14 @@ type VcfAnnotation struct {
 
 // NewVcfAnnotation opens the source VCF and returns the annotator.
 func NewVcfAnnotation(opts VcfOptions) (*VcfAnnotation, error) {
-	r, err := vcf.NewIndexedVcfReader(opts.Filename)
-	if err != nil {
-		return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+	var r *vcf.IndexedVcfReader
+	if opts.Reader != nil {
+		r = vcf.NewIndexedVcfReaderFrom(opts.Reader, opts.Filename)
+	} else {
+		var err error
+		if r, err = vcf.NewIndexedVcfReader(opts.Filename); err != nil {
+			return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+		}
 	}
 	isID := opts.Name == "@ID"
 	if isID {
@@ -159,6 +173,10 @@ type VcfGroupOptions struct {
 	Filename    string
 	AutoConvert bool // cross-scheme contig-name matching (see [VcfOptions.AutoConvert])
 	Fields      []VcfFieldOptions
+
+	// Reader, when set, is used instead of opening Filename. See
+	// [VcfOptions.Reader]; ownership transfers the same way.
+	Reader *tabix.Reader
 }
 
 // vcfRule is a resolved [VcfFieldOptions] (isID pre-computed).
@@ -187,9 +205,14 @@ type VcfAnnotationGroup struct {
 // NewVcfAnnotationGroup opens the source VCF once and returns a grouped annotator for
 // all the given field rules.
 func NewVcfAnnotationGroup(opts VcfGroupOptions) (*VcfAnnotationGroup, error) {
-	r, err := vcf.NewIndexedVcfReader(opts.Filename)
-	if err != nil {
-		return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+	var r *vcf.IndexedVcfReader
+	if opts.Reader != nil {
+		r = vcf.NewIndexedVcfReaderFrom(opts.Reader, opts.Filename)
+	} else {
+		var err error
+		if r, err = vcf.NewIndexedVcfReader(opts.Filename); err != nil {
+			return nil, fmt.Errorf("annotate: open %s: %w", opts.Filename, err)
+		}
 	}
 	g := &VcfAnnotationGroup{filename: opts.Filename, reader: r}
 	for _, f := range opts.Fields {
