@@ -155,6 +155,23 @@ Random-access byte sources for genomic files behind a concurrency-safe
   BAM/CRAM/VCF/bigWig can be queried remotely without downloading the whole file
 - `ByteSource` interface for other transports (SFTP, S3, …)
 - Sibling-file resolution (`.bai`/`.tbi`/…) over both local and HTTP locators
+- `ReadSeeker` adapts a `ByteSource` for readers that decompress sequentially
+
+**Wired into tabix and bbi.** `tabix.NewReaderFromSource(data, index, …)` takes a
+seekable data stream and a raw `.tbi`/`.csi` stream, detecting which index format
+it was given from the magic; `bbi.NewReaderFromSource(readerAt, …)` does the same
+for bigWig/bigBed, which are pure random access. `LoadTBIFrom` / `LoadCSIFrom`
+parse an index from any reader. The path-based constructors are unchanged.
+
+```go
+src, _ := iosource.NewHTTPRange(url)          // or any ByteSource
+rs, _ := iosource.ReadSeeker(src)
+idx, _, _ := iosource.ResolveSibling(url, []string{".tbi", ".csi"}, iosource.HTTPSibling)
+r, _ := tabix.NewReaderFromSource(rs, idx, tabix.WithCloser(src))
+defer r.Close()
+```
+
+A narrow query over a 4.75 MB indexed VCF fetches ~1.8% of the file.
 
 ### support packages
 
