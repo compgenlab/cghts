@@ -19,7 +19,7 @@ Nanopore-specific handling here (e.g. the aligner's homopolymer discounts) is a
 reusable feature, not the library's focus.
 
 **Module:** `github.com/compgenlab/cghts`
-**Go version:** 1.23
+**Go version:** 1.24 (raised from 1.23 by `parquet-go`, which `varstore/` requires)
 
 ## Commands
 
@@ -51,6 +51,8 @@ standalone regardless of the ambient workspace.
 - **`gtf/`** — GTF gene-model parsing (genes → transcripts → exons/CDS) with an interval index and genic-region classification; a port of ngsutilsj's `GTFAnnotationSource`. `AnnotationSource` (in-memory) and `IndexedAnnotationSource` (tabix-backed).
 - **`vcf/`** — Streaming and tabix-indexed VCF reader/writer with a lazy record model (`VcfRecord` parses columns on first access; `Pos` is 1-based). Subpackages: `vcf/annotate` (composable INFO/FORMAT annotators + `Pipeline`) and `vcf/filter` (composable FILTER-stamping filters).
 - **`iosource/`** — Pluggable random-access byte sources behind a concurrency-safe `io.ReaderAt`: local-file and HTTP(S)-Range implementations, plus sibling-index resolution. Lets index-driven readers fetch byte ranges from remote files.
+- **`varstore/`** — Sparse alt-only genotype store in Parquet (`calls`/`sites`/`regions` members) plus a VCF-backed store behind the same `Store` interface. The point of the interface is that both backends answer identically: a query against a VCF and against a store converted from it must agree, which is what the consuming CLI's cross-backend tests assert. **One method does the querying** — `Calls(Query) (iter.Seq2[Call, error], error)`. `Query` selects sites (`Loci`, `Spans`) on one axis and `Samples` on the other, and an **empty selector means no restriction** on that axis, so the zero `Query` is every genotype in the store. `IncludeRef` additionally emits reference (`0/0`) calls. Implementations pick their own access strategy from the query's shape — pruned per-locus lookups for a few loci, one ordered pass for many — so a caller cannot turn a variant panel into one row-group decode per variant. `CollectCalls` buffers into a slice for callers that do not stream.
+  Rules callers must respect: rows arrive in the **store's own order** (contig order as written, *not* lexicographic — sorting `chrom` as a string puts `chr10` before `chr2` and yields an unindexable VCF); `Missing == -1` (columns are required, absence is in-band, so test before use); `SpansSites` (a locus absent from `sites.parquet` is unassayed for *every* sample, and the region runs must not be consulted); and `CanonKey`/`SameChrom` (stores keep the source's own contig spelling, so `chr17`/`17`/`NC_000017.11` must be compared canonically). A reference call is emitted only where the genotype was **all**-reference: at a multiallelic record a 0/2 sample carries a different alternate, so writing `0/0` for it would fabricate a genotype — the exclusion is keyed on the source *record* (`Locus.Record()`), not the split locus. `Calls` with `IncludeRef` and `Classify` both return `ErrNotClassifiable` rather than degrade when the store lacks the evidence (no `sites`/`regions`, or built `--no-callable`).
 - **`support/sequtils/`** — DNA utilities: IUPAC ambiguity code matching, reverse complement, homopolymer run analysis, 4-bit DNA encoding.
 - **`support/stats/`** — 2×2 Fisher exact test, Phred/log2 conversions.
 - **`support/utils/`** — General utilities: semaphore for concurrency, float formatting, position-tracking reader.
@@ -86,6 +88,20 @@ CIGAR strings use standard ops: M (match), I (insertion), D (deletion), S (soft 
 
 ## Note
 
-This library carries no CLI dependencies (no cobra/pflag). The only third-party
-dependency is `github.com/ulikunitz/xz` (CRAM LZMA). Keep it that way — CLI
-concerns belong in `cgkit` or `nupa`.
+This library carries **no CLI dependencies** (no cobra/pflag) — CLI concerns belong
+in `cgkit` or `nupa`. Keep it that way.
+
+Third-party dependencies are deliberately few, and each one must be a *file-format
+or codec* need that the standard library cannot meet:
+
+- `github.com/ulikunitz/xz` — CRAM LZMA.
+- `github.com/parquet-go/parquet-go` — the `varstore/` Parquet genotype store.
+  This is the heaviest dependency here: it pulls ten modules transitively,
+  including `google.golang.org/protobuf` and `twpayne/go-geom`, and it is why the
+  `go` directive is 1.24. It was added knowingly, because `varstore` is consumed by
+  both `cgkit` and Cohort Studio and its four-state classification semantics must
+  not be reimplemented per consumer. Go links only imported packages, so binaries
+  that never touch `varstore` are unaffected in size — the cost is `go.sum` weight
+  and supply-chain surface for every consumer.
+
+Do not add anything further without a comparable justification.
