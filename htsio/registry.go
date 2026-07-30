@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"github.com/compgenlab/cghts/iosource"
 	"io"
 	"os"
 )
@@ -20,6 +21,11 @@ type ReaderRegistration struct {
 	// NewFromFile creates a SamReader from a filename. The reader opens
 	// its own file handle(s). This is the fast path — no nested readers.
 	NewFromFile func(filename string, opts *SamReaderOpts) (SamReader, error)
+
+	// NewFromSource creates a SamReader from a random-access source, which is
+	// what indexed region queries need. Optional: a format that cannot seek
+	// leaves it nil and is read sequentially instead.
+	NewFromSource func(src iosource.ByteSource, locator string, opts *SamReaderOpts) (SamReader, error)
 
 	// NewFromStream creates a SamReader from a stream (e.g., stdin).
 	// The io.ReadCloser has peeked bytes prepended back via MultiReader.

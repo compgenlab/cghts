@@ -191,6 +191,13 @@ defer r.Close()
 
 A narrow query over a 4.75 MB indexed VCF fetches ~1.8% of the file.
 
+**BAM and CRAM read remotely too.** `htsio.OpenSamReader(ctx, locator)` opens a
+SAM/BAM/CRAM from a path, a URL or an `s3://` locator, resolving the `.bai` or
+`.crai` through the same transport, so indexed region queries work without
+downloading the file. For CRAM the reference is independent of where the data
+lives — `SetRefPath` takes any locator and `SetRefReader` an already-open one,
+so a remote CRAM with a local reference (or the reverse) is fine.
+
 **varstore reads remotely too.** `OpenParquetContext(ctx, locator)` opens a
 Parquet store from a path, a URL or an `s3://` prefix. Parquet suits this
 unusually well: the footer carries per-row-group statistics and the package

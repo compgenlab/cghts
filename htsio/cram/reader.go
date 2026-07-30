@@ -2,6 +2,7 @@ package cram
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"iter"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/compgenlab/cghts/htsio"
+	"github.com/compgenlab/cghts/iosource"
 	"github.com/compgenlab/cghts/seqio"
 )
 
@@ -22,6 +24,12 @@ func init() {
 				opts = htsio.NewSamReaderOpts()
 			}
 			return NewReader(filename, opts.RefPathValue(), opts)
+		},
+		NewFromSource: func(src iosource.ByteSource, locator string, opts *htsio.SamReaderOpts) (htsio.SamReader, error) {
+			if opts == nil {
+				opts = htsio.NewSamReaderOpts()
+			}
+			return NewReaderFromSource(src, locator, opts.RefPathValue(), opts)
 		},
 		NewFromStream: func(r io.ReadCloser, opts *htsio.SamReaderOpts) (htsio.SamReader, error) {
 			if opts == nil {
@@ -44,7 +52,13 @@ type Reader struct {
 	ref      seqio.ReferenceReader
 	opts     *htsio.SamReaderOpts
 	idx      *craiIndex // lazily loaded CRAI index for Query
-	queryFh  *os.File   // separate file handle for Query seeks
+	// queryRS is a second seekable view used by Query, independent of the
+	// sequential reader's position. It is an *os.File for a local CRAM and a
+	// section over a ByteSource for a remote one.
+	queryRS io.ReadSeeker
+	queryC  io.Closer
+	source  iosource.ByteSource
+	locator string
 }
 
 // NewReader creates a CRAM reader from a file path.
@@ -134,8 +148,8 @@ func (cr *Reader) Close() error {
 	if cr.ref != nil {
 		cr.ref.Close()
 	}
-	if cr.queryFh != nil {
-		cr.queryFh.Close()
+	if cr.queryC != nil {
+		cr.queryC.Close()
 	}
 	if cr.src != nil {
 		return cr.src.Close()
@@ -146,8 +160,8 @@ func (cr *Reader) Close() error {
 // Query returns an iterator over records overlapping the 0-based half-open
 // region [start, end) on the given reference. Requires a .crai index file.
 func (cr *Reader) Query(ref string, start, end int) (iter.Seq2[*htsio.SamRecord, error], error) {
-	if cr.filename == "" {
-		return nil, fmt.Errorf("cram: Query requires a file-backed reader")
+	if cr.filename == "" && cr.source == nil {
+		return nil, fmt.Errorf("cram: Query requires a file- or source-backed reader (a pure stream cannot seek)")
 	}
 
 	seqID, ok := cr.refMap[ref]
@@ -155,10 +169,20 @@ func (cr *Reader) Query(ref string, start, end int) (iter.Seq2[*htsio.SamRecord,
 		return nil, fmt.Errorf("cram: unknown reference %q", ref)
 	}
 
-	// Lazily load the CRAI index.
+	// Lazily load the CRAI index, from wherever the data lives.
 	if cr.idx == nil {
-		craiPath := cr.filename + ".crai"
-		idx, err := loadCRAI(craiPath)
+		var idx *craiIndex
+		var err error
+		if cr.source != nil {
+			rc, ferr := iosource.Sibling(context.Background())(cr.locator, ".crai")
+			if ferr != nil {
+				return nil, fmt.Errorf("cram: loading CRAI index: %w", ferr)
+			}
+			idx, err = loadCRAIFrom(rc)
+			rc.Close()
+		} else {
+			idx, err = loadCRAI(cr.filename + ".crai")
+		}
 		if err != nil {
 			return nil, fmt.Errorf("cram: loading CRAI index: %w", err)
 		}
@@ -171,13 +195,21 @@ func (cr *Reader) Query(ref string, start, end int) (iter.Seq2[*htsio.SamRecord,
 		return func(yield func(*htsio.SamRecord, error) bool) {}, nil
 	}
 
-	// Lazily open a separate file handle for queries.
-	if cr.queryFh == nil {
-		f, err := os.Open(cr.filename)
-		if err != nil {
-			return nil, err
+	// Lazily obtain the seekable view queries need.
+	if cr.queryRS == nil {
+		if cr.source != nil {
+			size, err := cr.source.Size()
+			if err != nil {
+				return nil, err
+			}
+			cr.queryRS = io.NewSectionReader(cr.source, 0, size)
+		} else {
+			f, err := os.Open(cr.filename)
+			if err != nil {
+				return nil, err
+			}
+			cr.queryRS, cr.queryC = f, f
 		}
-		cr.queryFh = f
 	}
 
 	return cr.iterCraiEntries(entries, seqID, start, end), nil
@@ -189,13 +221,13 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 	return func(yield func(*htsio.SamRecord, error) bool) {
 		for _, entry := range entries {
 			// Seek to the container.
-			if _, err := cr.queryFh.Seek(entry.containerOffset, io.SeekStart); err != nil {
+			if _, err := cr.queryRS.Seek(entry.containerOffset, io.SeekStart); err != nil {
 				yield(nil, fmt.Errorf("cram: seeking to container: %w", err))
 				return
 			}
 
 			// Read container header.
-			ch, err := readContainerHeader(cr.queryFh, cr.version())
+			ch, err := readContainerHeader(cr.queryRS, cr.version())
 			if err != nil {
 				yield(nil, fmt.Errorf("cram: reading container header: %w", err))
 				return
@@ -205,7 +237,7 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 			}
 
 			// Read compression header (first block).
-			compHdrBlock, err := readBlock(cr.queryFh, cr.version())
+			compHdrBlock, err := readBlock(cr.queryRS, cr.version())
 			if err != nil {
 				yield(nil, fmt.Errorf("cram: reading compression header: %w", err))
 				return
@@ -223,7 +255,7 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 			// Read remaining blocks (slices).
 			remainingBlocks := ch.NumBlocks - 1
 			for remainingBlocks > 0 {
-				sliceHdrBlock, err := readBlock(cr.queryFh, cr.version())
+				sliceHdrBlock, err := readBlock(cr.queryRS, cr.version())
 				if err != nil {
 					yield(nil, fmt.Errorf("cram: reading slice header: %w", err))
 					return
@@ -244,7 +276,7 @@ func (cr *Reader) iterCraiEntries(entries []craiEntry, seqID, start, end int) it
 				coreData := []byte{}
 				externalBlocks := make(map[int32][]byte)
 				for i := int32(0); i < sh.numBlocks; i++ {
-					blk, err := readBlock(cr.queryFh, cr.version())
+					blk, err := readBlock(cr.queryRS, cr.version())
 					if err != nil {
 						yield(nil, fmt.Errorf("cram: reading slice block %d: %w", i, err))
 						return
@@ -660,4 +692,30 @@ func (cr *Reader) findReferenceFromHeader() (string, error) {
 		break // only check first @SQ
 	}
 	return "", nil
+}
+
+// NewReaderFromSource opens a CRAM from any random-access source, so a remote
+// CRAM can be queried by region without being downloaded.
+//
+// The reference is independent of where the CRAM lives: refLocator may be a
+// local path or a remote locator, and a pre-opened reference set on opts takes
+// priority over both. All four combinations are valid.
+//
+// Ownership of src transfers: Close releases it.
+func NewReaderFromSource(src iosource.ByteSource, locator, refLocator string, opts *htsio.SamReaderOpts) (*Reader, error) {
+	size, err := src.Size()
+	if err != nil {
+		return nil, err
+	}
+	rc := io.NopCloser(io.NewSectionReader(src, 0, size))
+	cr, err := NewReaderFromStream(rc, locator, refLocator, opts)
+	if err != nil {
+		src.Close()
+		return nil, err
+	}
+	// NewReaderFromStream records the locator as the filename for messages; the
+	// source is what actually backs seeks and sidecar resolution.
+	cr.filename = ""
+	cr.source, cr.locator = src, locator
+	return cr, nil
 }
