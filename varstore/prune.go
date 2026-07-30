@@ -3,7 +3,6 @@ package varstore
 import (
 	"io"
 	"math"
-	"os"
 
 	"github.com/parquet-go/parquet-go"
 )
@@ -242,18 +241,9 @@ func unionFilter(q Query) rowGroupFilter {
 	}
 }
 
-// eachRowGroup calls fn for every row group in path, without reading any rows.
-func eachRowGroup(path string, fn func(parquet.RowGroup)) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	pf, err := parquet.OpenFile(f, st.Size())
+// eachRowGroup calls fn for every row group, without reading any rows.
+func eachRowGroup(m *member, fn func(parquet.RowGroup)) error {
+	pf, err := parquet.OpenFile(m.ra, m.size)
 	if err != nil {
 		return err
 	}
@@ -267,22 +257,13 @@ func eachRowGroup(path string, fn func(parquet.RowGroup)) error {
 //
 // Rows are addressed by seeking the generic reader to each surviving group's
 // offset, so decoding still goes through the same typed path as a full scan.
-func scanParquetPruned[T any](path string, keep rowGroupFilter, fn func(T) bool) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	pf, err := parquet.OpenFile(f, st.Size())
+func scanParquetPruned[T any](m *member, keep rowGroupFilter, fn func(T) bool) error {
+	pf, err := parquet.OpenFile(m.ra, m.size)
 	if err != nil {
 		return err
 	}
 
-	r := parquet.NewGenericReader[T](f)
+	r := parquet.NewGenericReader[T](m.ra)
 	defer r.Close()
 
 	buf := make([]T, 1024)
