@@ -3,6 +3,10 @@
 GO ?= go
 PKGS ?= ./...
 
+# Branch releases are cut from. Overridable so release-check can be exercised
+# from a topic branch.
+RELEASE_BRANCH ?= main
+
 # Match the project convention for a writable build cache.
 GOCACHE ?= /tmp/go-build-cache
 export GOCACHE
@@ -11,7 +15,7 @@ export GOCACHE
 # ignore any ambient go.work from parent directories (e.g. a dev workspace).
 export GOWORK := off
 
-.PHONY: test test-race cover vet fmt fmt-check tidy build check doc clean
+.PHONY: test test-race cover vet fmt fmt-check tidy build check doc clean release-check
 
 # Run the full test suite.
 test:
@@ -48,6 +52,20 @@ build:
 
 # One-shot gate: compile, vet, format check, and test.
 check: build vet fmt-check test
+
+# Gate to run BEFORE cutting a tag; it tags nothing itself. Verifies that the
+# state about to be tagged is the state that was tested -- clean tree, on the
+# release branch, in sync with origin, tag unused -- then runs the full check.
+# See scripts/release-check.sh for why each check is there.
+#
+#   make release-check
+#   make release-check TAG=v1.2.3
+#   make release-check RELEASE_BRANCH=topic   # exercise it off main
+release-check:
+	@sh scripts/release-check.sh "$(RELEASE_BRANCH)" "$(TAG)"
+	@$(MAKE) --no-print-directory check
+	@echo
+	@echo "release-check PASSED -- safe to tag."
 
 # Preview the pkg.go.dev documentation locally (requires network for the tool).
 doc:

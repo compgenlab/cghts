@@ -136,7 +136,7 @@ func TestWriterLinearIndexCoversFullSpan(t *testing.T) {
 	// The gene spans 0-based [17359999, 17558000), covering 16kb windows
 	// 17359999>>14 = 1059 through (17558000-1)>>14 = 1071.
 	geneStartWin := 17359999 >> 14 // 1059
-	_ = (17558000 - 1) >> 14 // geneEndWin = 1071
+	_ = (17558000 - 1) >> 14       // geneEndWin = 1071
 
 	// Every window the gene spans must have a non-zero linear index entry
 	// (or the same offset as the gene start window). A zero entry in windows
