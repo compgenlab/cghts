@@ -500,7 +500,13 @@ func parseTabulatedLine(line string, meta *tabixMeta) (*Record, error) {
 	}
 
 	end := beg + 1
-	if meta.ColEnd != 0 && colEnd >= 0 && colEnd < len(fields) {
+	switch {
+	case meta.Format&presetMask == PresetVCF:
+		// Must mirror the writer: this end feeds the overlap test, so a record
+		// understated here is dropped even when the index pointed straight at
+		// it.
+		end = vcfSpanEnd(fields, beg)
+	case meta.ColEnd != 0 && colEnd >= 0 && colEnd < len(fields):
 		endStr := fields[colEnd]
 		e, err := strconv.Atoi(endStr)
 		if err == nil {
