@@ -27,6 +27,7 @@ type WriterOpts struct {
 	skip      int32
 	zeroBased bool
 	autoIndex bool
+	preset    int32
 }
 
 // NewWriterOpts creates a WriterOpts with default values.
@@ -101,6 +102,7 @@ func (o *WriterOpts) VCF() *WriterOpts {
 	o.colEnd = 0
 	o.meta = '#'
 	o.zeroBased = false
+	o.preset = PresetVCF
 	return o
 }
 
@@ -512,7 +514,14 @@ func (ib *tbiIndexBuilder) addRecord(l tabixLine, begin, end bgzf.VirtualOffset)
 	recEnd := l.start + 1
 	fields := strings.Split(l.line, "\t")
 	colEnd := int(ib.opts.colEnd) - 1
-	if ib.opts.colEnd != 0 && colEnd >= 0 && colEnd < len(fields) {
+	switch {
+	case ib.opts.preset&presetMask == PresetVCF:
+		// A VCF record's end is derived from the record, not read from a
+		// column; see vcfSpanEnd. Binning on start+1 would place a long
+		// deletion or a gVCF block in the bin for its first base, and a query
+		// past that bin would never examine the chunk holding it.
+		recEnd = vcfSpanEnd(fields, l.start)
+	case ib.opts.colEnd != 0 && colEnd >= 0 && colEnd < len(fields):
 		if e, err := strconv.Atoi(fields[colEnd]); err == nil {
 			recEnd = e
 		}
@@ -549,7 +558,7 @@ func (ib *tbiIndexBuilder) writeTBI(path string) error {
 	w.Write([]byte("TBI\x01"))
 	binary.Write(w, binary.LittleEndian, int32(len(ib.refOrder)))
 
-	fmtVal := int32(0)
+	fmtVal := ib.opts.preset & presetMask
 	if ib.opts.zeroBased {
 		fmtVal |= 0x10000
 	}
