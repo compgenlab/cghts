@@ -215,6 +215,7 @@ func (w *Writer) Discard() {
 
 // WriteCall buffers one ALT-carrying genotype.
 func (w *Writer) WriteCall(c Call) error {
+	c.RefEnd = defaultRefEnd(c.Pos, c.Ref, c.RefEnd)
 	w.callBuf = append(w.callBuf, c)
 	w.NCalls++
 	if len(w.callBuf) >= batchSize {
@@ -225,12 +226,31 @@ func (w *Writer) WriteCall(c Call) error {
 
 // WriteSite buffers one catalog entry.
 func (w *Writer) WriteSite(s Site) error {
+	s.RefEnd = defaultRefEnd(s.Pos, s.Ref, s.RefEnd)
 	w.siteBuf = append(w.siteBuf, s)
 	w.NSites++
 	if len(w.siteBuf) >= batchSize {
 		return w.flushSites()
 	}
 	return nil
+}
+
+// defaultRefEnd fills in a reference end the caller left unset.
+//
+// len(REF) is recoverable from the row itself, so deriving it here means every
+// writer gets overlap for plain records without having to think about it, and the
+// column is never a field of zeros that makes HasRefSpans lie. A caller that knows
+// better -- a symbolic ALT with INFO/END, a gVCF block -- passes its own wider
+// value and this leaves it alone.
+func defaultRefEnd(pos int32, ref string, refEnd int32) int32 {
+	derived := pos - 1 + int32(len(ref))
+	if derived <= pos-1 {
+		derived = pos
+	}
+	if refEnd > derived {
+		return refEnd
+	}
+	return derived
 }
 
 // WriteRegion buffers one callable run.
@@ -324,18 +344,29 @@ func scanParquet[T any](m *member, fn func(T) bool) error {
 }
 
 // ParquetStore is a Store backed by the three-file Parquet set.
+// hasColumn reports whether a leaf column is present in a file's schema.
+func hasColumn(pf *parquet.File, name string) bool {
+	for _, f := range pf.Schema().Fields() {
+		if f.Name() == name {
+			return true
+		}
+	}
+	return false
+}
+
 type ParquetStore struct {
-	base       string
-	calls      *member
-	sites      *member
-	regions    *member
-	samples    []string
-	hasSites   bool
-	hasRegions bool
-	noCallable bool
-	spans      SpanSemantics
-	minDP      int32
-	meta       map[string]string
+	base        string
+	calls       *member
+	hasRefSpans bool
+	sites       *member
+	regions     *member
+	samples     []string
+	hasSites    bool
+	hasRegions  bool
+	noCallable  bool
+	spans       SpanSemantics
+	minDP       int32
+	meta        map[string]string
 }
 
 // SpanSemantics reports what this store's run intervals may claim. A store
@@ -416,6 +447,13 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error)
 	if v, ok := pf.Lookup(MetaSpans); ok && v != "" {
 		s.spans = SpanSemantics(v)
 	}
+	// Whether this store can answer overlap queries is read from the schema rather
+	// than from a metadata key: the column either exists or it does not, and a key
+	// could disagree with the data. Absent means the store predates ref_end, so
+	// span selection there matches on position alone -- a different answer, not
+	// merely a slower one, which is why HasRefSpans is exported for callers to
+	// report.
+	s.hasRefSpans = hasColumn(pf, "ref_end")
 	// The optional members: absent is normal (a --no-callable store has no
 	// regions), so failure to open is recorded rather than returned.
 	if m, err := openMember(ctx, SitesPath(base)); err == nil {
@@ -577,14 +615,14 @@ func (s *ParquetStore) callsWithRef(p *plan, keep rowGroupFilter) ([]Call, error
 		// Record level, not site level: a call at a SIBLING locus of the same
 		// record still disqualifies the sample from being reference here, and
 		// testing wantsSite would throw that evidence away.
-		if !p.wantsRecord(loc) {
+		if !p.wantsRecord(loc, c.RefEnd) {
 			return true
 		}
 		if carries[c.SampleID] == nil {
 			carries[c.SampleID] = map[RecordKey]bool{}
 		}
 		carries[c.SampleID][loc.Record()] = true
-		if p.wantsSite(loc) && p.q.Gate.Admits(c) {
+		if p.wantsSite(loc, c.RefEnd) && p.q.Gate.Admits(c) {
 			k := canonLocus(loc)
 			altBySite[k] = append(altBySite[k], c)
 		}
@@ -601,7 +639,7 @@ func (s *ParquetStore) callsWithRef(p *plan, keep rowGroupFilter) ([]Call, error
 	var out []Call
 	err = scanParquetPruned(s.sites, siteScanFilter(p.q), func(site Site) bool {
 		loc := site.Locus()
-		if !p.wantsSite(loc) {
+		if !p.wantsSite(loc, site.RefEnd) {
 			return true
 		}
 		k := canonLocus(loc)
@@ -844,3 +882,13 @@ func (s *ParquetStore) Close() error {
 	}
 	return first
 }
+
+// HasRefSpans reports whether the store records each record's reference span.
+//
+// Without it, a span query matches on start position alone, so a deletion that
+// begins before the region and reaches into it is not returned. That is a
+// difference in the answer rather than in the speed, so a caller offering region
+// queries should say so rather than let the omission look like a real negative.
+// Stores written before the ref_end column existed report false; rewriting the
+// store is what fixes it.
+func (s *ParquetStore) HasRefSpans() bool { return s.hasRefSpans }
