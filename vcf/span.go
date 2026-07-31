@@ -27,25 +27,39 @@ func (r *VcfRecord) RefSpanEnd() int {
 	return end
 }
 
-// IsRefBlock reports whether this record is a gVCF reference block rather than a
-// variant: a <*> or <NON_REF> alternate, or a bare "." where no alternate was
-// reported at all.
+// IsRefBlock reports whether this record describes only reference -- a gVCF block
+// -- rather than a variant.
 //
-// Worth having separately from RefSpan because the two questions diverge. A caller
-// listing variants wants to skip these; a caller asking what was interrogated wants
-// exactly these. Both need to recognise them the same way.
+// The test is that *no* alternate is a real allele: every one is <*> or <NON_REF>,
+// or ALT is a bare ".". The distinction matters because GATK writes the block
+// allele alongside a genuine alternate at variant sites, as in ALT "G,<NON_REF>".
+// Such a record does describe a variant, so treating the presence of <NON_REF> as
+// sufficient would make a caller listing variants drop real calls.
+//
+// Worth having separately from RefSpan because the two questions diverge: a caller
+// listing variants skips these, a caller asking what was interrogated wants exactly
+// these, and both need to recognise them the same way.
 func (r *VcfRecord) IsRefBlock() bool {
-	alt := r.AltOrig()
-	if alt == "." || alt == "" {
+	if alt := r.AltOrig(); alt == "." || alt == "" {
 		return true
 	}
-	for _, a := range r.Alt() {
-		if vcfspan.IsRefBlockAlt(a) {
-			return true
+	alts := r.Alt()
+	if len(alts) == 0 {
+		return true
+	}
+	for _, a := range alts {
+		if !IsRefBlockAlt(a) {
+			return false
 		}
 	}
-	return false
+	return true
 }
+
+// IsRefBlockAlt reports whether one alternate is a gVCF reference-block allele,
+// <*> or <NON_REF>, rather than a real alternate. Exported because a caller walking
+// a record's alternates needs to skip these individually -- a "G,<NON_REF>" record
+// has one of each.
+func IsRefBlockAlt(alt string) bool { return vcfspan.IsRefBlockAlt(alt) }
 
 // recordFields adapts a parsed record to the shared span rules. It reads through
 // the record's own lazy accessors rather than re-splitting the raw line, so a
