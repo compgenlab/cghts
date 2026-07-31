@@ -45,8 +45,9 @@ type ReferenceReader interface {
 // For indexed FASTA and remote references, sequences are loaded in 10MB
 // chunks with LRU caching (1GB max).
 func OpenReference(path string) (ReferenceReader, error) {
-	// Detect HTTP/HTTPS URLs.
-	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+	// Anything with a scheme is remote: http(s) always, plus whatever transports
+	// are registered with iosource (s3, …). A plain path falls through.
+	if i := strings.Index(path, "://"); i > 1 {
 		return NewRemoteFastaReader(path)
 	}
 

@@ -2,9 +2,9 @@ package seqio
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +23,7 @@ import (
 // the fetched bytes need decompression — not yet supported; plain FASTA only).
 type RemoteFastaReader struct {
 	url   string
-	src   *iosource.HTTPRange
+	src   iosource.ByteSource
 	fai   map[string]*FaiEntry
 	names []string
 
@@ -32,17 +32,21 @@ type RemoteFastaReader struct {
 }
 
 // NewRemoteFastaReader opens a remote FASTA file for random access.
-// The .fai index is fetched from url+".fai" and downloaded fully.
-// Sequence chunks are fetched on demand via HTTP Range requests.
-func NewRemoteFastaReader(url string) (*RemoteFastaReader, error) {
-	// Fetch .fai index.
-	faiURL := url + ".fai"
-	fai, names, err := fetchFaiIndex(faiURL)
+// The .fai index is fetched from locator+".fai" and read fully; sequence chunks
+// are fetched on demand as byte ranges.
+//
+// locator may use any scheme iosource knows — http(s) and, with the transport
+// imported, s3.
+func NewRemoteFastaReader(locator string) (*RemoteFastaReader, error) {
+	url := locator
+	ctx := context.Background()
+
+	fai, names, err := fetchFaiIndex(ctx, locator+".fai")
 	if err != nil {
 		return nil, fmt.Errorf("fetching remote .fai index: %w", err)
 	}
 
-	src, err := iosource.NewHTTPRange(url)
+	src, err := iosource.Open(ctx, locator)
 	if err != nil {
 		return nil, fmt.Errorf("opening remote FASTA: %w", err)
 	}
@@ -177,20 +181,18 @@ func (r *RemoteFastaReader) loadChunk(name string, chunkIdx int, entry *FaiEntry
 }
 
 // fetchFaiIndex downloads and parses a .fai index from a URL.
-func fetchFaiIndex(url string) (map[string]*FaiEntry, []string, error) {
-	resp, err := httpClient.Get(url)
+func fetchFaiIndex(ctx context.Context, locator string) (map[string]*FaiEntry, []string, error) {
+	// Resolved through iosource so the index comes from the same transport as
+	// the sequence data — an .fai beside an s3:// FASTA is itself an object.
+	rc, err := iosource.Sibling(ctx)(strings.TrimSuffix(locator, ".fai"), ".fai")
 	if err != nil {
 		return nil, nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, url)
-	}
+	defer rc.Close()
 
 	fai := make(map[string]*FaiEntry)
 	var names []string
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(rc)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -236,7 +238,7 @@ func fetchFaiIndex(url string) (map[string]*FaiEntry, []string, error) {
 		return nil, nil, err
 	}
 	if len(fai) == 0 {
-		return nil, nil, fmt.Errorf("empty .fai from %s", url)
+		return nil, nil, fmt.Errorf("empty .fai from %s", locator)
 	}
 	return fai, names, nil
 }
