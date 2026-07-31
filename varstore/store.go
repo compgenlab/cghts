@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -113,9 +114,21 @@ type Gate struct {
 }
 
 // Admits reports whether a call passes the gate. Missing values pass.
+//
+// Depth comes from Call.MinDP when the call carries one, and from Call.DP otherwise.
+// The vouched floor wins deliberately: a gVCF reference block records MIN_DP across
+// its whole span and no depth at any single base, so gating on the recorded DP would
+// either admit everything (DP is Missing, and Missing passes) or assert the depth at
+// POS across thousands of bases that were never that well covered.
 func (g Gate) Admits(c Call) bool {
-	if g.MinDP > 0 && c.DP != Missing && c.DP < g.MinDP {
-		return false
+	if g.MinDP > 0 {
+		dp := c.DP
+		if c.MinDP > 0 {
+			dp = c.MinDP
+		}
+		if dp != Missing && dp < g.MinDP {
+			return false
+		}
 	}
 	if g.MinGQ > 0 && c.GQ != Missing && c.GQ < g.MinGQ {
 		return false
@@ -165,6 +178,13 @@ type plan struct {
 	records map[RecordKey]bool // the records those loci were split out of
 	samples map[string]bool    // nil when every sample is wanted
 	anySite bool               // neither loci nor spans were named
+
+	// lociPos indexes the named loci by position, per canonical chromosome, sorted.
+	// The identity maps above cannot answer "does any named locus fall inside this
+	// span", which is the question a gVCF reference block asks: a block has no ALT
+	// to match on, so a query for chr1:2000:A:T inside it must be matched by
+	// position or the block is silently missed.
+	lociPos map[string][]int32
 }
 
 // plan prepares the query for matching. Loci are canonicalized once here so a
@@ -175,9 +195,15 @@ func (q Query) plan() *plan {
 	if len(q.Loci) > 0 {
 		p.loci = make(map[Locus]bool, len(q.Loci))
 		p.records = make(map[RecordKey]bool, len(q.Loci))
+		p.lociPos = make(map[string][]int32, 1)
 		for _, l := range q.Loci {
 			p.loci[canonLocus(l)] = true
 			p.records[l.Record()] = true
+			k := CanonKey(l.Chrom)
+			p.lociPos[k] = append(p.lociPos[k], l.Pos)
+		}
+		for k := range p.lociPos {
+			sort.Slice(p.lociPos[k], func(i, j int) bool { return p.lociPos[k][i] < p.lociPos[k][j] })
 		}
 	}
 	if len(q.Samples) > 0 {
@@ -244,6 +270,32 @@ func (p *plan) wantsRecord(l Locus, refEnd int32) bool {
 		return true
 	}
 	return p.spanTouches(l.Chrom, l.Pos, refEnd)
+}
+
+// touchesSpan reports whether the query selects any part of a record spanning the
+// 1-based positions [pos, refEnd].
+//
+// Distinct from wantsSite, which matches a locus by identity: a reference block
+// carries no alternate, so there is nothing to match identically, and the only
+// meaningful question is positional. A query naming chr1:2000:A:T inside a block is
+// asking "is this sample reference at 2000", and the block is the answer.
+func (p *plan) touchesSpan(chrom string, pos, refEnd int32) bool {
+	if p.anySite {
+		return true
+	}
+	end := refEnd
+	if end < pos {
+		end = pos
+	}
+	if ps := p.lociPos[CanonKey(chrom)]; len(ps) > 0 {
+		i := sort.Search(len(ps), func(i int) bool { return ps[i] >= pos })
+		// refEnd is a 0-based exclusive end, which is the same number as the last
+		// 1-based position the record covers -- hence <= rather than <.
+		if i < len(ps) && ps[i] <= end {
+			return true
+		}
+	}
+	return p.spanTouches(chrom, pos, refEnd)
 }
 
 // wantsCall applies both axes and the gate to one ALT call.
