@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -31,8 +32,13 @@ func loadCRAI(path string) (*craiIndex, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return loadCRAIFrom(f)
+}
 
-	gz, err := gzip.NewReader(f)
+// loadCRAIFrom parses a CRAI index from a stream, so a remote CRAM can resolve
+// its index through the same transport as its data.
+func loadCRAIFrom(rd io.Reader) (*craiIndex, error) {
+	gz, err := gzip.NewReader(rd)
 	if err != nil {
 		return nil, fmt.Errorf("crai: gzip reader: %w", err)
 	}

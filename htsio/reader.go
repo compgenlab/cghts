@@ -1,7 +1,9 @@
 package htsio
 
 import (
+	"context"
 	"fmt"
+	"github.com/compgenlab/cghts/iosource"
 	"io"
 	"iter"
 	"strconv"
@@ -261,4 +263,60 @@ func (r *iterReaderState) Header() (*SamHeader, error)           { return r.hdr,
 func (r *iterReaderState) Close() error                          { return nil }
 func (r *iterReaderState) Query(ref string, start, end int) (iter.Seq2[*SamRecord, error], error) {
 	return nil, fmt.Errorf("Query not supported on iterator reader")
+}
+
+// OpenSamReader opens a SAM/BAM/CRAM from any locator: a filesystem path, an
+// http(s):// URL, or any scheme registered with iosource such as s3://.
+//
+// A local path behaves exactly as [NewSamReader]. A remote locator is opened as
+// a random-access source, which is what indexed region queries need — and lets
+// the sidecar (.bai/.crai) be resolved through the same transport.
+//
+// For CRAM the reference is independent of where the data lives: set it with
+// SamReaderOpts.SetRefPath (any locator) or SetRefReader (already open). A
+// remote CRAM with a local reference, or the reverse, are both fine.
+func OpenSamReader(ctx context.Context, locator string, opts ...*SamReaderOpts) (SamReader, error) {
+	var o *SamReaderOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	} else {
+		o = NewSamReaderOpts()
+	}
+	if i := strings.Index(locator, "://"); i <= 1 {
+		return NewSamReader(locator, o)
+	}
+	src, err := iosource.Open(ctx, locator)
+	if err != nil {
+		return nil, err
+	}
+	reg, err := detectFromSource(src)
+	if err != nil {
+		src.Close()
+		return nil, err
+	}
+	if reg.NewFromSource == nil {
+		// A format with no random-access support still reads sequentially; it
+		// just cannot answer region queries.
+		size, serr := src.Size()
+		if serr != nil {
+			src.Close()
+			return nil, serr
+		}
+		return reg.NewFromStream(io.NopCloser(io.NewSectionReader(src, 0, size)), o)
+	}
+	return reg.NewFromSource(src, locator, o)
+}
+
+// detectFromSource identifies the format from the first bytes of a source.
+func detectFromSource(src iosource.ByteSource) (*ReaderRegistration, error) {
+	buf := make([]byte, peekSize)
+	n, err := src.ReadAt(buf, 0)
+	if err != nil && n < 2 {
+		return nil, fmt.Errorf("htsio: failed to read magic bytes: %w", err)
+	}
+	reg := detectFormat(buf[:n], n)
+	if reg == nil {
+		return nil, fmt.Errorf("htsio: no registered reader for file format (peek: %x)", buf[:min(8, n)])
+	}
+	return reg, nil
 }

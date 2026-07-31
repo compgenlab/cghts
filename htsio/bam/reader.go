@@ -2,6 +2,7 @@ package bam
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"github.com/compgenlab/cghts/htsio"
 	"github.com/compgenlab/cghts/htsio/bgzf"
 	"github.com/compgenlab/cghts/htsio/tabix"
+	"github.com/compgenlab/cghts/iosource"
 )
 
 // BAM CIGAR operation codes (4-bit).
@@ -45,15 +47,20 @@ type bamRefInfo struct {
 // It implements the htsio.SamReader interface.
 type Reader struct {
 	r        *bgzf.Reader
-	src      io.ReadCloser  // underlying file/reader, closed on Close()
-	filename string         // original filename (for finding .bai)
-	refs     []bamRefInfo   // reference sequences from the BAM header
-	refMap   map[string]int // ref name → index
-	hdr      *htsio.SamHeader
-	opts     *htsio.SamReaderOpts
-	idx      *tabix.BinIndex     // BAI index, loaded lazily on first Query()
-	ir       *bgzf.IndexedReader // created lazily for Query()
-	err      error               // sticky error
+	src      io.ReadCloser // underlying file/reader, closed on Close()
+	filename string        // original filename (for finding .bai)
+	// source, when set, backs a reader whose data is not a local file. Query
+	// uses it for both jobs filename otherwise does: resolving the .bai
+	// alongside, and obtaining a second seekable view for indexed reads.
+	source  iosource.ByteSource
+	locator string
+	refs    []bamRefInfo   // reference sequences from the BAM header
+	refMap  map[string]int // ref name → index
+	hdr     *htsio.SamHeader
+	opts    *htsio.SamReaderOpts
+	idx     *tabix.BinIndex     // BAI index, loaded lazily on first Query()
+	ir      *bgzf.IndexedReader // created lazily for Query()
+	err     error               // sticky error
 }
 
 func init() {
@@ -67,6 +74,9 @@ func init() {
 				return nil, err
 			}
 			return NewReader(f, filename, opts)
+		},
+		NewFromSource: func(src iosource.ByteSource, locator string, opts *htsio.SamReaderOpts) (htsio.SamReader, error) {
+			return NewReaderFromSource(src, locator, opts)
 		},
 		NewFromStream: func(r io.ReadCloser, opts *htsio.SamReaderOpts) (htsio.SamReader, error) {
 			return NewReader(r, "", opts)
@@ -120,8 +130,8 @@ func (b *Reader) Close() error {
 // region [start, end) on the given reference. Requires a .bai index file
 // at filename.bai.
 func (b *Reader) Query(ref string, start, end int) (iter.Seq2[*htsio.SamRecord, error], error) {
-	if b.filename == "" {
-		return nil, fmt.Errorf("bam: Query requires a file-backed reader")
+	if b.filename == "" && b.source == nil {
+		return nil, fmt.Errorf("bam: Query requires a file- or source-backed reader (a pure stream cannot seek)")
 	}
 
 	refID, ok := b.refMap[ref]
@@ -129,23 +139,42 @@ func (b *Reader) Query(ref string, start, end int) (iter.Seq2[*htsio.SamRecord, 
 		return nil, fmt.Errorf("bam: unknown reference %q", ref)
 	}
 
-	// Lazily load the BAI index.
+	// Lazily load the BAI index, from wherever the data lives.
 	if b.idx == nil {
-		baiPath := b.filename + ".bai"
-		idx, err := tabix.LoadBAI(baiPath)
+		var idx *tabix.BinIndex
+		var err error
+		if b.source != nil {
+			rc, ferr := iosource.Sibling(context.Background())(b.locator, ".bai")
+			if ferr != nil {
+				return nil, fmt.Errorf("bam: loading BAI index: %w", ferr)
+			}
+			idx, err = tabix.LoadBAIFrom(rc)
+			rc.Close()
+		} else {
+			idx, err = tabix.LoadBAI(b.filename + ".bai")
+		}
 		if err != nil {
 			return nil, fmt.Errorf("bam: loading BAI index: %w", err)
 		}
 		b.idx = idx
 	}
 
-	// Lazily create the indexed reader (shares the underlying file).
+	// Lazily create the indexed reader. It needs its own seekable view, since
+	// the sequential reader has its own position.
 	if b.ir == nil {
-		f, err := os.Open(b.filename)
-		if err != nil {
-			return nil, err
+		if b.source != nil {
+			size, err := b.source.Size()
+			if err != nil {
+				return nil, err
+			}
+			b.ir = bgzf.NewIndexedReader(io.NewSectionReader(b.source, 0, size))
+		} else {
+			f, err := os.Open(b.filename)
+			if err != nil {
+				return nil, err
+			}
+			b.ir = bgzf.NewIndexedReader(f)
 		}
-		b.ir = bgzf.NewIndexedReader(f)
 	}
 
 	chunks := b.idx.Query(refID, start, end)
@@ -664,4 +693,25 @@ func decodeArrayTag(data []byte, pos int) (htsio.SamTag, int) {
 	}
 
 	return htsio.SamTag{Type: 'B', Value: sb.String()}, pos
+}
+
+// NewReaderFromSource opens a BAM from any random-access source, so a remote
+// BAM can be queried by region without being downloaded.
+//
+// locator names the data for error messages and, more importantly, for
+// resolving the ".bai" beside it through the same transport. Ownership of src
+// transfers: Close releases it.
+func NewReaderFromSource(src iosource.ByteSource, locator string, opts *htsio.SamReaderOpts) (*Reader, error) {
+	size, err := src.Size()
+	if err != nil {
+		return nil, err
+	}
+	rc := io.NopCloser(io.NewSectionReader(src, 0, size))
+	b, err := NewReader(rc, "", opts)
+	if err != nil {
+		src.Close()
+		return nil, err
+	}
+	b.source, b.locator = src, locator
+	return b, nil
 }

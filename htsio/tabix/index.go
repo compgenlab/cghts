@@ -49,16 +49,20 @@ func LoadBAI(filename string) (*BinIndex, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return LoadBAIFrom(f)
+}
 
+// LoadBAIFrom parses a BAI index from a stream, so the index of a remote BAM
+// can be read from wherever the BAM itself lives.
+func LoadBAIFrom(r io.Reader) (*BinIndex, error) {
 	var magic [4]byte
-	if _, err := io.ReadFull(f, magic[:]); err != nil {
+	if _, err := io.ReadFull(r, magic[:]); err != nil {
 		return nil, fmt.Errorf("bai: reading magic: %w", err)
 	}
 	if magic != [4]byte{'B', 'A', 'I', 1} {
 		return nil, fmt.Errorf("bai: invalid magic: %x", magic)
 	}
-
-	return readBinIndex(f)
+	return readBinIndex(r)
 }
 
 // LoadTBI reads a TBI (tabix) index file.
