@@ -21,7 +21,14 @@ func NewIndexedBedReader(filename string) (*IndexedBedReader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &IndexedBedReader{tr: tr}, nil
+	return NewIndexedBedReaderFrom(tr), nil
+}
+
+// NewIndexedBedReaderFrom wraps an already-open tabix reader, so the BED can
+// come from something other than a local file — see [tabix.NewReaderFromSource].
+// Ownership transfers: Close releases it.
+func NewIndexedBedReaderFrom(tr *tabix.Reader) *IndexedBedReader {
+	return &IndexedBedReader{tr: tr}
 }
 
 // IgnoreStrand configures the reader to leave every record's strand
