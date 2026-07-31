@@ -146,6 +146,60 @@ Streaming and tabix-indexed readers, a writer, and a header/record model for VCF
   flag-present/absent, zygosity, chrom, indel), chained via `Chain`; a port of
   ngsutilsj's vcf/filter framework
 
+### varstore — sparse genotype store
+
+Cohort genotypes in Parquet, plus a VCF-backed implementation of the same
+interface. A store is three files sharing a base name, and all three are
+required:
+
+```
+BASE.calls.parquet     one row per ALT-carrying genotype
+BASE.sites.parquet     one row per interrogated site, with AC/AN
+BASE.regions.parquet   runs of catalog sites at which a sample was called
+```
+
+Only the ALT-carrying genotypes are stored — a real cohort callset is
+overwhelmingly reference, so this is a small fraction of the dense matrix. The
+other two files are what make the absent rows interpretable: without them a
+missing row cannot be told apart from a position nobody ever looked at, which is
+the distinction the four states exist to draw.
+
+One method queries either backend, and the two must agree — the same question
+against a VCF and against a store converted from it:
+
+```go
+s, _ := varstore.OpenParquet("cohort")   // or OpenVcf, or a URL/s3:// prefix
+defer s.Close()
+
+calls, err := s.Calls(varstore.Query{
+    Loci:    []varstore.Locus{{Chrom: "chr17", Pos: 43045703, Ref: "A", Alt: "G"}},
+    Samples: []string{"HG00096"},        // empty means every sample
+    Gate:    varstore.Gate{MinDP: 10},
+})
+for c, err := range calls { … }
+```
+
+Sites and samples are independent axes, and an empty selector restricts neither,
+so the zero `Query` is every genotype in the store. A query is always **one
+pass**: the Parquet side prunes row groups by the union of the selectors, so a
+1000-variant panel costs about what one variant does.
+
+- `IncludeRef` also emits `0/0` calls, which needs `sites` and `regions` —
+  a store lacking them fails with `ErrNotClassifiable` rather than returning an
+  ALT-only stream that would read as "nobody is reference here"
+- **Run intervals are not coverage.** They compress a per-site record of "this
+  sample was called at these catalog sites" and claim nothing about the bases
+  between them, so a locus absent from `sites` is unassayed for every sample even
+  where runs bracket it. A gVCF's reference blocks (`END`, `MIN_DP`) *are* span
+  assertions, and only such a store could answer off-catalog — hence
+  `SpanSemantics`
+- Stores keep the source's own contig spelling; compare through
+  `CanonKey`/`SameChrom` so `chr17`, `17` and `NC_000017.11` all resolve
+
+`cgkit`'s `vcf-toparquet` and `vcf-varquery` are the CLI over this package; see
+its [`docs/vcf-toparquet.md`](https://github.com/compgenlab/cgkit/blob/main/docs/vcf-toparquet.md)
+for the format walk-through and measurements.
+
 ### iosource — pluggable random-access I/O
 
 Random-access byte sources for genomic files behind a concurrency-safe
