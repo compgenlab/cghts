@@ -148,6 +148,7 @@ func (s *VcfStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 				n = len(s.samples)
 			}
 			type sampleField struct {
+				col  int // column in this record, for FORMAT lookups
 				name string
 				f    SampleFields
 			}
@@ -161,7 +162,7 @@ func (s *VcfStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 				if err != nil {
 					return false, err
 				}
-				fields = append(fields, sampleField{name, f})
+				fields = append(fields, sampleField{i, name, f})
 			}
 
 			// The reference span of the whole record, so a span query matches a
@@ -169,7 +170,36 @@ func (s *VcfStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 			// record rather than per ALT: it is a property of the record.
 			refEnd := int32(rec.RefSpanEnd())
 
+			// A gVCF reference block asserts coverage across a span rather than a
+			// variant. It has no alternate to report, so it contributes no ALT rows
+			// and exactly one reference row per sample -- never one per base, however
+			// wide the block.
+			if rec.IsRefBlock() {
+				if !q.IncludeRef {
+					return true, nil
+				}
+				if !p.touchesSpan(rec.Chrom, int32(rec.Pos), refEnd) {
+					return true, nil
+				}
+				for _, sf := range fields {
+					c, ok := blockRefCall(rec, sf.col, sf.name, sf.f, refEnd)
+					if !ok || !q.Gate.Admits(c) {
+						continue
+					}
+					if !emit(c) {
+						return false, nil
+					}
+				}
+				return true, nil
+			}
+
 			for j, alt := range rec.Alt() {
+				// A variant record in a gVCF carries the block allele beside the real
+				// one, as "G,<NON_REF>". The record is a variant and is kept; this
+				// allele names nothing and would otherwise be reported as a call.
+				if vcf.IsRefBlockAlt(alt) {
+					continue
+				}
 				loc := Locus{Chrom: rec.Chrom, Pos: int32(rec.Pos), Ref: rec.Ref, Alt: alt}
 				if !p.wantsSite(loc, refEnd) {
 					continue
@@ -259,11 +289,40 @@ func homRefCallFor(rec *vcf.VcfRecord, sample string, sf SampleFields,
 }
 
 // Classify resolves every sample at a locus directly from the genotypes.
+//
+// Two sources, in priority order. An explicit record at the locus is definitive. A
+// gVCF reference block covering the position is the fallback: it says the sample was
+// interrogated here and found reference, which is the one claim a plain VCF cannot
+// make and the reason a locus absent from a plain VCF is not-assayed rather than
+// non-carrier.
 func (s *VcfStore) Classify(l Locus, g Gate) ([]SampleState, error) {
 	states := make(map[string]SampleState, len(s.samples))
+	byBlock := make(map[string]SampleState, len(s.samples))
 	found := false
 
 	err := s.scan(s.spanFor(l), false, func(rec *vcf.VcfRecord) (bool, error) {
+		if rec.IsRefBlock() {
+			// Recorded, not returned: an explicit record at this locus may still
+			// follow, and it outranks a block.
+			if SameChrom(rec.Chrom, l.Chrom) && blockCovers(rec, l.Pos) {
+				for i, name := range s.samples {
+					if i >= rec.NumSamples() {
+						break
+					}
+					sf, err := ReadSample(rec, i)
+					if err != nil {
+						return false, err
+					}
+					c, ok := blockRefCall(rec, i, name, sf, int32(rec.RefSpanEnd()))
+					if !ok || !g.Admits(c) {
+						continue
+					}
+					cc := c
+					byBlock[name] = SampleState{SampleID: name, State: StateNonCarrier, Call: &cc}
+				}
+			}
+			return true, nil
+		}
 		if !SameChrom(rec.Chrom, l.Chrom) || int32(rec.Pos) != l.Pos || rec.Ref != l.Ref {
 			return true, nil
 		}
@@ -318,7 +377,13 @@ func (s *VcfStore) Classify(l Locus, g Gate) ([]SampleState, error) {
 			out = append(out, st)
 			continue
 		}
-		// The record was absent entirely: nothing was interrogated here.
+		if st, ok := byBlock[name]; ok {
+			// No record names this locus, but a reference block covers it. That is a
+			// positive observation, not an absence.
+			out = append(out, st)
+			continue
+		}
+		// Nothing was interrogated here.
 		_ = found
 		out = append(out, SampleState{SampleID: name, State: StateNotAssayed})
 	}
@@ -332,6 +397,17 @@ func (s *VcfStore) Classify(l Locus, g Gate) ([]SampleState, error) {
 func (s *VcfStore) SiteKnown(l Locus) (bool, error) {
 	found := false
 	err := s.scan(s.spanFor(l), false, func(rec *vcf.VcfRecord) (bool, error) {
+		// A gVCF reference block covering the position interrogated it, even though no
+		// record names this variant. That is the question SiteKnown asks -- "did the
+		// source look here" -- and answering no would report a real observation as an
+		// absence.
+		if rec.IsRefBlock() {
+			if SameChrom(rec.Chrom, l.Chrom) && blockCovers(rec, l.Pos) {
+				found = true
+				return false, nil
+			}
+			return true, nil
+		}
 		if SameChrom(rec.Chrom, l.Chrom) && int32(rec.Pos) == l.Pos &&
 			rec.Ref == l.Ref && altIndex(rec, l.Alt) > 0 {
 			found = true
@@ -397,4 +473,55 @@ func ParseSpan(region string) (*Span, error) {
 		end = math.MaxInt32
 	}
 	return &Span{Chrom: ref, Start: int32(start), End: int32(end)}, nil
+}
+
+// blockRefCall builds the reference call a gVCF block asserts for one sample, or
+// reports false when the block makes no such claim for it.
+//
+// What the row deliberately does and does not say:
+//
+//   - Alt is "." -- there is no alternate. Reporting "<NON_REF>" there, which is what
+//     happens when a block is treated as an ordinary record, describes the sample as
+//     carrying an allele it does not have.
+//   - RefEnd carries the block's extent, so a span query matches by overlap instead of
+//     collapsing the block to its first base.
+//   - DP stays Missing. A block records no depth at any individual base, and writing
+//     MIN_DP there would assert one.
+//   - MinDP carries MIN_DP: the floor across the span, and the only depth claim that
+//     holds everywhere the row applies. This is what the gate reads.
+//   - GQ carries RGQ, which is what GATK writes on a block in place of GQ.
+//   - The genotype is the recorded one, so ploidy and phasing survive -- and a block
+//     whose genotype is a no-call is not a reference observation at all, so it is
+//     skipped rather than reported as 0/0.
+func blockRefCall(rec *vcf.VcfRecord, col int, sample string, sf SampleFields, refEnd int32) (Call, bool) {
+	if !IsHomRef(sf.GT) {
+		return Call{}, false
+	}
+	c := Call{
+		SampleID: sample,
+		Chrom:    rec.Chrom,
+		Pos:      int32(rec.Pos),
+		Ref:      rec.Ref,
+		Alt:      ".",
+		RefEnd:   refEnd,
+		GT:       sf.GT,
+		DP:       Missing,
+		ADRef:    Missing,
+		ADAlt:    Missing,
+		GQ:       Missing,
+	}
+	if v, ok := rec.BlockDepth(col); ok {
+		c.MinDP = v
+	}
+	if v, ok := rec.BlockRGQ(col); ok {
+		c.GQ = v
+	}
+	return c, true
+}
+
+// blockCovers reports whether a reference block covers a 1-based position. RefSpanEnd
+// is a 0-based exclusive end, which is the same number as the last 1-based position
+// covered -- hence <= rather than <.
+func blockCovers(rec *vcf.VcfRecord, pos int32) bool {
+	return pos >= int32(rec.Pos) && pos <= int32(rec.RefSpanEnd())
 }

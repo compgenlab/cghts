@@ -64,6 +64,19 @@ type Call struct {
 	ADRef  int32  `parquet:"ad_ref"`
 	ADAlt  int32  `parquet:"ad_alt"`
 	GQ     int32  `parquet:"gq"`
+
+	// MinDP is the tightest lower bound on depth the source vouches for here, where
+	// DP is the depth actually recorded at this position. They come apart for a gVCF
+	// reference block: MIN_DP is the floor across the whole block and there is no
+	// per-base depth at all, so DP stays Missing while MinDP carries the claim.
+	// Zero means unknown.
+	//
+	// Deliberately not a Parquet column. Today it is derived per query by the VCF
+	// backend and a store has nowhere to have recorded it; when a gVCF-derived blocks
+	// store exists this becomes a real column. Note that an absent column reads back
+	// as 0, which is why unknown is 0 here rather than Missing -- the two conventions
+	// would otherwise disagree the moment the column appears.
+	MinDP int32 `parquet:"-"`
 }
 
 // Locus returns the site this call belongs to.
