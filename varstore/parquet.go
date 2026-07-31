@@ -31,6 +31,14 @@ const (
 	MetaSource  = "cgkit.source"         // input filename
 	MetaNoCall  = "cgkit.nocallable"     // "1" when regions are absent by request
 	MetaSpans   = "cgkit.span_semantics" // see SpanSemantics
+
+	// MetaContigs holds the source's ##contig header lines verbatim, newline
+	// separated. Kept because a store is expected to be exported back to VCF, and
+	// those lines are how a VCF says which reference it was called against -- without
+	// them the export is not self-describing, and cannot carry contig lengths at all.
+	// Derived from the calls alone, the best available is a bare ID for whichever
+	// contigs a query happened to name.
+	MetaContigs = "cgkit.contigs"
 )
 
 // SpanSemantics records what the intervals in the regions file are entitled to
@@ -72,6 +80,12 @@ type WriterOpts struct {
 	Program      string
 	Command      string
 	Source       string
+
+	// Contigs are the source's ##contig lines, verbatim, in header order. Callers
+	// converting several inputs should pass the union: a per-chromosome callset
+	// declares only its own contig in each file, so taking one file's would lose
+	// the rest.
+	Contigs []string
 
 	// Spans declares what the run intervals may claim. Defaults to SpansSites,
 	// which is all a plain VCF can support.
@@ -144,6 +158,9 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	w.calls.SetKeyValueMetadata(MetaProgram, o.Program)
 	w.calls.SetKeyValueMetadata(MetaCommand, o.Command)
 	w.calls.SetKeyValueMetadata(MetaSource, o.Source)
+	if len(o.Contigs) > 0 {
+		w.calls.SetKeyValueMetadata(MetaContigs, strings.Join(o.Contigs, "\n"))
+	}
 	if o.Spans == "" {
 		o.Spans = SpansSites
 	}
@@ -381,7 +398,7 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error)
 		return nil, fmt.Errorf("reading %s: %w", calls.name, err)
 	}
 	s := &ParquetStore{base: base, calls: calls, meta: map[string]string{}}
-	for _, k := range []string{MetaSource, MetaProgram, MetaCommand, MetaMinDP} {
+	for _, k := range []string{MetaSource, MetaProgram, MetaCommand, MetaMinDP, MetaContigs} {
 		if v, ok := pf.Lookup(k); ok {
 			s.meta[k] = v
 		}
@@ -460,6 +477,17 @@ func ensureTrailingSep(p string) string {
 func fileExists(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && !st.IsDir()
+}
+
+// Contigs returns the source's ##contig header lines, or nothing for a store
+// written before they were recorded. A caller exporting to VCF should emit these
+// rather than synthesizing lines from the loci it happens to have seen.
+func (s *ParquetStore) Contigs() []string {
+	v := s.meta[MetaContigs]
+	if v == "" {
+		return nil
+	}
+	return strings.Split(v, "\n")
 }
 
 // Samples returns the roster recorded at conversion time.
