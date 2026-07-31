@@ -64,10 +64,11 @@ func TestIsRefBlock(t *testing.T) {
 		{"chr1\t1000\t.\tA\t.\t.\t.\t.", true},
 		{"chr1\t1000\t.\tA\tT\t.\t.\t.", false},
 		{"chr1\t1000\t.\tN\t<DEL>\t.\t.\t.", false},
-		// GATK emits the real ALT alongside <NON_REF> at a variant site; the record
-		// still describes a variant, but it carries block machinery, so recognising
-		// it matters for anything stripping or exporting.
-		{"chr1\t1000\t.\tA\tT,<NON_REF>\t.\t.\t.", true},
+		// GATK emits the real ALT alongside <NON_REF> at a variant site. That record
+		// describes a variant, so it must NOT read as a reference block -- otherwise
+		// a caller listing variants silently drops every call in a gVCF.
+		{"chr1\t1000\t.\tA\tT,<NON_REF>\t.\t.\t.", false},
+		{"chr1\t1000\t.\tA\t<NON_REF>,<*>\t.\t.\t.", true},
 	} {
 		rec, err := newRecord(tc.line, nil)
 		if err != nil {
