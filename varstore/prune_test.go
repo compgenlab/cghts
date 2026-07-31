@@ -185,3 +185,84 @@ func mustMember(t *testing.T, locator string) *member {
 	t.Cleanup(func() { m.Close() })
 	return m
 }
+
+// TestSpanFilterFindsRecordStartingBeforeSpan is the case overlap selection exists
+// for, and the one the old pruning bound got wrong.
+//
+// A long deletion starts before the queried region and reaches into it. Matching on
+// POS alone misses it, and -- worse -- pruning by the group's maximum POS skips the
+// whole row group, so no per-row check ever runs. The lower bound therefore has to
+// come from ref_end, not pos.
+func TestSpanFilterFindsRecordStartingBeforeSpan(t *testing.T) {
+	base := t.TempDir() + "/spanning"
+	// One row per group, so the deletion sits alone in a group whose maximum pos is
+	// below the queried span. That is what makes the pruning bound -- not just the
+	// per-row check -- load-bearing here.
+	w, err := NewWriter(base, WriterOpts{Samples: []string{"S1"}, MinDP: 10, RowGroupSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A 500bp deletion at 1000, then ordinary SNVs far away so the deletion lands
+	// in an early row group that a pos-based lower bound would exclude.
+	ref := "A"
+	for i := 0; i < 499; i++ {
+		ref += "C"
+	}
+	del := Call{
+		SampleID: "S1", Chrom: "chr1", Pos: 1000, Ref: ref, Alt: "A",
+		RefEnd: 999 + 500, GT: "0/1", DP: 30, GQ: 99,
+	}
+	if err := w.WriteCall(del); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteSite(Site{
+		Chrom: "chr1", Pos: 1000, Ref: ref, Alt: "A", RefEnd: 999 + 500,
+		AC: 1, AN: 2, NCarriers: 1, NCalled: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for pos := int32(10000); pos <= 10600; pos += 100 {
+		if err := w.WriteCall(Call{
+			SampleID: "S1", Chrom: "chr1", Pos: pos, Ref: "A", Alt: "G",
+			RefEnd: pos, GT: "0/1", DP: 30, GQ: 99,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.WriteSite(Site{
+			Chrom: "chr1", Pos: pos, Ref: "A", Alt: "G", RefEnd: pos,
+			AC: 1, AN: 2, NCarriers: 1, NCalled: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenParquet(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if !s.HasRefSpans() {
+		t.Fatal("store should record reference spans")
+	}
+
+	// [1200,1250) is strictly inside the deletion and well past its POS.
+	got, err := CollectCalls(s, Query{Spans: []Span{{Chrom: "chr1", Start: 1200, End: 1250}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Pos != 1000 {
+		t.Errorf("span [1200,1250) inside a deletion at 1000 gave %v, want the deletion", summarise(got))
+	}
+
+	// And the bound must still exclude: a span past every record's end.
+	got, err = CollectCalls(s, Query{Spans: []Span{{Chrom: "chr1", Start: 50000, End: 50100}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("span past every record gave %v, want nothing", summarise(got))
+	}
+}

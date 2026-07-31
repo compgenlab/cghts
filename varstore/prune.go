@@ -101,9 +101,23 @@ func spanFilter(s *Span) rowGroupFilter {
 		return keepAll
 	}
 	return func(rg parquet.RowGroup) bool {
-		if lo, hi, ok := colBounds(rg, "pos"); ok {
-			// Span is 0-based half-open; stored positions are 1-based.
-			if int64(s.End) < lo.Int64() || int64(s.Start)+1 > hi.Int64() {
+		if lo, _, ok := colBounds(rg, "pos"); ok {
+			// Span is 0-based half-open; stored positions are 1-based. A record
+			// starting after the span's last base cannot reach back into it,
+			// however long it is, so this bound stays exact.
+			if int64(s.End) < lo.Int64() {
+				return false
+			}
+		}
+		// The other side cannot use pos: a record may START before the span and
+		// still overlap it, so a group whose maximum pos sits below the span would
+		// be wrongly skipped. Bound it by the widest reference end in the group
+		// instead. ref_end is unsorted, so it can only bound this direction -- the
+		// same asymmetry spanRunFilter documents for the regions file. A store
+		// written before the column existed has no statistics for it, and then
+		// there is no sound lower bound at all: keep the group.
+		if _, hi, ok := colBounds(rg, "ref_end"); ok {
+			if hi.Int64() > 0 && hi.Int64() <= int64(s.Start) {
 				return false
 			}
 		}
@@ -225,10 +239,24 @@ func unionFilter(q Query) rowGroupFilter {
 		// Spans are 0-based half-open; stored positions are 1-based.
 		note(sp.Chrom, sp.Start+1, sp.End)
 	}
+	// A span selector admits records starting before it, so the collapsed lower
+	// bound cannot be applied to pos. Track whether any span was named and, if so,
+	// fall back to ref_end for that side -- see spanFilter.
+	anySpan := len(q.Spans) > 0
 	return func(rg parquet.RowGroup) bool {
 		if a, b, ok := colBounds(rg, "pos"); ok {
-			if int64(hi) < a.Int64() || int64(lo) > b.Int64() {
+			if int64(hi) < a.Int64() {
 				return false
+			}
+			if !anySpan && int64(lo) > b.Int64() {
+				return false
+			}
+		}
+		if anySpan {
+			if _, e, ok := colBounds(rg, "ref_end"); ok {
+				if e.Int64() > 0 && e.Int64() <= int64(lo)-1 {
+					return false
+				}
 			}
 		}
 		if a, b, ok := colBounds(rg, "chrom"); ok {

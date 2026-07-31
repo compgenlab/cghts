@@ -164,9 +164,14 @@ func (s *VcfStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 				fields = append(fields, sampleField{name, f})
 			}
 
+			// The reference span of the whole record, so a span query matches a
+			// deletion that starts before it and reaches in. Computed once per
+			// record rather than per ALT: it is a property of the record.
+			refEnd := int32(rec.RefSpanEnd())
+
 			for j, alt := range rec.Alt() {
 				loc := Locus{Chrom: rec.Chrom, Pos: int32(rec.Pos), Ref: rec.Ref, Alt: alt}
-				if !p.wantsSite(loc) {
+				if !p.wantsSite(loc, refEnd) {
 					continue
 				}
 				// One pass over the samples, emitting each one's ALT call or its

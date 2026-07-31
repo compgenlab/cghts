@@ -70,11 +70,28 @@ type Span struct {
 
 // Contains reports whether a 1-based position falls in the span.
 func (s Span) Contains(chrom string, pos int32) bool {
+	return s.Overlaps(chrom, pos, 0)
+}
+
+// Overlaps reports whether a record starting at 1-based pos and reaching to the
+// 0-based exclusive refEnd intersects the span.
+//
+// A record covers more than its POS whenever REF is longer than one base, or a
+// symbolic ALT or gVCF block declares a span -- so asking only about POS misses a
+// deletion that starts before a region and reaches into it. refEnd of 0 means
+// unknown, which happens for stores written before the column existed and for
+// callers that only have a position; it degrades to the single-base test rather
+// than to an empty record.
+func (s Span) Overlaps(chrom string, pos, refEnd int32) bool {
 	if !SameChrom(s.Chrom, chrom) {
 		return false
 	}
-	p := pos - 1 // to 0-based
-	return p >= s.Start && p < s.End
+	start := pos - 1 // to 0-based
+	end := refEnd
+	if end <= start {
+		end = start + 1
+	}
+	return end > s.Start && start < s.End
 }
 
 // Gate is a per-genotype quality threshold. A zero field imposes no constraint.
@@ -184,20 +201,30 @@ func (p *plan) wantsSample(name string) bool {
 	return p.samples == nil || p.samples[name]
 }
 
-// wantsSite reports whether the site axis admits a locus.
-func (p *plan) wantsSite(l Locus) bool {
+// spanTouches reports whether any named span intersects a record.
+//
+// Shared by wantsSite and wantsRecord deliberately. wantsSite must stay a subset
+// of wantsRecord -- see wantsRecord -- and the fastest way for that invariant to
+// break is for one of them to grow a span rule the other lacks.
+func (p *plan) spanTouches(chrom string, pos, refEnd int32) bool {
+	for i := range p.q.Spans {
+		if p.q.Spans[i].Overlaps(chrom, pos, refEnd) {
+			return true
+		}
+	}
+	return false
+}
+
+// wantsSite reports whether the site axis admits a locus. refEnd is the record's
+// 0-based exclusive reference end, or 0 when unknown.
+func (p *plan) wantsSite(l Locus, refEnd int32) bool {
 	if p.anySite {
 		return true
 	}
 	if p.loci != nil && p.loci[canonLocus(l)] {
 		return true
 	}
-	for i := range p.q.Spans {
-		if p.q.Spans[i].Contains(l.Chrom, l.Pos) {
-			return true
-		}
-	}
-	return false
+	return p.spanTouches(l.Chrom, l.Pos, refEnd)
 }
 
 // wantsRecord reports whether a locus belongs to a source record the query
@@ -209,24 +236,19 @@ func (p *plan) wantsSite(l Locus) bool {
 // at the G locus, and the only evidence of that is its call at the *sibling*
 // locus -- which a site-level test discards, silently turning a 0/2 sample into a
 // fabricated 0/0.
-func (p *plan) wantsRecord(l Locus) bool {
+func (p *plan) wantsRecord(l Locus, refEnd int32) bool {
 	if p.anySite {
 		return true
 	}
 	if p.records != nil && p.records[l.Record()] {
 		return true
 	}
-	for i := range p.q.Spans {
-		if p.q.Spans[i].Contains(l.Chrom, l.Pos) {
-			return true
-		}
-	}
-	return false
+	return p.spanTouches(l.Chrom, l.Pos, refEnd)
 }
 
 // wantsCall applies both axes and the gate to one ALT call.
 func (p *plan) wantsCall(c Call) bool {
-	return p.wantsSample(c.SampleID) && p.wantsSite(c.Locus()) && p.q.Gate.Admits(c)
+	return p.wantsSample(c.SampleID) && p.wantsSite(c.Locus(), c.RefEnd) && p.q.Gate.Admits(c)
 }
 
 // CollectCalls buffers a query into a slice, for callers that do not need to

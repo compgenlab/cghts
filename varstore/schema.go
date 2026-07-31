@@ -54,11 +54,16 @@ type Call struct {
 	Pos      int32  `parquet:"pos"`
 	Ref      string `parquet:"ref,dict"`
 	Alt      string `parquet:"alt,dict"`
-	GT       string `parquet:"gt,dict"`
-	DP       int32  `parquet:"dp"`
-	ADRef    int32  `parquet:"ad_ref"`
-	ADAlt    int32  `parquet:"ad_alt"`
-	GQ       int32  `parquet:"gq"`
+	// RefEnd is the 0-based exclusive end of the reference bases the source
+	// record covered, which for a long deletion, a symbolic ALT or a gVCF block
+	// is past Pos. Zero in stores written before this column existed; treat that
+	// as "unknown" and fall back to Pos, never as a zero-length record.
+	RefEnd int32  `parquet:"ref_end"`
+	GT     string `parquet:"gt,dict"`
+	DP     int32  `parquet:"dp"`
+	ADRef  int32  `parquet:"ad_ref"`
+	ADAlt  int32  `parquet:"ad_alt"`
+	GQ     int32  `parquet:"gq"`
 }
 
 // Locus returns the site this call belongs to.
@@ -119,6 +124,7 @@ type Site struct {
 	Pos       int32  `parquet:"pos"`
 	Ref       string `parquet:"ref,dict"`
 	Alt       string `parquet:"alt,dict"`
+	RefEnd    int32  `parquet:"ref_end"`    // 0-based exclusive; see Call.RefEnd
 	AC        int32  `parquet:"ac"`         // alt alleles observed, this ALT
 	AN        int32  `parquet:"an"`         // called alleles at the site
 	NCarriers int32  `parquet:"n_carriers"` // samples with >=1 copy of this ALT
