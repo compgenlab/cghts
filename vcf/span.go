@@ -61,6 +61,52 @@ func (r *VcfRecord) IsRefBlock() bool {
 // has one of each.
 func IsRefBlockAlt(alt string) bool { return vcfspan.IsRefBlockAlt(alt) }
 
+// BlockDepth returns the depth floor a record vouches for at sample i, and whether
+// anything is known.
+//
+// For a gVCF reference block this is `FORMAT/MIN_DP`: the minimum depth anywhere in
+// the block, and therefore the only depth claim that holds across the whole span.
+// `FORMAT/DP` is the fallback, but it is a **weaker** statement -- the depth at POS
+// alone, which says nothing about the rest of the block -- so a caller gating a
+// span-wide assertion on it is overclaiming. Reported separately from DP for that
+// reason rather than folded into one accessor.
+func (r *VcfRecord) BlockDepth(i int) (int32, bool) {
+	if v, ok := r.sampleInt(i, "MIN_DP"); ok {
+		return v, true
+	}
+	return r.sampleInt(i, "DP")
+}
+
+// BlockRGQ returns `FORMAT/RGQ` for sample i: the confidence that the sample really
+// is reference here, which is what GQ is for a genotype call. GATK writes it on
+// reference blocks in place of GQ, so a caller gating reference calls on quality has
+// to look here rather than at GQ.
+func (r *VcfRecord) BlockRGQ(i int) (int32, bool) {
+	if v, ok := r.sampleInt(i, "RGQ"); ok {
+		return v, true
+	}
+	return r.sampleInt(i, "GQ")
+}
+
+// sampleInt reads one integer FORMAT value, treating absent, empty and "." alike as
+// unknown. Absence is not zero: a zero depth is a real claim and unknown depth is
+// not, and conflating them makes a gate silently admit everything.
+func (r *VcfRecord) sampleInt(i int, key string) (int32, bool) {
+	s, err := r.Sample(i)
+	if err != nil {
+		return 0, false
+	}
+	v, ok := s.Get(key)
+	if !ok || v.IsMissing() || v.IsEmpty() {
+		return 0, false
+	}
+	n, err := v.Int()
+	if err != nil {
+		return 0, false
+	}
+	return int32(n), true
+}
+
 // recordFields adapts a parsed record to the shared span rules. It reads through
 // the record's own lazy accessors rather than re-splitting the raw line, so a
 // record built in memory works as well as one read from a file.
