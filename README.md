@@ -202,6 +202,12 @@ pass**: the Parquet side prunes row groups by the union of the selectors, so a
   the column existed select on position alone and report
   `ParquetStore.HasRefSpans() == false` — a different answer, not merely a slower
   one, so it is worth surfacing
+- **gVCF reference blocks read as coverage.** A block asserts that a sample was
+  called reference across a span at at least `MIN_DP` -- the one claim a plain VCF
+  cannot make, and what lets a query answer for a position no variant record
+  mentions. `OpenVcf` on a gVCF yields one reference row per block per sample, never
+  one per base, with the block's `MIN_DP` as the depth bound and `Alt` `.`; the gap
+  between blocks stays unanswerable, because nothing was reported there
 - Stores keep the source's own contig spelling; compare through
   `CanonKey`/`SameChrom` so `chr17`, `17` and `NC_000017.11` all resolve
 
