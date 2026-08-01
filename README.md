@@ -193,6 +193,15 @@ pass**: the Parquet side prunes row groups by the union of the selectors, so a
   where runs bracket it. A gVCF's reference blocks (`END`, `MIN_DP`) *are* span
   assertions, and only such a store could answer off-catalog — hence
   `SpanSemantics`
+- **A span selects by overlap, not by start position.** A record covers more than
+  its POS whenever REF is longer than one base, or a symbolic ALT or gVCF block
+  declares a span, so a query for `chr1:3100-3150` returns a deletion beginning at
+  3000. The `ref_end` column carries that extent; the writer derives it from
+  `len(REF)` when a caller does not set it, and `(*vcf.VcfRecord).RefSpan` computes
+  the full version from `INFO/END`, `SVLEN` and `FORMAT/LEN`. Stores written before
+  the column existed select on position alone and report
+  `ParquetStore.HasRefSpans() == false` — a different answer, not merely a slower
+  one, so it is worth surfacing
 - Stores keep the source's own contig spelling; compare through
   `CanonKey`/`SameChrom` so `chr17`, `17` and `NC_000017.11` all resolve
 
