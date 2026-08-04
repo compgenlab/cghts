@@ -67,14 +67,19 @@ func memberExists(ctx context.Context, locator string) bool {
 	return true
 }
 
-// MemberShape reports a store member's row count and size in bytes, reading
-// only its parquet footer.
+// MemberShape reports a store member's size in bytes and, if it has a readable
+// parquet footer, its row count. A rows of -1 means the member is present but
+// was never finalized.
 //
-// It exists for diagnosing a store that will not open. Since a missing manifest
-// has no escape hatch, a caller holding an unreadable store needs some way to
-// learn what is in it, and row counts are footer metadata rather than a scan --
-// so this answers cheaply without answering any genotype question. Diagnosis is
-// deliberately not access.
+// That distinction is the whole point. This exists for diagnosing a store that
+// will not open, and since a missing manifest has no escape hatch, a caller left
+// holding one needs some way to learn what is in it. A footer is written only by
+// the writer's Close, so "present, N bytes, no footer" says precisely that the
+// conversion died while writing this member -- which reporting it as simply
+// absent would hide. An error means the member is not there at all.
+//
+// Row counts are footer metadata rather than a scan, so this is cheap, and it
+// answers nothing about genotypes: diagnosis is deliberately not access.
 func MemberShape(ctx context.Context, locator string) (rows, size int64, err error) {
 	m, err := openMember(ctx, locator)
 	if err != nil {
@@ -83,7 +88,7 @@ func MemberShape(ctx context.Context, locator string) (rows, size int64, err err
 	defer m.Close()
 	f, err := parquet.OpenFile(m.ra, m.size)
 	if err != nil {
-		return 0, 0, err
+		return -1, m.size, nil
 	}
 	return f.NumRows(), m.size, nil
 }
