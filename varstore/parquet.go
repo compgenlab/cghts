@@ -613,8 +613,10 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error)
 	// merely a slower one, which is why HasRefSpans is exported for callers to
 	// report.
 	s.hasRefSpans = hasColumn(pf, "ref_end")
-	// The optional members: absent is normal (a --no-callable store has no
-	// regions), so failure to open is recorded rather than returned.
+	// The optional members. Absence is legitimate only where the manifest
+	// recorded nothing in them, which verifyAgainstManifest below enforces;
+	// note that the writer creates all three regardless, so --no-callable
+	// produces a present, zero-row regions member rather than a missing one.
 	sites, hasSites, err := openOptionalMember(ctx, SitesPath(base))
 	if err != nil {
 		calls.Close()
@@ -1149,7 +1151,12 @@ func (s *ParquetStore) SiteKnown(l Locus) (bool, error) {
 	return found, err
 }
 
-// Close is a no-op; ParquetStore opens files per query.
+// Close releases the three members, which are held open for the store's life.
+//
+// It is not optional. This comment used to say the opposite -- "a no-op;
+// ParquetStore opens files per query" -- which was true before the members
+// became long-lived, and a caller trusting it leaks a file handle per store,
+// or a live connection per store when the members are remote.
 func (s *ParquetStore) Close() error {
 	var first error
 	for _, m := range []*member{s.calls, s.sites, s.regions} {
