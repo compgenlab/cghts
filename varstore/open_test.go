@@ -155,3 +155,32 @@ func TestUnknownKindIsDistinctFromTransportFailure(t *testing.T) {
 		t.Errorf("an unlinked transport was reported as an unrecognized store: %v", err)
 	}
 }
+
+// An interrupted conversion leaves members but no manifest. That has to resolve
+// as a store so opening it produces the actionable error, rather than as an
+// unrecognizable path -- the manifest is both what identifies a store and the
+// thing this one lacks, so treating its absence as "not a store" would make the
+// most likely real failure undiagnosable.
+func TestUnfinishedStoreIsStillRecognizedAsOne(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "cohort")
+	buildCensusStore(t, base, WriterOpts{MinDP: 10})
+	if err := os.Remove(ManifestPath(base)); err != nil {
+		t.Fatal(err)
+	}
+
+	kind, err := StoreKind(context.Background(), base)
+	if err != nil {
+		t.Fatalf("an unfinished store was not recognized: %v", err)
+	}
+	if kind != KindParquet {
+		t.Errorf("kind = %q, want %q", kind, KindParquet)
+	}
+
+	_, err = OpenStore(context.Background(), base, "")
+	if err == nil {
+		t.Fatal("an unfinished store opened")
+	}
+	if !strings.Contains(err.Error(), ManifestFile) {
+		t.Errorf("the error does not name the missing manifest: %v", err)
+	}
+}

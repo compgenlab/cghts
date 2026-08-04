@@ -58,6 +58,15 @@ func StoreKind(ctx context.Context, locator string) (string, error) {
 	if _, err := ReadManifestContext(ctx, locator); err == nil {
 		return KindParquet, nil
 	}
+	// No manifest, but a calls member still identifies this as a store -- an
+	// unfinished one. Saying so is what makes the failure diagnosable: opening
+	// it then reports "no manifest, re-convert it or inspect it", which is
+	// actionable, where calling it unrecognizable sends the reader off to check
+	// their path. Without this the common case is circular, since the manifest
+	// is both what identifies a store and the thing it is missing.
+	if memberExists(ctx, CallsPath(locator)) {
+		return KindParquet, nil
+	}
 	return "", fmt.Errorf("%w: cannot tell what kind of store %q is, it has no VCF "+
 		"suffix and no %s was found in it", ErrUnknownStoreKind, locator, ManifestFile)
 }
