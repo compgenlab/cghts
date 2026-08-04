@@ -370,6 +370,20 @@ type Store interface {
 	// a set of reference calls.
 	SiteKnown(l Locus) (bool, error)
 
+	// Sites streams the catalog of interrogated sites, calling fn for each.
+	// fn returns false to stop early.
+	//
+	// This is a full pass over the sites, and for a VCF backend a full pass over
+	// the file -- there is no index of "every variant". Callers that only need a
+	// summary should not reach for it by default; it is the expensive question,
+	// not the cheap one.
+	//
+	// The counts a VCF yields are computed from its genotypes on the way past,
+	// so they mean the same thing as a store's: AC/AN are allele counts and are
+	// not depth-gated, NCarriers is a sample count. NLowDP and NCalled depend on
+	// a --min-dp threshold that a plain VCF has no record of, and are left zero.
+	Sites(fn func(Site) bool) error
+
 	// Close releases any open files.
 	Close() error
 }

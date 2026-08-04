@@ -49,7 +49,7 @@ func buildPruneStore(t *testing.T, rowGroup int64) (base string, want []Call) {
 			t.Fatal(err)
 		}
 	}
-	if err := w.Close(); err != nil {
+	if err := w.Finish(); err != nil {
 		t.Fatal(err)
 	}
 	return base, want
@@ -235,7 +235,7 @@ func TestSpanFilterFindsRecordStartingBeforeSpan(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := w.Close(); err != nil {
+	if err := w.Finish(); err != nil {
 		t.Fatal(err)
 	}
 

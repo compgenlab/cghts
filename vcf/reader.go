@@ -12,7 +12,10 @@ import (
 // VcfReader is a streaming, forward-only VCF parser. Records are read one at a
 // time with [VcfReader.NextRecord]. A VcfReader is not safe for concurrent use.
 type VcfReader struct {
-	file       *os.File
+	// closer releases whatever backs the stream: a *os.File for NewVcfFile, a
+	// remote byte source for OpenVcfFile, nil when the caller supplied the
+	// reader and owns it.
+	closer     io.Closer
 	reader     *bufio.Reader
 	header     *VcfHeader
 	headerRead bool
@@ -38,18 +41,26 @@ func NewVcfFile(filename string) (*VcfReader, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newVcfFrom(f, f)
+}
 
-	r := bufio.NewReaderSize(f, 1024*1024)
+// newVcfFrom wraps an already-open stream, sniffing gzip/BGZF from its first
+// bytes. Both NewVcfFile and OpenVcfFile go through here so that the buffer
+// size, the magic test and the close-on-failure path have one implementation;
+// a second copy would be free to drift, and the drift would be silent.
+func newVcfFrom(rd io.Reader, closer io.Closer) (*VcfReader, error) {
+	r := bufio.NewReaderSize(rd, 1024*1024)
 	if magic, err := r.Peek(2); err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
 		gz, err := gzip.NewReader(r)
 		if err != nil {
-			f.Close()
+			if closer != nil {
+				closer.Close()
+			}
 			return nil, err
 		}
 		r = bufio.NewReaderSize(gz, 1024*1024)
 	}
-
-	return &VcfReader{file: f, reader: r}, nil
+	return &VcfReader{closer: closer, reader: r}, nil
 }
 
 // Header returns the parsed VCF header, reading it from the input on first call.
@@ -125,11 +136,12 @@ func (r *VcfReader) NextRecord() (*VcfRecord, error) {
 	}
 }
 
-// Close closes the underlying file (if the reader was opened from a file) and
-// marks the reader closed.
+// Close releases whatever backs the stream -- a file, a remote source -- and
+// marks the reader closed. It is a no-op for a reader built over a caller's own
+// io.Reader, which the caller still owns.
 func (r *VcfReader) Close() {
-	if r.file != nil {
-		r.file.Close()
+	if r.closer != nil {
+		r.closer.Close()
 	}
 	r.closed = true
 }

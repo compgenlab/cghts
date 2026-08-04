@@ -1,14 +1,20 @@
 // Package varstore holds the on-disk schema for a sparse genotype store and a
 // uniform way to query genotypes regardless of which format backs them.
 //
-// A Parquet store is a set of three files derived from one base name. All three
-// are required: the calls file alone cannot distinguish a confidently-called
-// reference genotype from a position that was never assayed, which is the
-// distinction Classify exists to make.
+// A Parquet store is a directory. All three members are required: the calls file
+// alone cannot distinguish a confidently-called reference genotype from a
+// position that was never assayed, which is the distinction Classify exists to
+// make.
 //
-//	BASE.calls.parquet     one row per ALT-carrying genotype
-//	BASE.sites.parquet     one row per interrogated site, sample-independent
-//	BASE.regions.parquet   runs of catalog sites at which a sample was called
+//	cohort/
+//	  calls.parquet     one row per ALT-carrying genotype
+//	  sites.parquet     one row per interrogated site, sample-independent
+//	  regions.parquet   runs of catalog sites at which a sample was called
+//
+// The members are only meaningful together, so the store is one thing to copy,
+// move and delete. A trailing separator on the base is optional, and a member
+// path is accepted anywhere a store name is: all of "cohort", "cohort/" and
+// "cohort/calls.parquet" name the same store.
 //
 // # What a store built from a plain VCF can answer
 //
@@ -35,7 +41,6 @@ package varstore
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -183,41 +188,65 @@ type CalledSiteRun struct {
 	NSites   int32  `parquet:"n_sites"`
 }
 
-// The three members of a store, and the two ways a base name can address them.
+// The members of a store. A store IS a directory, and they sit inside it under
+// fixed names:
 //
-// A base ending in a path separator names a DIRECTORY, and the members sit
-// inside it under their bare names:
+//	cohort/
+//	  calls.parquet
+//	  sites.parquet
+//	  regions.parquet
 //
-//	--out cohort/   ->  cohort/calls.parquet, cohort/sites.parquet, ...
+// A trailing separator on the base is optional and means nothing;
+// "cohort" and "cohort/" name the same store.
 //
-// Any other base is a filename PREFIX, and the member name is appended:
-//
-//	--out cohort    ->  cohort.calls.parquet, cohort.sites.parquet, ...
-//
-// The directory form keeps the set as one thing to copy, move or delete, which
-// matters because the three files are only meaningful together.
+// There used to be a second, filename-prefix form ("cohort.calls.parquet"), and
+// dropping it removed more than it cost. The members are only meaningful
+// together, so a store wants to be one thing to copy, move and delete; a fixed
+// directory is also how every table format built on Parquet ships, so external
+// readers can be pointed straight at a member. And path resolution collapses:
+// there is no longer a base that might be a prefix or might be a directory, no
+// separator-sensitive MemberPath, and no need to guess which was meant.
 const (
 	CallsMember   = "calls"
 	SitesMember   = "sites"
 	RegionsMember = "regions"
-
-	CallsSuffix   = "." + CallsMember + ".parquet"
-	SitesSuffix   = "." + SitesMember + ".parquet"
-	RegionsSuffix = "." + RegionsMember + ".parquet"
 )
-
-// IsDirBase reports whether a base names a directory rather than a filename
-// prefix, i.e. whether it ends in a path separator.
-func IsDirBase(base string) bool {
-	return strings.HasSuffix(base, "/") || strings.HasSuffix(base, string(os.PathSeparator))
-}
 
 // MemberPath returns the file holding one member of the store at base.
 func MemberPath(base, member string) string {
-	if IsDirBase(base) {
-		return filepath.Join(base, member+".parquet")
+	return joinStore(base, member+".parquet")
+}
+
+// joinStore appends a name to a store directory.
+//
+// It is deliberately not filepath.Join, which cleans its result and would turn
+// "s3://bucket/cohort" into "s3:/bucket/cohort" by collapsing the scheme's
+// double slash. A forward slash is used as the separator on every platform,
+// since Go accepts it in filesystem paths on Windows too and it is the only
+// thing a locator can use.
+func joinStore(base, name string) string {
+	switch {
+	case base == "":
+		return name
+	case strings.HasSuffix(base, "/"), strings.HasSuffix(base, string(os.PathSeparator)):
+		return base + name
+	default:
+		return base + "/" + name
 	}
-	return base + "." + member + ".parquet"
+}
+
+// trimStoreDir removes a trailing separator from a store directory, so that the
+// base is spelled one way internally whatever the caller typed. The filesystem
+// root is left alone: "/" is a directory name, not a decorated empty one.
+func trimStoreDir(base string) string {
+	for len(base) > 1 {
+		last := base[len(base)-1]
+		if last != '/' && last != os.PathSeparator {
+			break
+		}
+		base = base[:len(base)-1]
+	}
+	return base
 }
 
 // CallsPath returns the calls file for a store base name.
@@ -229,16 +258,19 @@ func SitesPath(base string) string { return MemberPath(base, SitesMember) }
 // RegionsPath returns the callable-regions file for a store base name.
 func RegionsPath(base string) string { return MemberPath(base, RegionsMember) }
 
-// EnsureStoreDir creates the containing directory for a directory-form base.
-// It is a no-op for the prefix form, whose parent is the caller's business.
+// EnsureStoreDir creates the directory a store lives in.
+//
+// Note that it is not undone if the conversion later fails, so an abandoned run
+// can leave an empty directory behind. That is harmless -- ExistingMembers finds
+// nothing in it, so the retry is not blocked -- but it does mean the presence of
+// a directory says nothing about whether a store is there.
 func EnsureStoreDir(base string) error {
-	if !IsDirBase(base) {
-		return nil
-	}
-	return os.MkdirAll(base, 0o755)
+	return os.MkdirAll(trimStoreDir(base), 0o755)
 }
 
-// ExistingMembers lists which of the three member files already exist at base.
+// ExistingMembers lists which member files already exist at base, the manifest
+// included: it is written by a conversion and removed by one, so leaving it out
+// would let a re-run silently orphan a marker vouching for members it replaced.
 func ExistingMembers(base string) []string {
 	var found []string
 	for _, m := range []string{CallsMember, SitesMember, RegionsMember} {
@@ -246,29 +278,24 @@ func ExistingMembers(base string) []string {
 			found = append(found, p)
 		}
 	}
+	if p := ManifestPath(base); fileExists(p) {
+		found = append(found, p)
+	}
 	return found
 }
 
 // CheckStoreTarget refuses to write over an existing store unless force is set.
 //
-// Conversion truncates all three members, so an accidental re-run against a
-// populated base destroys the previous store outright -- and because the three
-// files are only meaningful together, a half-replaced set is worse than either
-// outcome. Any single surviving member is therefore enough to stop.
+// Conversion truncates every member, so an accidental re-run against a populated
+// directory destroys the previous store outright -- and because the members are
+// only meaningful together, a half-replaced set is worse than either outcome.
+// Any single surviving member is therefore enough to stop.
 //
-// A prefix-form base that is itself a directory is refused separately: writing
-// "cohort.calls.parquet" beside an existing "cohort/" directory is legal but
-// almost certainly means the trailing slash was forgotten.
+// The check keys on the members, not on the directory, so pointing --out at an
+// existing directory that holds unrelated files is fine and leaves them alone.
 func CheckStoreTarget(base string, force bool) error {
 	if force {
 		return nil
-	}
-	if !IsDirBase(base) {
-		if st, err := os.Stat(base); err == nil && st.IsDir() {
-			return fmt.Errorf("%s is a directory; write inside it with --out %s%c, "+
-				"or pass --force to use the name as a filename prefix",
-				base, base, os.PathSeparator)
-		}
 	}
 	if existing := ExistingMembers(base); len(existing) > 0 {
 		return fmt.Errorf("refusing to overwrite an existing store: %s; pass --force to replace it",

@@ -42,9 +42,11 @@ func TestEnd(t *testing.T) {
 		line: "chr1\t1000\t.\tACGT\tA\t.\tPASS\tEND=500",
 		want: 999 + 4,
 	}, {
+		// END = POS + |SVLEN| and POS..END is inclusive, so this covers the
+		// anchor base plus 750 more -- the same extent INFO/END=1750 would give.
 		name: "SVLEN, reported negative for a deletion",
 		line: "chr1\t1000\t.\tN\t<DEL>\t.\tPASS\tSVTYPE=DEL;SVLEN=-750",
-		want: 999 + 750,
+		want: 999 + 751,
 	}, {
 		// SVLEN measures inserted sequence, not reference span, so it must not
 		// widen the interval.
@@ -54,7 +56,7 @@ func TestEnd(t *testing.T) {
 	}, {
 		name: "SVLEN on a subtyped deletion still counts",
 		line: "chr1\t1000\t.\tN\t<DEL:ME:ALU>\t.\tPASS\tSVLEN=-300",
-		want: 999 + 300,
+		want: 999 + 301,
 	}, {
 		// The per-sample case: one interval per record, so the widest sample
 		// wins. Narrowing would lose records; widening only costs a filtered
@@ -97,5 +99,22 @@ func TestEnd(t *testing.T) {
 				t.Errorf("FieldsEnd() = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// The two ways of spelling the same deletion must agree. VCF 4.4 defines
+// END = POS + |SVLEN| for DEL/DUP/INV/CNV, so END=2000 at POS=1000 and
+// SVLEN=-1000 at POS=1000 describe the same 1001 reference bases. They used to
+// differ by one, which meant a query for the record's final base found it
+// through one spelling and missed it through the other.
+func TestEndAndSVLenAgreeForTheSameVariant(t *testing.T) {
+	const beg = 999 // 0-based for POS=1000
+	viaEnd := FieldsEnd(strings.Split("chr1\t1000\t.\tN\t<DEL>\t.\tPASS\tSVTYPE=DEL;END=2000", "\t"), beg)
+	viaSVLen := FieldsEnd(strings.Split("chr1\t1000\t.\tN\t<DEL>\t.\tPASS\tSVTYPE=DEL;SVLEN=-1000", "\t"), beg)
+	if viaEnd != viaSVLen {
+		t.Errorf("END gave end %d and SVLEN gave %d for the same deletion", viaEnd, viaSVLen)
+	}
+	if got := viaEnd - beg; got != 1001 {
+		t.Errorf("the deletion spans %d bases, want 1001 (POS..END inclusive)", got)
 	}
 }
