@@ -54,7 +54,7 @@ func (m *member) Close() error {
 // Absence is not an error: a store written with --no-callable has no regions
 // member, and Classify's behaviour depends on telling that apart from a failure.
 func memberExists(ctx context.Context, locator string) bool {
-	if !isRemoteLocator(locator) {
+	if !iosource.IsRemote(locator) {
 		_, err := os.Stat(locator)
 		return err == nil
 	}
@@ -64,14 +64,4 @@ func memberExists(ctx context.Context, locator string) bool {
 	}
 	src.Close()
 	return true
-}
-
-// isRemoteLocator reports whether a locator names something other than a file.
-func isRemoteLocator(locator string) bool {
-	for i := 1; i < len(locator)-2; i++ {
-		if locator[i] == ':' && locator[i+1] == '/' && locator[i+2] == '/' {
-			return true
-		}
-	}
-	return false
 }
