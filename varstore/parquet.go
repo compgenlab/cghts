@@ -1169,3 +1169,11 @@ func (s *ParquetStore) Close() error {
 // Stores written before the ref_end column existed report false; rewriting the
 // store is what fixes it.
 func (s *ParquetStore) HasRefSpans() bool { return s.hasRefSpans }
+
+// Manifest returns the completion record this store was opened with.
+//
+// It is never nil for an open store: opening requires one. Callers wanting the
+// per-chromosome census, the conversion parameters or the recorded counts read
+// them from here rather than re-deriving them, which is the point of writing
+// them down.
+func (s *ParquetStore) Manifest() *Manifest { return s.manifest }
