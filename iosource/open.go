@@ -50,6 +50,25 @@ func Schemes() []string {
 	return out
 }
 
+// HasTransport reports whether Open can handle this scheme. "" (a filesystem
+// path) and http/https are always available; anything else must have been
+// registered.
+//
+// It exists for dispatchers that probe several candidate locations and treat a
+// failure as "not this kind of thing". Without it, an unregistered scheme looks
+// exactly like a file that is not there, and "gs://bucket/x" gets reported as an
+// unrecognized format rather than as a transport nobody linked in.
+func HasTransport(scheme string) bool {
+	switch scheme {
+	case "", "http", "https":
+		return true
+	}
+	schemesMu.RLock()
+	_, ok := schemes[scheme]
+	schemesMu.RUnlock()
+	return ok
+}
+
 // Open returns a random-access source for a locator, dispatching on its scheme.
 //
 // A plain path opens a local file, http:// and https:// use Range requests, and
