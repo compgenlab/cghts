@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/compgenlab/cghts/iosource"
+	"github.com/parquet-go/parquet-go"
 )
 
 // member is one file of a store — calls, sites or regions — held open for the
@@ -51,10 +52,16 @@ func (m *member) Close() error {
 
 // memberExists reports whether a store member is present, for any locator kind.
 //
-// Absence is not an error: a store written with --no-callable has no regions
-// member, and Classify's behaviour depends on telling that apart from a failure.
+// Absence is not by itself an error, so this answers rather than failing.
+// Whether a *particular* absence is legitimate is a separate question the
+// manifest settles, since it records how many rows each member held.
+//
+// Note that the writer creates all three members regardless, so --no-callable
+// yields a present, zero-row regions file rather than a missing one -- the
+// comments here used to say otherwise, and any logic keyed on that absence
+// would never have fired.
 func memberExists(ctx context.Context, locator string) bool {
-	if !isRemoteLocator(locator) {
+	if !iosource.IsRemote(locator) {
 		_, err := os.Stat(locator)
 		return err == nil
 	}
@@ -66,12 +73,28 @@ func memberExists(ctx context.Context, locator string) bool {
 	return true
 }
 
-// isRemoteLocator reports whether a locator names something other than a file.
-func isRemoteLocator(locator string) bool {
-	for i := 1; i < len(locator)-2; i++ {
-		if locator[i] == ':' && locator[i+1] == '/' && locator[i+2] == '/' {
-			return true
-		}
+// MemberShape reports a store member's size in bytes and, if it has a readable
+// parquet footer, its row count. A rows of -1 means the member is present but
+// was never finalized.
+//
+// That distinction is the whole point. This exists for diagnosing a store that
+// will not open, and since a missing manifest has no escape hatch, a caller left
+// holding one needs some way to learn what is in it. A footer is written only by
+// the writer's Close, so "present, N bytes, no footer" says precisely that the
+// conversion died while writing this member -- which reporting it as simply
+// absent would hide. An error means the member is not there at all.
+//
+// Row counts are footer metadata rather than a scan, so this is cheap, and it
+// answers nothing about genotypes: diagnosis is deliberately not access.
+func MemberShape(ctx context.Context, locator string) (rows, size int64, err error) {
+	m, err := openMember(ctx, locator)
+	if err != nil {
+		return 0, 0, err
 	}
-	return false
+	defer m.Close()
+	f, err := parquet.OpenFile(m.ra, m.size)
+	if err != nil {
+		return -1, m.size, nil
+	}
+	return f.NumRows(), m.size, nil
 }

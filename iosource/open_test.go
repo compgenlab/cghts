@@ -21,8 +21,8 @@ func TestSchemeOf(t *testing.T) {
 		{"http://host/x", "http"},
 		{`C:\data\x.gz`, ""}, // a drive letter is not a scheme
 	} {
-		if got := schemeOf(tc.in); got != tc.want {
-			t.Errorf("schemeOf(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := Scheme(tc.in); got != tc.want {
+			t.Errorf("Scheme(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
@@ -112,3 +112,28 @@ func (s *stubSource) ReadAt(p []byte, off int64) (int, error) {
 }
 func (s *stubSource) Size() (int64, error) { return int64(len(s.data)), nil }
 func (s *stubSource) Close() error         { return nil }
+
+// One rule, one implementation. This used to be copy-pasted into varstore,
+// htsio and seqio, and one copy had drifted: it scanned from index 1, so
+// "a://x" was remote there and local here. A caller that classifies a locator
+// differently from Open does not fail loudly -- it opens the wrong thing.
+func TestIsRemoteMatchesOpenDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		in     string
+		remote bool
+	}{
+		{"cohort", false},
+		{"/data/cohort/calls.parquet", false},
+		{`C:\data\cohort`, false},
+		{"c://x", false}, // a single character is a drive letter, not a scheme
+		{"a://x", false},
+		{"s3://bucket/cohort", true},
+		{"https://host/x.vcf.gz", true},
+		{"HTTPS://host/x.vcf.gz", true},
+		{"gs://bucket/x", true},
+	} {
+		if got := IsRemote(tc.in); got != tc.remote {
+			t.Errorf("IsRemote(%q) = %v, want %v", tc.in, got, tc.remote)
+		}
+	}
+}

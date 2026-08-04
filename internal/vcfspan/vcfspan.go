@@ -48,8 +48,14 @@ type Fields interface {
 //     not greater than POS, matching htslib, since a malformed END must not shrink
 //     the interval.
 //   - INFO/SVLEN, only for symbolic alternates measured against the reference.
-//     Taken as an absolute value: a deletion reports it negative, but the span it
-//     occupies is positive either way.
+//     Taken as an absolute value -- a deletion reports it negative, but the span
+//     it occupies is positive either way -- and counted as |SVLEN|+1 reference
+//     bases, because VCF 4.4 defines END = POS + |SVLEN| for DEL/DUP/INV/CNV and
+//     a record spans POS..END *inclusive*. The anchor base named by REF is the
+//     +1. Without it the two sources disagreed for the same variant: END=2000 at
+//     POS=1000 gave 1001 bases and the equivalent SVLEN=-1000 gave 1000, so a
+//     query for the final base found the record through one spelling and missed
+//     it through the other.
 //   - FORMAT/LEN, the VCF 4.5 per-sample reference-block length, only for <*> or
 //     <NON_REF>.
 //
@@ -85,8 +91,10 @@ func End(f Fields, beg int) int {
 				if n < 0 {
 					n = -n
 				}
-				if n > span {
-					span = n
+				// END = POS + |SVLEN|, and POS..END is inclusive, so the record
+				// covers the anchor base plus |SVLEN| more.
+				if n+1 > span {
+					span = n + 1
 				}
 			}
 		}

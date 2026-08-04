@@ -206,10 +206,16 @@ func CallFor(rec *vcf.VcfRecord, sample string, sf SampleFields, altIdx int, alt
 		Pos:      int32(rec.Pos),
 		Ref:      rec.Ref,
 		Alt:      alt,
-		GT:       gt,
-		DP:       sf.DP,
-		ADRef:    adRef,
-		ADAlt:    adAlt,
-		GQ:       sf.GQ,
+		// The record's reference extent, so a VCF-backed row carries the same
+		// span a converted store's does. Leaving it zero meant every deletion,
+		// symbolic ALT and long REF read back as one base wide from a VCF and
+		// its true width from the store built out of that same VCF -- and the
+		// two backends are supposed to answer identically.
+		RefEnd: int32(rec.RefSpanEnd()),
+		GT:     gt,
+		DP:     sf.DP,
+		ADRef:  adRef,
+		ADAlt:  adAlt,
+		GQ:     sf.GQ,
 	}, true
 }

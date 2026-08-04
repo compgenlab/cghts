@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/compgenlab/cghts/iosource"
 )
 
 // ReferenceReader provides random access to named reference sequences.
@@ -47,7 +49,7 @@ type ReferenceReader interface {
 func OpenReference(path string) (ReferenceReader, error) {
 	// Anything with a scheme is remote: http(s) always, plus whatever transports
 	// are registered with iosource (s3, …). A plain path falls through.
-	if i := strings.Index(path, "://"); i > 1 {
+	if iosource.IsRemote(path) {
 		return NewRemoteFastaReader(path)
 	}
 

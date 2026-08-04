@@ -50,13 +50,32 @@ func Schemes() []string {
 	return out
 }
 
+// HasTransport reports whether Open can handle this scheme. "" (a filesystem
+// path) and http/https are always available; anything else must have been
+// registered.
+//
+// It exists for dispatchers that probe several candidate locations and treat a
+// failure as "not this kind of thing". Without it, an unregistered scheme looks
+// exactly like a file that is not there, and "gs://bucket/x" gets reported as an
+// unrecognized format rather than as a transport nobody linked in.
+func HasTransport(scheme string) bool {
+	switch scheme {
+	case "", "http", "https":
+		return true
+	}
+	schemesMu.RLock()
+	_, ok := schemes[scheme]
+	schemesMu.RUnlock()
+	return ok
+}
+
 // Open returns a random-access source for a locator, dispatching on its scheme.
 //
 // A plain path opens a local file, http:// and https:// use Range requests, and
 // any other scheme must have been registered. This is what lets an indexed
 // reader accept "the data is over there" without knowing where "there" is.
 func Open(ctx context.Context, locator string) (ByteSource, error) {
-	scheme := schemeOf(locator)
+	scheme := Scheme(locator)
 	switch scheme {
 	case "":
 		return OpenFile(locator)
@@ -80,7 +99,7 @@ func Open(ctx context.Context, locator string) (ByteSource, error) {
 // resolution works the same way whatever the data source is.
 func Sibling(ctx context.Context) SiblingOpener {
 	return func(locator, suffix string) (io.ReadCloser, error) {
-		switch schemeOf(locator) {
+		switch Scheme(locator) {
 		case "":
 			return FileSibling(locator, suffix)
 		case "http", "https":
@@ -104,14 +123,40 @@ type readCloser struct {
 	io.Closer
 }
 
-// schemeOf returns the URI scheme of a locator, or "" for a filesystem path.
+// OpenReader opens a locator for sequential reading.
+//
+// The bytes are returned exactly as stored; nothing is decompressed. Use it
+// where a whole small file is wanted -- an index, a sample list, a manifest --
+// rather than the random access [Open] provides.
+func OpenReader(ctx context.Context, locator string) (io.ReadCloser, error) {
+	src, err := Open(ctx, locator)
+	if err != nil {
+		return nil, err
+	}
+	size, err := src.Size()
+	if err != nil {
+		src.Close()
+		return nil, err
+	}
+	return readCloser{Reader: io.NewSectionReader(src, 0, size), Closer: src}, nil
+}
+
+// Scheme returns the URI scheme of a locator, or "" for a filesystem path.
 //
 // A Windows drive letter ("C:\...") is not a scheme, so a single character does
 // not count.
-func schemeOf(locator string) string {
+//
+// It is exported because a caller has to classify a locator exactly the way
+// [Open] will dispatch it. Code that decides "is this a file to stat, or a URL
+// to fetch" and disagrees with Open by one edge case does not fail loudly -- it
+// opens the wrong thing, or reads a URL as a name.
+func Scheme(locator string) string {
 	i := strings.Index(locator, "://")
 	if i <= 1 {
 		return ""
 	}
 	return strings.ToLower(locator[:i])
 }
+
+// IsRemote reports whether a locator names something other than a local file.
+func IsRemote(locator string) bool { return Scheme(locator) != "" }

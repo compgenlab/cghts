@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 )
 
 // SiblingOpener opens an index "sibling" of a data resource — for example the
@@ -36,6 +37,11 @@ func HTTPSibling(locator, suffix string) (io.ReadCloser, error) {
 // that opens, along with the matched suffix. It is used to locate an index
 // whose exact extension is not known ahead of time (e.g. ".tbi" vs ".csi").
 // The caller owns closing the returned reader.
+// The error names every suffix tried, not just the last failure. Returning only
+// the last one meant a missing index reported a 404 for ".csi" and never
+// mentioned ".tbi" -- which reads as though the wrong index kind was expected,
+// when in fact neither was there. That is the most common failure for a remote
+// file, so it is worth spelling out.
 func ResolveSibling(locator string, suffixes []string, open SiblingOpener) (io.ReadCloser, string, error) {
 	var lastErr error
 	for _, suffix := range suffixes {
@@ -46,7 +52,9 @@ func ResolveSibling(locator string, suffixes []string, open SiblingOpener) (io.R
 		lastErr = err
 	}
 	if lastErr == nil {
-		lastErr = fmt.Errorf("no sibling found for %s (tried %v)", locator, suffixes)
+		return nil, "", fmt.Errorf("no sibling found for %s (tried %s)",
+			locator, strings.Join(suffixes, ", "))
 	}
-	return nil, "", lastErr
+	return nil, "", fmt.Errorf("no sibling found for %s (tried %s; last error: %w)",
+		locator, strings.Join(suffixes, ", "), lastErr)
 }

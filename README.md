@@ -149,14 +149,34 @@ Streaming and tabix-indexed readers, a writer, and a header/record model for VCF
 ### varstore — sparse genotype store
 
 Cohort genotypes in Parquet, plus a VCF-backed implementation of the same
-interface. A store is three files sharing a base name, and all three are
-required:
+interface. A store is a directory, and all three members are required:
 
 ```
-BASE.calls.parquet     one row per ALT-carrying genotype
-BASE.sites.parquet     one row per interrogated site, with AC/AN
-BASE.regions.parquet   runs of catalog sites at which a sample was called
+cohort/
+  calls.parquet      one row per ALT-carrying genotype
+  sites.parquet      one row per interrogated site, with AC/AN
+  regions.parquet    runs of catalog sites at which a sample was called
+  manifest.json.gz   written last; the store is readable only with it
 ```
+
+The members are only meaningful together, so a store is one thing to copy, move
+and delete — and the layout is the one every Parquet table format uses, so an
+external reader can be pointed straight at a member. `cohort`, `cohort/`,
+`cohort/calls.parquet` and `cohort/manifest.json.gz` all name the same store.
+
+The manifest is what makes a store *readable*, not merely present. Close it with
+`Writer.Finish`, which finalizes every member and only then writes the marker;
+`OpenParquet` refuses a store without one. It exists because the parquet members
+cannot answer one question about themselves — whether the run that produced them
+reached the end. Their footers prove each was *finished*, but a set of finished
+members says nothing about how much of the intended input went in, and the
+metadata in the calls file is actively misleading there: `cgkit.source` and
+`cgkit.contigs` are stamped before the first record is read, so a store holding
+three chromosomes of a 22-input conversion names all 22 inputs and declares all
+22 contigs. The manifest records what was *written* — per-chromosome site and
+call counts, per-member row counts, the sample roster — so a reader can check
+the claim instead of taking it. `stores/*/manifest.json.gz` globs the completed
+stores without opening anything.
 
 Only the ALT-carrying genotypes are stored — a real cohort callset is
 overwhelmingly reference, so this is a small fraction of the dense matrix. The
@@ -264,7 +284,7 @@ A narrow query over a 4.75 MB indexed VCF fetches ~1.8% of the file.
 SAM/BAM/CRAM from a path, a URL or an `s3://` locator, resolving the `.bai` or
 `.crai` through the same transport, so indexed region queries work without
 downloading the file. For CRAM the reference is independent of where the data
-lives — `SetRefPath` takes any locator and `SetRefReader` an already-open one,
+lives — `RefPath` takes any locator and `Ref` an already-open one,
 so a remote CRAM with a local reference (or the reverse) is fine.
 
 **varstore reads remotely too.** `OpenParquetContext(ctx, locator)` opens a

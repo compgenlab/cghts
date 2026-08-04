@@ -285,6 +285,16 @@ func (idx *BinIndex) Query(refID int, start, end int) []Chunk {
 	}
 	ref := &idx.refs[refID]
 
+	// Clamp before shifting. A negative start arises legitimately -- an
+	// annotator extending a window past the contig start, or ParseRegion on
+	// "chr1:0-1000" -- and Go's arithmetic shift takes any of it to -1, which
+	// the upper-bound test below happily admits as an index. The CSI reader
+	// converts to uint32 and so merely misses, meaning the same query used to
+	// crash with a .tbi and succeed with a .csi.
+	if start < 0 {
+		start = 0
+	}
+
 	linearMinIdx := start >> 14
 	var minOffset bgzf.VirtualOffset
 	if linearMinIdx < len(ref.linearIdx) {

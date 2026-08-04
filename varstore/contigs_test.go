@@ -32,7 +32,7 @@ func TestContigsRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Close(); err != nil {
+	if err := w.Finish(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -67,7 +67,7 @@ func TestContigsAbsentIsNotAnError(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Close(); err != nil {
+	if err := w.Finish(); err != nil {
 		t.Fatal(err)
 	}
 
