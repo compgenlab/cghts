@@ -1,13 +1,17 @@
 package varstore
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"iter"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/compgenlab/cghts/htsio"
+	"github.com/compgenlab/cghts/htsio/tabix"
+	"github.com/compgenlab/cghts/iosource"
 	"github.com/compgenlab/cghts/vcf"
 )
 
@@ -20,12 +24,33 @@ import (
 type VcfStore struct {
 	path    string
 	samples []string
+
+	// ctx is held because scan opens the file lazily, on every call, and the
+	// Store interface has no method that takes one. A remote locator needs it
+	// at each of those opens, not only at construction.
+	ctx context.Context
+
+	// indexed is probed once at open rather than per locus. The old per-locus
+	// test stat'd path+".tbi", which cannot work for a URL at all; and
+	// SiteKnown is called once per queried variant, so remotely that was one
+	// re-fetch of the index per lookup.
+	indexed bool
 }
 
 // OpenVcf opens a VCF store. Region-scoped queries additionally require a
 // tabix index next to the file.
 func OpenVcf(path string) (*VcfStore, error) {
-	r, err := vcf.NewVcfFile(path)
+	return OpenVcfContext(context.Background(), path)
+}
+
+// OpenVcfContext opens a VCF store from any locator: a filesystem path, an
+// http(s):// URL, or any scheme registered with iosource such as s3://.
+//
+// Be aware of what an *unindexed* remote VCF costs here. Without an index there
+// is nothing to seek with, so every query streams the whole object across the
+// wire -- per query. Indexed returns false in that case so a caller can warn.
+func OpenVcfContext(ctx context.Context, path string) (*VcfStore, error) {
+	r, err := vcf.OpenVcfFile(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -34,8 +59,28 @@ func OpenVcf(path string) (*VcfStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &VcfStore{path: path, samples: h.Samples()}, nil
+	return &VcfStore{
+		path:    path,
+		samples: h.Samples(),
+		ctx:     ctx,
+		indexed: hasTabixIndex(ctx, path),
+	}, nil
 }
+
+// hasTabixIndex reports whether either sidecar is resolvable over the locator's
+// own transport.
+func hasTabixIndex(ctx context.Context, locator string) bool {
+	rc, _, err := iosource.ResolveSibling(locator, tabix.IndexSuffixes, iosource.Sibling(ctx))
+	if err != nil {
+		return false
+	}
+	rc.Close()
+	return true
+}
+
+// Indexed reports whether region and locus queries can seek. When false every
+// query is a full pass over the file.
+func (s *VcfStore) Indexed() bool { return s.indexed }
 
 // Samples returns the header sample list.
 func (s *VcfStore) Samples() ([]string, error) { return s.samples, nil }
@@ -49,7 +94,7 @@ func (s *VcfStore) Samples() ([]string, error) { return s.samples, nil }
 // records, and reported by the caller as not-assayed.
 func (s *VcfStore) scan(span *Span, strictRef bool, fn func(*vcf.VcfRecord) (bool, error)) error {
 	if span != nil {
-		ir, err := vcf.NewIndexedVcfReader(s.path)
+		ir, err := vcf.OpenIndexedVcfReader(s.ctx, s.path)
 		if err != nil {
 			return fmt.Errorf("--region requires a tabix-indexed VCF: %w", err)
 		}
@@ -84,7 +129,7 @@ func (s *VcfStore) scan(span *Span, strictRef bool, fn func(*vcf.VcfRecord) (boo
 		return nil
 	}
 
-	r, err := vcf.NewVcfFile(s.path)
+	r, err := vcf.OpenVcfFile(s.ctx, s.path)
 	if err != nil {
 		return err
 	}
@@ -114,7 +159,7 @@ func (s *VcfStore) scan(span *Span, strictRef bool, fn func(*vcf.VcfRecord) (boo
 // instead of scanning. Falls back to a full scan when unindexed. The span is
 // 0-based half-open, so a 1-based locus position becomes [Pos-1, Pos).
 func (s *VcfStore) spanFor(l Locus) *Span {
-	if !fileExists(s.path+".tbi") && !fileExists(s.path+".csi") {
+	if !s.indexed {
 		return nil
 	}
 	return &Span{Chrom: l.Chrom, Start: l.Pos - 1, End: l.Pos}
@@ -416,6 +461,94 @@ func (s *VcfStore) SiteKnown(l Locus) (bool, error) {
 		return true, nil
 	})
 	return found, err
+}
+
+// Sites streams the catalog this VCF defines: one entry per alternate allele of
+// every variant record, in file order.
+//
+// It is a full pass over the file. A VCF has no index of "every variant", so
+// unlike the Parquet side -- where the catalog is a file that can simply be read
+// -- there is no cheaper way to ask, and callers should treat this as the
+// expensive question.
+//
+// Counts are computed from the genotypes on the way past, so they mean exactly
+// what a converted store's mean: AC/AN are allele counts and are ungated, and
+// NCarriers counts samples with at least one copy. NLowDP and NCalled are left
+// zero, because both are defined against a --min-dp threshold that a plain VCF
+// carries no record of -- reporting them as if they were known would invent one.
+//
+// Reference blocks are skipped: they describe coverage, not variants.
+func (s *VcfStore) Sites(fn func(Site) bool) error {
+	return s.scan(nil, false, func(rec *vcf.VcfRecord) (bool, error) {
+		if rec.IsRefBlock() {
+			return true, nil
+		}
+		n := rec.NumSamples()
+		if n > len(s.samples) {
+			n = len(s.samples)
+		}
+		gts := make([]string, 0, n)
+		for i := 0; i < n; i++ {
+			f, err := ReadSample(rec, i)
+			if err != nil {
+				return false, err
+			}
+			gts = append(gts, f.GT)
+		}
+
+		// AN counts every called allele at the record, so it is the same for all
+		// of its alternates and is computed once.
+		var an int32
+		for _, gt := range gts {
+			an += calledAlleles(gt)
+		}
+
+		refEnd := int32(rec.RefSpanEnd())
+		for j, alt := range rec.Alt() {
+			if vcf.IsRefBlockAlt(alt) {
+				continue
+			}
+			idx := j + 1
+			var ac, carriers int32
+			for _, gt := range gts {
+				c := copiesOf(gt, idx)
+				ac += c
+				if c > 0 {
+					carriers++
+				}
+			}
+			if !fn(Site{
+				Chrom: rec.Chrom, Pos: int32(rec.Pos), Ref: rec.Ref, Alt: alt,
+				RefEnd: refEnd, AC: ac, AN: an, NCarriers: carriers,
+			}) {
+				return false, nil
+			}
+		}
+		return true, nil
+	})
+}
+
+// calledAlleles counts the alleles a genotype actually called, "." excluded.
+func calledAlleles(gt string) int32 {
+	var n int32
+	for _, a := range strings.Split(strings.ReplaceAll(gt, "|", "/"), "/") {
+		if a != "" && a != "." {
+			n++
+		}
+	}
+	return n
+}
+
+// copiesOf counts how many times allele idx appears in a genotype.
+func copiesOf(gt string, idx int) int32 {
+	want := strconv.Itoa(idx)
+	var n int32
+	for _, a := range strings.Split(strings.ReplaceAll(gt, "|", "/"), "/") {
+		if a == want {
+			n++
+		}
+	}
+	return n
 }
 
 // Close is a no-op; VcfStore opens the file per query.
