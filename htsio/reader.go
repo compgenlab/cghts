@@ -282,7 +282,7 @@ func OpenSamReader(ctx context.Context, locator string, opts ...*SamReaderOpts) 
 	} else {
 		o = NewSamReaderOpts()
 	}
-	if i := strings.Index(locator, "://"); i <= 1 {
+	if !iosource.IsRemote(locator) {
 		return NewSamReader(locator, o)
 	}
 	src, err := iosource.Open(ctx, locator)
