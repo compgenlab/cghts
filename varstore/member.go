@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/compgenlab/cghts/iosource"
+	"github.com/parquet-go/parquet-go"
 )
 
 // member is one file of a store — calls, sites or regions — held open for the
@@ -64,4 +65,25 @@ func memberExists(ctx context.Context, locator string) bool {
 	}
 	src.Close()
 	return true
+}
+
+// MemberShape reports a store member's row count and size in bytes, reading
+// only its parquet footer.
+//
+// It exists for diagnosing a store that will not open. Since a missing manifest
+// has no escape hatch, a caller holding an unreadable store needs some way to
+// learn what is in it, and row counts are footer metadata rather than a scan --
+// so this answers cheaply without answering any genotype question. Diagnosis is
+// deliberately not access.
+func MemberShape(ctx context.Context, locator string) (rows, size int64, err error) {
+	m, err := openMember(ctx, locator)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer m.Close()
+	f, err := parquet.OpenFile(m.ra, m.size)
+	if err != nil {
+		return 0, 0, err
+	}
+	return f.NumRows(), m.size, nil
 }
