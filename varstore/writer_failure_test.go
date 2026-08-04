@@ -1,6 +1,7 @@
 package varstore
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -204,4 +205,38 @@ func TestAbsentMemberIsOnlyAllowedWhenItHeldNothing(t *testing.T) {
 				"manifest recorded runs in it")
 		}
 	})
+}
+
+// Site must refuse like its siblings rather than dereference a nil member. An
+// absent sites file is a reachable state -- the manifest permits one that
+// recorded no rows -- and Site was the only accessor that did not check.
+func TestSiteRefusesWithoutTheSitesMember(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "cohort")
+	w, err := NewWriter(base, WriterOpts{Samples: []string{"S1"}, MinDP: 10, NoCallable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteCall(Call{
+		SampleID: "S1", Chrom: "chr1", Pos: 100, Ref: "A", Alt: "T", GT: "0/1", DP: 30,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(SitesPath(base)); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenParquet(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if _, _, err := s.Site(Locus{Chrom: "chr1", Pos: 100, Ref: "A", Alt: "T"}); err == nil {
+		t.Error("Site succeeded with no sites member")
+	} else if !errors.Is(err, ErrNotClassifiable) {
+		t.Errorf("Site error is not ErrNotClassifiable: %v", err)
+	}
 }

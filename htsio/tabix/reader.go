@@ -259,9 +259,9 @@ func (tr *Reader) ColumnNames() ([]string, error) {
 	if tr.colNamesRead {
 		return tr.colNames, nil
 	}
-	tr.colNamesRead = true
 
 	if tr.meta.Skip <= 0 {
+		tr.colNamesRead = true
 		return nil, nil // no skipped line => no header
 	}
 	if err := tr.ir.SeekToVirtualOffset(0); err != nil {
@@ -281,12 +281,19 @@ func (tr *Reader) ColumnNames() ([]string, error) {
 		return nil, fmt.Errorf("tabix: reading header: %w", err)
 	}
 	if header == "" {
+		tr.colNamesRead = true
 		return nil, nil
 	}
 	if tr.meta.Meta != 0 && header[0] == byte(tr.meta.Meta) {
 		header = header[1:]
 	}
 	tr.colNames = strings.Split(header, "\t")
+	// Marked read only now that it has been. Setting this up front cached a
+	// failure as "no header": the first call surfaced the real I/O error and
+	// every call after it returned (nil, nil), so a caller resolving several
+	// columns in a loop saw a transport failure once and then "file has no
+	// column header" for the rest.
+	tr.colNamesRead = true
 	return tr.colNames, nil
 }
 
