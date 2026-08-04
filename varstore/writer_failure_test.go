@@ -58,15 +58,16 @@ func TestDiscardDoesNotFinalizeMembers(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: directory permissions would not prevent the unlink")
 	}
-	dir := t.TempDir()
-	base := filepath.Join(dir, "cohort")
+	base := filepath.Join(t.TempDir(), "cohort")
 	w := writeSomeRows(t, base)
 
 	// Make the unlink fail, so the files survive Discard and can be inspected.
-	if err := os.Chmod(dir, 0o555); err != nil {
+	// The store directory itself has to be the read-only one: the members live
+	// inside it, and removing a file needs write permission on its directory.
+	if err := os.Chmod(base, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	t.Cleanup(func() { os.Chmod(base, 0o755) })
 
 	err := w.Discard()
 	if err == nil {

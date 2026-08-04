@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"iter"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -113,13 +112,22 @@ type Writer struct {
 
 const batchSize = 8192
 
-// NewWriter creates the three store files for base.
+// NewWriter creates the store directory at base and the member files inside it.
+//
+// The directory is created here rather than left to the caller because a store
+// *is* its directory: there is no longer a spelling of base that means anything
+// else, so requiring a separate mkdir would only be a way to get it wrong.
+// EnsureStoreDir remains for callers that want the directory to exist earlier,
+// and is idempotent.
 func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	if o.Codec == nil {
 		o.Codec = &zstd.Codec{}
 	}
 	if o.RowGroupSize <= 0 {
 		o.RowGroupSize = 250_000
+	}
+	if err := EnsureStoreDir(base); err != nil {
+		return nil, err
 	}
 	w := &Writer{}
 
@@ -536,51 +544,42 @@ func openOptionalMember(ctx context.Context, locator string) (*member, bool, err
 	return m, true, nil
 }
 
-// TrimStoreSuffix reduces any member path of a store to its base name.
-// It accepts every spelling a user might reasonably type:
+// TrimStoreSuffix reduces any spelling of a store to its directory.
 //
-//	cohort                  prefix form
-//	cohort.calls.parquet    a member of the prefix form
-//	cohort/                 directory form
-//	cohort/calls.parquet    a member of the directory form
-//	cohort                  a directory, written without the trailing slash
+//	cohort                  the store
+//	cohort/                 the same store; the separator is optional
+//	cohort/calls.parquet    a member of it
 //
-// The last case is why this consults the filesystem: having asked for
-// "--out cohort/", nobody should have to remember the slash to read it back.
+// Pointing at a member is worth accepting because tab completion lands there,
+// and because a locator naming a file is unambiguous in a way a bare directory
+// name is not.
+//
+// This no longer consults the filesystem. It used to, to tell a directory base
+// from a filename prefix -- a question that only existed while both forms did,
+// and one that could not be answered at all for a remote locator, where the
+// os.Stat simply failed and the path fell through unchanged.
 func TrimStoreSuffix(p string) string {
-	// A member inside a directory-form store.
 	for _, m := range []string{CallsMember, SitesMember, RegionsMember} {
-		if filepath.Base(p) == m+".parquet" {
-			return ensureTrailingSep(filepath.Dir(p))
+		if base, ok := cutMemberSuffix(p, m+".parquet"); ok {
+			return base
 		}
 	}
-	// A member of a prefix-form store.
-	for _, sfx := range []string{CallsSuffix, SitesSuffix, RegionsSuffix} {
-		if strings.HasSuffix(p, sfx) {
-			return strings.TrimSuffix(p, sfx)
-		}
-	}
-	if IsDirBase(p) {
-		return p
-	}
-	// A bare name that is really a directory holding a store.
-	if st, err := os.Stat(p); err == nil && st.IsDir() {
-		if fileExists(filepath.Join(p, CallsMember+".parquet")) {
-			return ensureTrailingSep(p)
-		}
-	}
-	return p
+	return trimStoreDir(p)
 }
 
-// ensureTrailingSep marks a path as a directory base.
-func ensureTrailingSep(p string) string {
-	if p == "" {
-		return "." + string(os.PathSeparator)
+// cutMemberSuffix removes a trailing "/name" (or the platform separator) from p,
+// reporting whether it was there. A bare "name" with no separator is a member of
+// the current directory, whose store base is "".
+func cutMemberSuffix(p, name string) (string, bool) {
+	if p == name {
+		return "", true
 	}
-	if IsDirBase(p) {
-		return p
+	for _, sep := range []string{"/", string(os.PathSeparator)} {
+		if base, ok := strings.CutSuffix(p, sep+name); ok {
+			return trimStoreDir(base), true
+		}
 	}
-	return p + string(os.PathSeparator)
+	return "", false
 }
 
 func fileExists(p string) bool {

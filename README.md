@@ -149,14 +149,19 @@ Streaming and tabix-indexed readers, a writer, and a header/record model for VCF
 ### varstore — sparse genotype store
 
 Cohort genotypes in Parquet, plus a VCF-backed implementation of the same
-interface. A store is three files sharing a base name, and all three are
-required:
+interface. A store is a directory, and all three members are required:
 
 ```
-BASE.calls.parquet     one row per ALT-carrying genotype
-BASE.sites.parquet     one row per interrogated site, with AC/AN
-BASE.regions.parquet   runs of catalog sites at which a sample was called
+cohort/
+  calls.parquet     one row per ALT-carrying genotype
+  sites.parquet     one row per interrogated site, with AC/AN
+  regions.parquet   runs of catalog sites at which a sample was called
 ```
+
+The members are only meaningful together, so a store is one thing to copy, move
+and delete — and the layout is the one every Parquet table format uses, so an
+external reader can be pointed straight at a member. `cohort`, `cohort/` and
+`cohort/calls.parquet` all name the same store.
 
 Only the ALT-carrying genotypes are stored — a real cohort callset is
 overwhelmingly reference, so this is a small fraction of the dense matrix. The
