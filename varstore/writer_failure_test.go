@@ -131,7 +131,7 @@ func TestCloseStopsAtTheFirstFailure(t *testing.T) {
 func TestTruncatedMemberIsNotReadAsAbsent(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
 	w := writeSomeRows(t, base)
-	if err := w.Close(); err != nil {
+	if err := w.Finish(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -150,23 +150,58 @@ func TestTruncatedMemberIsNotReadAsAbsent(t *testing.T) {
 	}
 }
 
-// The absent case must still be absent: a store with no regions member is what
-// --no-callable produces, and it has to keep opening.
-func TestAbsentMemberStillOpens(t *testing.T) {
-	base := filepath.Join(t.TempDir(), "cohort")
-	w := writeSomeRows(t, base)
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(RegionsPath(base)); err != nil {
-		t.Fatal(err)
-	}
-	s, err := OpenParquet(base)
-	if err != nil {
-		t.Fatalf("a store without a regions member should open: %v", err)
-	}
-	defer s.Close()
-	if s.hasRegions {
-		t.Error("hasRegions is true though the member was removed")
-	}
+// A member that was never populated may go missing without complaint -- that is
+// the --no-callable shape -- but one the manifest vouched for may not. Before
+// the manifest the two were the same event, so deleting a regions file full of
+// runs read as "this store never tracked callable regions" and --hom-ref
+// silently changed its answer.
+func TestAbsentMemberIsOnlyAllowedWhenItHeldNothing(t *testing.T) {
+	t.Run("empty member may vanish", func(t *testing.T) {
+		base := filepath.Join(t.TempDir(), "cohort")
+		w, err := NewWriter(base, WriterOpts{
+			Samples: []string{"S1"}, MinDP: 10, RowGroupSize: 1, NoCallable: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.WriteCall(Call{
+			SampleID: "S1", Chrom: "chr1", Pos: 100, Ref: "A", Alt: "T", GT: "0/1", DP: 30,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.WriteSite(Site{
+			Chrom: "chr1", Pos: 100, Ref: "A", Alt: "T", AC: 1, AN: 2, NCarriers: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(RegionsPath(base)); err != nil {
+			t.Fatal(err)
+		}
+		s, err := OpenParquet(base)
+		if err != nil {
+			t.Fatalf("a store whose regions member held nothing should open: %v", err)
+		}
+		defer s.Close()
+		if s.hasRegions {
+			t.Error("hasRegions is true though the member was removed")
+		}
+	})
+
+	t.Run("populated member may not", func(t *testing.T) {
+		base := filepath.Join(t.TempDir(), "cohort")
+		w := writeSomeRows(t, base)
+		if err := w.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(RegionsPath(base)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenParquet(base); err == nil {
+			t.Fatal("a store opened with its regions member deleted, though the " +
+				"manifest recorded runs in it")
+		}
+	})
 }

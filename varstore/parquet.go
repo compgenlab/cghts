@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/parquet-go/parquet-go"
 	"github.com/parquet-go/parquet-go/compress"
@@ -79,7 +80,11 @@ type WriterOpts struct {
 	NoCallable   bool
 	Program      string
 	Command      string
-	Source       string
+
+	// Sources are the inputs the conversion was asked to consume, in order.
+	// The manifest keeps the list rather than a joined string, because "which
+	// of these actually went in" is the question a partial store raises.
+	Sources []string
 
 	// Contigs are the source's ##contig lines, verbatim, in header order. Callers
 	// converting several inputs should pass the union: a per-chromosome callset
@@ -105,9 +110,43 @@ type Writer struct {
 
 	files []*os.File
 
+	// base and opts are kept so Finish can describe the store without the
+	// caller having to hand back what it already passed to NewWriter.
+	base string
+	opts WriterOpts
+
+	// The per-chromosome census is accumulated here rather than by the caller,
+	// so it records what was actually written. A count supplied by the
+	// converter would be a second opinion that could drift from the rows; this
+	// one cannot.
+	chroms   []ChromCensus
+	chromIdx map[string]int
+
 	NCalls   int64
 	NSites   int64
 	NRegions int64
+}
+
+// census returns the running tally for chrom, creating it on first sight.
+// Chromosome order follows the order they were written, which is the store's
+// own order and not lexicographic.
+func (w *Writer) census(chrom string, pos int32) *ChromCensus {
+	if i, ok := w.chromIdx[chrom]; ok {
+		c := &w.chroms[i]
+		if pos < c.FirstPos {
+			c.FirstPos = pos
+		}
+		if pos > c.LastPos {
+			c.LastPos = pos
+		}
+		return c
+	}
+	if w.chromIdx == nil {
+		w.chromIdx = map[string]int{}
+	}
+	w.chromIdx[chrom] = len(w.chroms)
+	w.chroms = append(w.chroms, ChromCensus{Name: chrom, FirstPos: pos, LastPos: pos})
+	return &w.chroms[len(w.chroms)-1]
 }
 
 const batchSize = 8192
@@ -126,10 +165,20 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	if o.RowGroupSize <= 0 {
 		o.RowGroupSize = 250_000
 	}
+	if o.Spans == "" {
+		o.Spans = SpansSites
+	}
 	if err := EnsureStoreDir(base); err != nil {
 		return nil, err
 	}
-	w := &Writer{}
+	// Remove any manifest before touching the members. From here until Finish
+	// the store is under construction and must not carry a completion marker --
+	// otherwise a --force re-run that dies partway would leave the previous
+	// run's manifest vouching for this run's half-written members.
+	if err := os.Remove(ManifestPath(base)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("clearing previous manifest: %w", err)
+	}
+	w := &Writer{base: base, opts: o}
 
 	open := func(path string) (*os.File, error) {
 		f, err := os.Create(path)
@@ -166,12 +215,9 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	w.calls.SetKeyValueMetadata(MetaMinDP, fmt.Sprint(o.MinDP))
 	w.calls.SetKeyValueMetadata(MetaProgram, o.Program)
 	w.calls.SetKeyValueMetadata(MetaCommand, o.Command)
-	w.calls.SetKeyValueMetadata(MetaSource, o.Source)
+	w.calls.SetKeyValueMetadata(MetaSource, strings.Join(o.Sources, ", "))
 	if len(o.Contigs) > 0 {
 		w.calls.SetKeyValueMetadata(MetaContigs, strings.Join(o.Contigs, "\n"))
-	}
-	if o.Spans == "" {
-		o.Spans = SpansSites
 	}
 	w.calls.SetKeyValueMetadata(MetaSpans, string(o.Spans))
 	if o.NoCallable {
@@ -207,6 +253,13 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 // returning as though nothing happened.
 func (w *Writer) abort() error {
 	var errs []error
+	// The manifest is written last and cleared first, so it should not be here.
+	// A --force re-run over a previous store is the case where a stale one could
+	// survive, and a completion marker sitting beside discarded members is the
+	// worst outcome available.
+	if err := os.Remove(ManifestPath(w.base)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("removing %s: %w", ManifestPath(w.base), err))
+	}
 	for _, f := range w.files {
 		// The handle may already be closed by a failed Close; the unlink is the
 		// part that matters, so the close error is not interesting here.
@@ -235,9 +288,69 @@ func (w *Writer) Discard() error {
 	return w.abort()
 }
 
+// Finish closes the members and then writes the manifest that marks the store
+// complete and readable.
+//
+// This is the ordinary way to end a conversion; Close alone leaves a store
+// without a manifest, which readers refuse. The order is the whole point: every
+// member is finalized first, and only a run that got that far writes the marker
+// saying so.
+func (w *Writer) Finish() error {
+	if err := w.Close(); err != nil {
+		return err
+	}
+	m, err := w.manifest()
+	if err != nil {
+		return err
+	}
+	return WriteManifest(w.base, m)
+}
+
+// manifest describes the store as written. Member sizes are read back from disk
+// rather than accumulated, so they describe the files rather than the intent.
+func (w *Writer) manifest() (Manifest, error) {
+	members := map[string]MemberInfo{}
+	for member, rows := range map[string]int64{
+		CallsMember:   w.NCalls,
+		SitesMember:   w.NSites,
+		RegionsMember: w.NRegions,
+	} {
+		st, err := os.Stat(MemberPath(w.base, member))
+		if err != nil {
+			return Manifest{}, fmt.Errorf("sizing %s member: %w", member, err)
+		}
+		members[member] = MemberInfo{Rows: rows, Bytes: st.Size()}
+	}
+	return Manifest{
+		FormatVersion: ManifestVersion,
+		Complete:      true,
+		Created:       time.Now().UTC(),
+		Program:       w.opts.Program,
+		Command:       w.opts.Command,
+		Sources:       w.opts.Sources,
+		Params: ManifestParams{
+			MinDP:         w.opts.MinDP,
+			NoCallable:    w.opts.NoCallable,
+			RowGroupSize:  w.opts.RowGroupSize,
+			SpanSemantics: w.opts.Spans,
+		},
+		Samples: w.opts.Samples,
+		Counts: ManifestCounts{
+			Samples: len(w.opts.Samples),
+			Calls:   w.NCalls,
+			Sites:   w.NSites,
+			Regions: w.NRegions,
+		},
+		Members:         members,
+		Chromosomes:     w.chroms,
+		ContigsDeclared: w.opts.Contigs,
+	}, nil
+}
+
 // WriteCall buffers one ALT-carrying genotype.
 func (w *Writer) WriteCall(c Call) error {
 	c.RefEnd = defaultRefEnd(c.Pos, c.Ref, c.RefEnd)
+	w.census(c.Chrom, c.Pos).Calls++
 	w.callBuf = append(w.callBuf, c)
 	w.NCalls++
 	if len(w.callBuf) >= batchSize {
@@ -249,6 +362,7 @@ func (w *Writer) WriteCall(c Call) error {
 // WriteSite buffers one catalog entry.
 func (w *Writer) WriteSite(s Site) error {
 	s.RefEnd = defaultRefEnd(s.Pos, s.Ref, s.RefEnd)
+	w.census(s.Chrom, s.Pos).Sites++
 	w.siteBuf = append(w.siteBuf, s)
 	w.NSites++
 	if len(w.siteBuf) >= batchSize {
@@ -407,6 +521,7 @@ type ParquetStore struct {
 	spans       SpanSemantics
 	minDP       int32
 	meta        map[string]string
+	manifest    *Manifest
 }
 
 // SpanSemantics reports what this store's run intervals may claim. A store
@@ -459,6 +574,10 @@ func OpenParquet(base string) (*ParquetStore, error) {
 // it used to: it now releases them rather than being a no-op.
 func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error) {
 	base = TrimStoreSuffix(base)
+	man, err := requireManifest(ctx, base)
+	if err != nil {
+		return nil, err
+	}
 	calls, err := openMember(ctx, CallsPath(base))
 	if err != nil {
 		return nil, fmt.Errorf("opening parquet store %s: %w", base, err)
@@ -509,7 +628,89 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error)
 		return nil, err
 	}
 	s.regions, s.hasRegions = regions, hasRegions
+	s.manifest = man
+
+	if err := verifyAgainstManifest(man, pf, sites, regions); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("%s: %w", base, err)
+	}
 	return s, nil
+}
+
+// requireManifest loads the completion marker, refusing the store without it.
+//
+// A store with no manifest was not finished -- or predates them -- and either
+// way nothing here can tell how much of the intended input it holds. The
+// members would open and answer queries perfectly well; that is the problem.
+// An unfinished store reports "not assayed" for everything it never got to,
+// which is indistinguishable from the honest answer for a position the source
+// genuinely never reported.
+func requireManifest(ctx context.Context, base string) (*Manifest, error) {
+	man, err := ReadManifestContext(ctx, base)
+	if err != nil {
+		return nil, fmt.Errorf("%s has no readable %s, so it cannot be shown to be "+
+			"a complete store: %w\n\tit is from an interrupted conversion, or predates "+
+			"manifests; re-convert it, or inspect it with vcf-varsummary",
+			base, ManifestFile, err)
+	}
+	if !man.Complete {
+		return nil, fmt.Errorf("%s is marked incomplete by its %s; re-convert it",
+			base, ManifestFile)
+	}
+	if man.FormatVersion > ManifestVersion {
+		return nil, fmt.Errorf("%s was written by a newer cgkit (manifest format %d, "+
+			"this build understands %d); upgrade to read it",
+			base, man.FormatVersion, ManifestVersion)
+	}
+	return man, nil
+}
+
+// verifyAgainstManifest checks each member against the row count recorded for
+// it when the store was written.
+//
+// The footers say each member was finished; the manifest says which members
+// finishing this store produced. Comparing them is what catches a member that
+// is well-formed but does not belong -- one copied in from another conversion,
+// or left over from a run whose replacement died. Nothing else can see that,
+// because sites and regions carry no metadata of their own.
+//
+// It costs nothing: every count here is footer metadata that was already read.
+func verifyAgainstManifest(man *Manifest, calls *parquet.File, sites, regions *member) error {
+	type check struct {
+		name string
+		file *parquet.File
+		m    *member
+	}
+	for _, c := range []check{
+		{CallsMember, calls, nil},
+		{SitesMember, nil, sites},
+		{RegionsMember, nil, regions},
+	} {
+		want, recorded := man.Members[c.name]
+		if !recorded {
+			continue // a manifest that never described this member claims nothing
+		}
+		if c.file == nil {
+			if c.m == nil {
+				if want.Rows == 0 {
+					continue // written empty and since removed; it claimed nothing
+				}
+				return fmt.Errorf("%s.parquet is missing, but the manifest records %d rows in it",
+					c.name, want.Rows)
+			}
+			f, err := parquet.OpenFile(c.m.ra, c.m.size)
+			if err != nil {
+				return fmt.Errorf("reading %s.parquet: %w", c.name, err)
+			}
+			c.file = f
+		}
+		if got := c.file.NumRows(); got != want.Rows {
+			return fmt.Errorf("%s.parquet holds %d rows but the manifest records %d; "+
+				"this member does not belong to this store, or the store is damaged",
+				c.name, got, want.Rows)
+		}
+	}
+	return nil
 }
 
 // openOptionalMember opens a member a store may legitimately lack, and verifies
@@ -546,21 +747,27 @@ func openOptionalMember(ctx context.Context, locator string) (*member, bool, err
 
 // TrimStoreSuffix reduces any spelling of a store to its directory.
 //
-//	cohort                  the store
-//	cohort/                 the same store; the separator is optional
-//	cohort/calls.parquet    a member of it
+//	cohort                    the store
+//	cohort/                   the same store; the separator is optional
+//	cohort/calls.parquet      a member of it
+//	cohort/manifest.json.gz   likewise
 //
 // Pointing at a member is worth accepting because tab completion lands there,
 // and because a locator naming a file is unambiguous in a way a bare directory
-// name is not.
+// name is not. The manifest spelling is what makes `stores/*/manifest.json.gz`
+// a useful glob: the shell filters to the completed stores without opening
+// anything.
 //
 // This no longer consults the filesystem. It used to, to tell a directory base
 // from a filename prefix -- a question that only existed while both forms did,
 // and one that could not be answered at all for a remote locator, where the
 // os.Stat simply failed and the path fell through unchanged.
 func TrimStoreSuffix(p string) string {
-	for _, m := range []string{CallsMember, SitesMember, RegionsMember} {
-		if base, ok := cutMemberSuffix(p, m+".parquet"); ok {
+	for _, name := range []string{
+		CallsMember + ".parquet", SitesMember + ".parquet", RegionsMember + ".parquet",
+		ManifestFile,
+	} {
+		if base, ok := cutMemberSuffix(p, name); ok {
 			return base
 		}
 	}

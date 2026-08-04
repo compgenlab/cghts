@@ -43,7 +43,7 @@ func buildStore(t *testing.T, dir string) string {
 			t.Fatal(err)
 		}
 	}
-	if err := w.Close(); err != nil {
+	if err := w.Finish(); err != nil {
 		t.Fatal(err)
 	}
 	return base

@@ -12,7 +12,7 @@ func TestWriterDerivesRefEndFromRef(t *testing.T) {
 	// RefEnd deliberately left zero, as a caller predating the column would.
 	w.WriteCall(Call{SampleID: "S1", Chrom: "chr1", Pos: 3000, Ref: ref, Alt: "A", GT: "0/1", DP: 30})
 	w.WriteSite(Site{Chrom: "chr1", Pos: 3000, Ref: ref, Alt: "A", AC: 1, AN: 2, NCarriers: 1, NCalled: 1})
-	if err := w.Close(); err != nil {
+	if err := w.Finish(); err != nil {
 		t.Fatal(err)
 	}
 	s, err := OpenParquet(base)
