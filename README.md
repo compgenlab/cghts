@@ -153,15 +153,30 @@ interface. A store is a directory, and all three members are required:
 
 ```
 cohort/
-  calls.parquet     one row per ALT-carrying genotype
-  sites.parquet     one row per interrogated site, with AC/AN
-  regions.parquet   runs of catalog sites at which a sample was called
+  calls.parquet      one row per ALT-carrying genotype
+  sites.parquet      one row per interrogated site, with AC/AN
+  regions.parquet    runs of catalog sites at which a sample was called
+  manifest.json.gz   written last; the store is readable only with it
 ```
 
 The members are only meaningful together, so a store is one thing to copy, move
 and delete — and the layout is the one every Parquet table format uses, so an
-external reader can be pointed straight at a member. `cohort`, `cohort/` and
-`cohort/calls.parquet` all name the same store.
+external reader can be pointed straight at a member. `cohort`, `cohort/`,
+`cohort/calls.parquet` and `cohort/manifest.json.gz` all name the same store.
+
+The manifest is what makes a store *readable*, not merely present. Close it with
+`Writer.Finish`, which finalizes every member and only then writes the marker;
+`OpenParquet` refuses a store without one. It exists because the parquet members
+cannot answer one question about themselves — whether the run that produced them
+reached the end. Their footers prove each was *finished*, but a set of finished
+members says nothing about how much of the intended input went in, and the
+metadata in the calls file is actively misleading there: `cgkit.source` and
+`cgkit.contigs` are stamped before the first record is read, so a store holding
+three chromosomes of a 22-input conversion names all 22 inputs and declares all
+22 contigs. The manifest records what was *written* — per-chromosome site and
+call counts, per-member row counts, the sample roster — so a reader can check
+the claim instead of taking it. `stores/*/manifest.json.gz` globs the completed
+stores without opening anything.
 
 Only the ALT-carrying genotypes are stored — a real cohort callset is
 overwhelmingly reference, so this is a small fraction of the dense matrix. The

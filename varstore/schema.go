@@ -268,13 +268,18 @@ func EnsureStoreDir(base string) error {
 	return os.MkdirAll(trimStoreDir(base), 0o755)
 }
 
-// ExistingMembers lists which of the three member files already exist at base.
+// ExistingMembers lists which member files already exist at base, the manifest
+// included: it is written by a conversion and removed by one, so leaving it out
+// would let a re-run silently orphan a marker vouching for members it replaced.
 func ExistingMembers(base string) []string {
 	var found []string
 	for _, m := range []string{CallsMember, SitesMember, RegionsMember} {
 		if p := MemberPath(base, m); fileExists(p) {
 			found = append(found, p)
 		}
+	}
+	if p := ManifestPath(base); fileExists(p) {
+		found = append(found, p)
 	}
 	return found
 }

@@ -61,7 +61,7 @@ func TestStoreOpensUnderEverySpelling(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "cohort")
 	w := writeSomeRows(t, base)
-	if err := w.Close(); err != nil {
+	if err := w.Finish(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -104,7 +104,7 @@ func TestCheckStoreTargetIgnoresUnrelatedFiles(t *testing.T) {
 	}
 
 	w := writeSomeRows(t, base)
-	if err := w.Close(); err != nil {
+	if err := w.Finish(); err != nil {
 		t.Fatal(err)
 	}
 	if err := CheckStoreTarget(base, false); err == nil {
