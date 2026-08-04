@@ -2,6 +2,7 @@ package varstore
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,5 +140,18 @@ func TestVcfStoreSites(t *testing.T) {
 		if g.NCalled != 0 || g.NLowDP != 0 {
 			t.Errorf("%s:%d reports depth-gated counts a VCF cannot know: %+v", g.Chrom, g.Pos, g)
 		}
+	}
+}
+
+// The two failure modes must stay distinguishable: a caller that suggests
+// --store for a transport failure sends the user somewhere useless.
+func TestUnknownKindIsDistinctFromTransportFailure(t *testing.T) {
+	_, err := StoreKind(context.Background(), filepath.Join(t.TempDir(), "mystery"))
+	if !errors.Is(err, ErrUnknownStoreKind) {
+		t.Errorf("an unrecognizable target is not ErrUnknownStoreKind: %v", err)
+	}
+	_, err = StoreKind(context.Background(), "gs://bucket/cohort")
+	if errors.Is(err, ErrUnknownStoreKind) {
+		t.Errorf("an unlinked transport was reported as an unrecognized store: %v", err)
 	}
 }

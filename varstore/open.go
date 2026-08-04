@@ -2,6 +2,7 @@ package varstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -16,6 +17,15 @@ const (
 
 // vcfSuffixes are the spellings that name a VCF rather than a store.
 var vcfSuffixes = []string{".vcf", ".vcf.gz", ".vcf.bgz", ".bcf"}
+
+// ErrUnknownStoreKind reports that a locator matched no backend.
+//
+// It is a distinct error so a caller can tell "I could not recognize this" from
+// "the transport failed" and give the right advice. Suggesting a --store flag
+// helps with the first and misleads on the second, where the flag would not
+// have changed anything and the real problem is an unlinked transport or an
+// object that is not there.
+var ErrUnknownStoreKind = errors.New("unrecognized store")
 
 // StoreKind reports which backend a locator names.
 //
@@ -48,8 +58,8 @@ func StoreKind(ctx context.Context, locator string) (string, error) {
 	if _, err := ReadManifestContext(ctx, locator); err == nil {
 		return KindParquet, nil
 	}
-	return "", fmt.Errorf("cannot tell what kind of store %q is: it has no VCF suffix "+
-		"and no %s was found in it", locator, ManifestFile)
+	return "", fmt.Errorf("%w: cannot tell what kind of store %q is, it has no VCF "+
+		"suffix and no %s was found in it", ErrUnknownStoreKind, locator, ManifestFile)
 }
 
 // OpenStore opens whichever backend the locator names.
