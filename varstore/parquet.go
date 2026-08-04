@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"iter"
 	"os"
 	"path/filepath"
@@ -125,7 +126,7 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	open := func(path string) (*os.File, error) {
 		f, err := os.Create(path)
 		if err != nil {
-			w.abort()
+			_ = w.abort()
 			return nil, err
 		}
 		w.files = append(w.files, f)
@@ -190,12 +191,24 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 // abort closes and removes any files opened so far, used when construction
 // fails partway; a partial store is worse than none, since the set is meant to
 // be inseparable.
-func (w *Writer) abort() {
+//
+// The removal error is reported rather than swallowed. If the unlink fails --
+// a read-only mount, a sticky-bit directory, a stale NFS handle -- what is left
+// behind is a partial store that the overwrite guard will then treat as a real
+// one and refuse to replace. That is worth saying out loud rather than
+// returning as though nothing happened.
+func (w *Writer) abort() error {
+	var errs []error
 	for _, f := range w.files {
+		// The handle may already be closed by a failed Close; the unlink is the
+		// part that matters, so the close error is not interesting here.
 		f.Close()
-		os.Remove(f.Name())
+		if err := os.Remove(f.Name()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("removing %s: %w", f.Name(), err))
+		}
 	}
 	w.files = nil
+	return errors.Join(errs...)
 }
 
 // Discard abandons a conversion, leaving nothing behind.
@@ -204,13 +217,14 @@ func (w *Writer) abort() {
 // like a store, they would be truncated or incomplete, and -- because
 // conversion refuses to overwrite an existing store -- their presence would
 // block the retry.
-func (w *Writer) Discard() {
-	for _, c := range []io.Closer{w.calls, w.sites, w.regions} {
-		if c != nil {
-			_ = c.Close()
-		}
-	}
-	w.abort()
+//
+// The parquet writers are deliberately *not* closed first. Closing one writes a
+// complete, valid footer into the file, so the old sequence -- footer, footer,
+// footer, then three unlinks -- meant a process killed partway through Discard
+// left behind exactly the well-formed partial store this exists to prevent.
+// There is no reason to finalize a file that is about to be removed.
+func (w *Writer) Discard() error {
+	return w.abort()
 }
 
 // WriteCall buffers one ALT-carrying genotype.
@@ -297,18 +311,36 @@ func (w *Writer) flushRegions() error {
 }
 
 // Close flushes and finalizes all three files.
+//
+// It stops at the first failure instead of pressing on. Continuing would finish
+// the other members, and a parquet footer is written precisely by the Close that
+// would then run -- so a failed flush used to yield three structurally valid
+// files of which one was silently short by up to a batch. Three well-formed
+// members that disagree is the one outcome a reader cannot detect, so the write
+// stops as soon as it cannot be completed honestly.
+//
+// A non-nil error means nothing on disk should be trusted; the caller is
+// expected to Discard. The file handles are released either way, since leaking
+// them helps nobody, but the members are left in place for Discard to remove.
 func (w *Writer) Close() error {
-	var errs []error
 	for _, fn := range []func() error{w.flushCalls, w.flushSites, w.flushRegions} {
 		if err := fn(); err != nil {
-			errs = append(errs, err)
+			w.closeFiles()
+			return err
 		}
 	}
 	for _, c := range []io.Closer{w.calls, w.sites, w.regions} {
 		if err := c.Close(); err != nil {
-			errs = append(errs, err)
+			w.closeFiles()
+			return err
 		}
 	}
+	return w.closeFiles()
+}
+
+// closeFiles releases the underlying handles without removing anything.
+func (w *Writer) closeFiles() error {
+	var errs []error
 	for _, f := range w.files {
 		if err := f.Close(); err != nil {
 			errs = append(errs, err)
@@ -456,13 +488,52 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error)
 	s.hasRefSpans = hasColumn(pf, "ref_end")
 	// The optional members: absent is normal (a --no-callable store has no
 	// regions), so failure to open is recorded rather than returned.
-	if m, err := openMember(ctx, SitesPath(base)); err == nil {
-		s.sites, s.hasSites = m, true
+	sites, hasSites, err := openOptionalMember(ctx, SitesPath(base))
+	if err != nil {
+		calls.Close()
+		return nil, err
 	}
-	if m, err := openMember(ctx, RegionsPath(base)); err == nil {
-		s.regions, s.hasRegions = m, true
+	s.sites, s.hasSites = sites, hasSites
+	regions, hasRegions, err := openOptionalMember(ctx, RegionsPath(base))
+	if err != nil {
+		calls.Close()
+		sites.Close()
+		return nil, err
 	}
+	s.regions, s.hasRegions = regions, hasRegions
 	return s, nil
+}
+
+// openOptionalMember opens a member a store may legitimately lack, and verifies
+// that what it finds is a readable parquet file.
+//
+// The two outcomes have to stay distinct. Absence is normal: a --no-callable
+// store records no callable runs. A member that is *present but unreadable* is
+// not, and until this checked, the two were indistinguishable -- the open error
+// was discarded either way, so a truncated or half-written sites file read
+// exactly like a deliberate omission and the store went on to answer queries as
+// though those runs had never been asked for.
+//
+// Parsing the footer here is what makes the check meaningful, and it is nearly
+// free: it is footer metadata, not a data scan, and every query would have
+// parsed it anyway. A parquet footer is written only by the writer's Close, so
+// a member that parses is a member that was finished.
+//
+// One limit worth naming: for a remote locator "absent" and "unreachable" are
+// not cleanly separable here, because a 404 surfaces as a failed size probe
+// rather than as fs.ErrNotExist. Such a member is treated as absent, which is
+// the pre-existing behaviour. The manifest is what makes this exact, since it
+// records which members the conversion actually wrote.
+func openOptionalMember(ctx context.Context, locator string) (*member, bool, error) {
+	m, err := openMember(ctx, locator)
+	if err != nil {
+		return nil, false, nil
+	}
+	if _, err := parquet.OpenFile(m.ra, m.size); err != nil {
+		m.Close()
+		return nil, false, fmt.Errorf("reading %s: %w", locator, err)
+	}
+	return m, true, nil
 }
 
 // TrimStoreSuffix reduces any member path of a store to its base name.
