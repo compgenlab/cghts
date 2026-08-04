@@ -325,6 +325,7 @@ func homRefCallFor(rec *vcf.VcfRecord, sample string, sf SampleFields,
 		Pos:      int32(rec.Pos),
 		Ref:      rec.Ref,
 		Alt:      alt,
+		RefEnd:   int32(rec.RefSpanEnd()), // see CallFor
 		GT:       gt,
 		DP:       sf.DP,
 		ADRef:    adRef,

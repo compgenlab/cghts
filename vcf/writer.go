@@ -64,18 +64,26 @@ func (w *VcfWriter) WriteLine(line string) error {
 
 // Close flushes and closes the writer.
 func (w *VcfWriter) Close() error {
-	if w.writer != nil {
-		if err := w.writer.Flush(); err != nil {
-			return err
+	// Every stage runs even after one fails, and the first error is what is
+	// reported. Returning early left the layers below open: the file descriptor
+	// leaked, and for a .gz output the BGZF writer never ran its own Close, so
+	// the EOF block went unwritten and the result read as truncated to every
+	// bgzip and tabix consumer -- on precisely the error path where releasing
+	// the handle matters most.
+	var first error
+	fail := func(err error) {
+		if err != nil && first == nil {
+			first = err
 		}
+	}
+	if w.writer != nil {
+		fail(w.writer.Flush())
 	}
 	if w.gz != nil {
-		if err := w.gz.Close(); err != nil {
-			return err
-		}
+		fail(w.gz.Close())
 	}
 	if w.file != nil {
-		return w.file.Close()
+		fail(w.file.Close())
 	}
-	return nil
+	return first
 }

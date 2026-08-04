@@ -1120,6 +1120,13 @@ func (s *ParquetStore) Sites(fn func(Site) bool) error {
 
 // Site returns the catalog entry for a locus, if the source reported it.
 func (s *ParquetStore) Site(l Locus) (Site, bool, error) {
+	// Every sibling guards this; Site did not, and an absent sites member is a
+	// reachable state -- the manifest permits one that recorded no rows -- so
+	// this was a nil dereference inside the scan rather than the
+	// ErrNotClassifiable its neighbours return.
+	if !s.hasSites {
+		return Site{}, false, fmt.Errorf("%w: %s is missing", ErrNotClassifiable, SitesPath(s.base))
+	}
 	var got Site
 	found := false
 	err := scanParquetPruned(s.sites, locusFilter(l), func(site Site) bool {
