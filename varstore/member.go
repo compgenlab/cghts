@@ -52,8 +52,14 @@ func (m *member) Close() error {
 
 // memberExists reports whether a store member is present, for any locator kind.
 //
-// Absence is not an error: a store written with --no-callable has no regions
-// member, and Classify's behaviour depends on telling that apart from a failure.
+// Absence is not by itself an error, so this answers rather than failing.
+// Whether a *particular* absence is legitimate is a separate question the
+// manifest settles, since it records how many rows each member held.
+//
+// Note that the writer creates all three members regardless, so --no-callable
+// yields a present, zero-row regions file rather than a missing one -- the
+// comments here used to say otherwise, and any logic keyed on that absence
+// would never have fired.
 func memberExists(ctx context.Context, locator string) bool {
 	if !iosource.IsRemote(locator) {
 		_, err := os.Stat(locator)

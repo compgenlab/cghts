@@ -273,7 +273,7 @@ func (r *iterReaderState) Query(ref string, start, end int) (iter.Seq2[*SamRecor
 // the sidecar (.bai/.crai) be resolved through the same transport.
 //
 // For CRAM the reference is independent of where the data lives: set it with
-// SamReaderOpts.SetRefPath (any locator) or SetRefReader (already open). A
+// SamReaderOpts.RefPath (any locator) or Ref (already open). A
 // remote CRAM with a local reference, or the reverse, are both fine.
 func OpenSamReader(ctx context.Context, locator string, opts ...*SamReaderOpts) (SamReader, error) {
 	var o *SamReaderOpts
