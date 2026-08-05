@@ -69,6 +69,23 @@ func colBounds(rg parquet.RowGroup, name string) (min, max parquet.Value, ok boo
 	return min, max, ok
 }
 
+// chromExcludes reports whether a row group can be ruled out by chromosome.
+//
+// Only when the group holds exactly one, because the statistics are
+// lexicographic while chromosome names are not ordered that way -- comparing
+// "chr17" against a chr1..chr9 range would be meaningless. Coordinate-sorted
+// input puts almost every group inside one chromosome, so the restriction costs
+// little. This was five verbatim copies of a predicate subtle enough to be worth
+// stating once.
+func chromExcludes(rg parquet.RowGroup, chrom string) bool {
+	lo, hi, ok := colBounds(rg, "chrom")
+	if !ok {
+		return false
+	}
+	a, b := lo.String(), hi.String()
+	return a == b && !SameChrom(a, chrom)
+}
+
 // locusFilter keeps only row groups that could hold a given locus.
 //
 // Position does the real work: it is numeric, high-cardinality and sorted, so
@@ -85,11 +102,8 @@ func locusFilter(l Locus) rowGroupFilter {
 				return false
 			}
 		}
-		if lo, hi, ok := colBounds(rg, "chrom"); ok {
-			a, b := lo.String(), hi.String()
-			if a == b && !SameChrom(a, l.Chrom) {
-				return false
-			}
+		if chromExcludes(rg, l.Chrom) {
+			return false
 		}
 		return true
 	}
@@ -121,11 +135,8 @@ func spanFilter(s *Span) rowGroupFilter {
 				return false
 			}
 		}
-		if lo, hi, ok := colBounds(rg, "chrom"); ok {
-			a, b := lo.String(), hi.String()
-			if a == b && !SameChrom(a, s.Chrom) {
-				return false
-			}
+		if chromExcludes(rg, s.Chrom) {
+			return false
 		}
 		return true
 	}
@@ -141,11 +152,8 @@ func coveringFilter(chrom string, pos int32) rowGroupFilter {
 				return false
 			}
 		}
-		if lo, hi, ok := colBounds(rg, "chrom"); ok {
-			a, b := lo.String(), hi.String()
-			if a == b && !SameChrom(a, chrom) {
-				return false
-			}
+		if chromExcludes(rg, chrom) {
+			return false
 		}
 		return true
 	}
@@ -168,11 +176,8 @@ func spanRunFilter(s *Span) rowGroupFilter {
 				return false
 			}
 		}
-		if lo, hi, ok := colBounds(rg, "chrom"); ok {
-			a, b := lo.String(), hi.String()
-			if a == b && !SameChrom(a, s.Chrom) {
-				return false
-			}
+		if chromExcludes(rg, s.Chrom) {
+			return false
 		}
 		return true
 	}
@@ -195,9 +200,6 @@ func callsFilter(q Query) rowGroupFilter {
 	}
 	return unionFilter(q)
 }
-
-// siteScanFilter prunes the sites file for a query.
-func siteScanFilter(q Query) rowGroupFilter { return callsFilter(q) }
 
 // runScanFilter prunes the regions file, whose position column is "start" rather
 // than "pos" and whose "end" is unsorted -- so only a lower bound on start is

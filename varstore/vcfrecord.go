@@ -19,6 +19,14 @@ import (
 // "0". A 1/2 sample genuinely carries both alt alleles, so it must appear as a
 // carrier in each split row; calling the other allele reference would invent a
 // reference observation that the data does not support.
+// gtAlleles splits a raw GT into its alleles, normalizing the phased separator
+// away. Seven places did this inline, in two files, character for character --
+// including the two in vcfstore.go that this file's header says it exists to
+// keep from drifting.
+func gtAlleles(gt string) []string {
+	return strings.Split(strings.ReplaceAll(gt, "|", "/"), "/")
+}
+
 func SplitGT(gt string, altIdx int) (recoded string, carrier bool) {
 	if gt == "" {
 		return ".", false
@@ -27,7 +35,7 @@ func SplitGT(gt string, altIdx int) (recoded string, carrier bool) {
 	if strings.Contains(gt, "|") {
 		sep = "|"
 	}
-	parts := strings.Split(strings.ReplaceAll(gt, "|", "/"), "/")
+	parts := gtAlleles(gt)
 	out := make([]string, 0, len(parts))
 	for _, a := range parts {
 		switch {
@@ -54,7 +62,7 @@ func SplitGT(gt string, altIdx int) (recoded string, carrier bool) {
 
 // IsAltCarrier reports whether a raw GT carries any non-reference allele.
 func IsAltCarrier(gt string) bool {
-	for _, a := range strings.Split(strings.ReplaceAll(gt, "|", "/"), "/") {
+	for _, a := range gtAlleles(gt) {
 		if a != "" && a != "." && a != "0" {
 			return true
 		}
@@ -68,7 +76,7 @@ func IsAltCarrier(gt string) bool {
 // the caller saw reads and still declined to call, which is not the positive
 // observation a callable region is meant to assert.
 func HasCall(gt string) bool {
-	for _, a := range strings.Split(strings.ReplaceAll(gt, "|", "/"), "/") {
+	for _, a := range gtAlleles(gt) {
 		if a != "" && a != "." {
 			return true
 		}
@@ -81,7 +89,7 @@ func HasCall(gt string) bool {
 // simply never assayed, so "./." and an empty GT deliberately do not qualify.
 func IsHomRef(gt string) bool {
 	seen := false
-	for _, a := range strings.Split(strings.ReplaceAll(gt, "|", "/"), "/") {
+	for _, a := range gtAlleles(gt) {
 		if a == "" {
 			continue
 		}
@@ -129,7 +137,7 @@ func atoi32(s string) int32 {
 // contribute to neither. acc is written in place so a whole cohort can be
 // tallied without allocating per sample.
 func AddAlleleCounts(gt string, acc []int32) (an int32) {
-	for _, a := range strings.Split(strings.ReplaceAll(gt, "|", "/"), "/") {
+	for _, a := range gtAlleles(gt) {
 		if a == "" || a == "." {
 			continue
 		}
