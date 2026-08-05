@@ -20,6 +20,16 @@ func TestCanonicalContig(t *testing.T) {
 		{"chrX", "X", true},
 		{"chrM", "MT", true},
 		{"chrMT", "MT", true},
+		// Case. The "chr" prefix used to be trimmed before the upper-casing, and
+		// TrimPrefix is case-sensitive, so every spelling but the lowercase one
+		// fell through to the accession parser and resolved to nothing.
+		{"Chr1", "1", true},
+		{"CHR1", "1", true},
+		{"CHRX", "X", true},
+		{"chrx", "X", true},
+		{"x", "X", true},
+		{"mt", "MT", true},
+		{"ChrM", "MT", true},
 		// NCBI RefSeq (version ignored; assembly-independent)
 		{"NC_000001.11", "1", true},
 		{"NC_000001.10", "1", true},
@@ -81,6 +91,26 @@ func TestContigConverterReverse(t *testing.T) {
 		got, ok := conv.Resolve(in)
 		if !ok || got != want {
 			t.Errorf("Resolve(%q) = (%q, %v), want (%q, true)", in, got, ok, want)
+		}
+	}
+}
+
+// IsPrimaryHuman and CanonicalContig share one normalization, so they cannot
+// disagree about what "primary" means for a given spelling. They used to: the
+// former did not normalize the mitochondrion at all, and neither handled case.
+func TestIsPrimaryHumanAgreesWithCanonicalContig(t *testing.T) {
+	for _, name := range []string{
+		"1", "22", "X", "Y", "M", "MT",
+		"chr1", "Chr1", "CHR1", "chrX", "chrx", "chrM", "chrMT", "ChrM",
+		"chr1_KI270706v1_random", "GL000009.2", "",
+	} {
+		_, canon := CanonicalContig(name)
+		primary := IsPrimaryHuman(name)
+		// CanonicalContig additionally resolves NCBI accessions, which are not
+		// "chr"-named, so agreement is asserted only over the naming forms
+		// IsPrimaryHuman claims to handle.
+		if primary != canon {
+			t.Errorf("%q: IsPrimaryHuman = %v but CanonicalContig ok = %v", name, primary, canon)
 		}
 	}
 }

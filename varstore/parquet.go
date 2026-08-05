@@ -265,8 +265,14 @@ type Writer struct {
 // census returns the running tally for chrom, creating it on first sight.
 // Chromosome order follows the order they were written, which is the store's
 // own order and not lexicographic.
+// Keyed on the canonical chromosome, not the spelling: a conversion whose
+// inputs mix "chr1" and "1" was producing two entries for one chromosome, in
+// the field the manifest doc calls the part that earns the file. Name keeps the
+// first spelling seen, because the store records the source's own naming rather
+// than rewriting it.
 func (w *Writer) census(chrom string, pos int32) *ChromCensus {
-	if i, ok := w.chromIdx[chrom]; ok {
+	key := CanonKey(chrom)
+	if i, ok := w.chromIdx[key]; ok {
 		c := &w.chroms[i]
 		if pos < c.FirstPos {
 			c.FirstPos = pos
@@ -279,7 +285,7 @@ func (w *Writer) census(chrom string, pos int32) *ChromCensus {
 	if w.chromIdx == nil {
 		w.chromIdx = map[string]int{}
 	}
-	w.chromIdx[chrom] = len(w.chroms)
+	w.chromIdx[key] = len(w.chroms)
 	w.chroms = append(w.chroms, ChromCensus{Name: chrom, FirstPos: pos, LastPos: pos})
 	return &w.chroms[len(w.chroms)-1]
 }
@@ -439,15 +445,24 @@ func (w *Writer) Discard() error {
 // without a manifest, which readers refuse. The order is the whole point: every
 // member is finalized first, and only a run that got that far writes the marker
 // saying so.
+// A failure after Close discards the store rather than leaving it. By then the
+// three members carry valid footers, so what is on disk looks exactly like a
+// finished conversion minus its marker -- and a reader has no way to tell that
+// from an interrupted one. It would be refused at open forever, with no way to
+// retry that the overwrite guard did not also have to be talked past. Better to
+// leave nothing.
 func (w *Writer) Finish() error {
 	if err := w.Close(); err != nil {
 		return err
 	}
 	m, err := w.manifest()
 	if err != nil {
-		return err
+		return errors.Join(err, w.Discard())
 	}
-	return WriteManifest(w.base, m)
+	if err := WriteManifest(w.base, m); err != nil {
+		return errors.Join(err, w.Discard())
+	}
+	return nil
 }
 
 // manifest describes the store as written. Member sizes are read back from disk
@@ -619,7 +634,12 @@ func (w *Writer) closeFiles() error {
 // scanParquet streams path in batches, calling fn per row. fn returns false to
 // stop early. Batching keeps a whole-genome store from having to be resident.
 func scanParquet[T any](m *member, fn func(T) bool) error {
-	r := parquet.NewGenericReader[T](m.ra)
+	pf, err := m.parsed()
+	if err != nil {
+		return err
+	}
+	// The parsed file, not the raw ReaderAt: see scanParquetPruned.
+	r := parquet.NewGenericReader[T](pf)
 	defer r.Close()
 
 	buf := make([]T, 1024)
@@ -1128,9 +1148,38 @@ func (s *ParquetStore) callsWithRef(p *plan, keep rowGroupFilter) ([]Call, error
 		return nil, err
 	}
 	// A call whose site is missing from the catalog should be impossible, but
-	// dropping it silently would be worse than emitting it out of order.
-	for _, calls := range altBySite {
-		out = append(out, calls...)
+	// dropping it silently would be worse than emitting it late. Sorted rather
+	// than drained in map order: Go randomizes that, so the same query against
+	// the same store returned these rows in a different order on every run, and
+	// a caller diffing two runs saw a difference that was not in the data.
+	if len(altBySite) > 0 {
+		keys := make([]Locus, 0, len(altBySite))
+		for k := range altBySite {
+			keys = append(keys, k)
+		}
+		// Not the store's contig order -- these rows are by definition absent
+		// from the catalog that defines it. Any total order will do; what
+		// matters is that it is the same one twice.
+		sort.Slice(keys, func(i, j int) bool {
+			a, b := keys[i], keys[j]
+			switch {
+			case a.Chrom != b.Chrom:
+				return a.Chrom < b.Chrom
+			case a.Pos != b.Pos:
+				return a.Pos < b.Pos
+			case a.Ref != b.Ref:
+				return a.Ref < b.Ref
+			default:
+				return a.Alt < b.Alt
+			}
+		})
+		for _, k := range keys {
+			calls := altBySite[k]
+			sort.SliceStable(calls, func(i, j int) bool {
+				return calls[i].SampleID < calls[j].SampleID
+			})
+			out = append(out, calls...)
+		}
 	}
 	return out, nil
 }
