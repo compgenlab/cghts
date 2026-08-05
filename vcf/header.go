@@ -277,12 +277,7 @@ func (h *VcfHeader) RemoveContig(id string) {
 		return
 	}
 	delete(h.contigDefs, id)
-	for i, c := range h.contigOrd {
-		if c == id {
-			h.contigOrd = append(h.contigOrd[:i], h.contigOrd[i+1:]...)
-			break
-		}
-	}
+	h.contigOrd = removeID(h.contigOrd, id)
 }
 
 // RemoveInfo drops an ##INFO definition.
@@ -336,10 +331,20 @@ func (h *VcfHeader) RenameSample(old, new string) error {
 }
 
 // removeID returns order with the first occurrence of id removed.
+//
+// It allocates rather than compacting in place, because ContigNames, InfoIDs,
+// FormatIDs and FilterIDs all return the live slice. Shifting it under a caller
+// that is ranging over it -- the obvious way to drop every contig -- silently
+// skips every second entry, since range fixes the length up front while the
+// elements slide down past the cursor. cgkit's vcf-chrfix already copies
+// defensively at two call sites; that this was needed at all is the bug. The
+// allocation lands on the rare mutation path, not on the accessors.
 func removeID(order []string, id string) []string {
 	for i, v := range order {
 		if v == id {
-			return append(order[:i], order[i+1:]...)
+			out := make([]string, 0, len(order)-1)
+			out = append(out, order[:i]...)
+			return append(out, order[i+1:]...)
 		}
 	}
 	return order
@@ -359,9 +364,14 @@ func (h *VcfHeader) AddLine(line string) {
 }
 
 // SetFileDate replaces any existing ##fileDate line with one for the given date
-// (in YYYYMMDD form).
+// (in YYYYMMDD form). The replacement is appended, so it moves to the end of the
+// preserved lines.
+//
+// Like removeID, this builds a new slice rather than filtering h.otherLines in
+// place: OtherLines returns the live slice, and compacting it would rewrite a
+// result the caller already holds.
 func (h *VcfHeader) SetFileDate(date string) {
-	kept := h.otherLines[:0]
+	kept := make([]string, 0, len(h.otherLines)+1)
 	for _, l := range h.otherLines {
 		if !strings.HasPrefix(l, "##fileDate=") {
 			kept = append(kept, l)
