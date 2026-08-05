@@ -28,6 +28,10 @@ func OpenFile(path string) (*File, error) {
 func NewFile(f *os.File) (*File, error) {
 	fi, err := f.Stat()
 	if err != nil {
+		// Ownership passes on the call, not on success. Returning without
+		// closing here left the caller holding a handle it had already given
+		// away and, reading the doc above, would not think to close.
+		f.Close()
 		return nil, err
 	}
 	return &File{f: f, size: fi.Size()}, nil
