@@ -172,6 +172,11 @@ func (a *Attributes) SetFlag(key string) { a.put(key, AttrValue{raw: ""}) }
 func (a *Attributes) SetValue(key string, v AttrValue) { a.put(key, v) }
 
 // Remove deletes a key.
+//
+// The key order is rebuilt rather than compacted in place, because Keys returns
+// the live slice: dropping several keys while ranging over Keys() -- which is
+// how a caller strips a set of INFO fields -- would otherwise skip every second
+// one. cgkit's vcf-strip copies defensively to work around exactly this.
 func (a *Attributes) Remove(key string) {
 	if _, ok := a.vals[key]; !ok {
 		return
@@ -179,7 +184,9 @@ func (a *Attributes) Remove(key string) {
 	delete(a.vals, key)
 	for i, k := range a.keys {
 		if k == key {
-			a.keys = append(a.keys[:i], a.keys[i+1:]...)
+			out := make([]string, 0, len(a.keys)-1)
+			out = append(out, a.keys[:i]...)
+			a.keys = append(out, a.keys[i+1:]...)
 			break
 		}
 	}
