@@ -662,7 +662,6 @@ func scanParquet[T any](m *member, fn func(T) bool) error {
 	}
 }
 
-// ParquetStore is a Store backed by the three-file Parquet set.
 // hasColumn reports whether a leaf column is present in a file's schema.
 func hasColumn(pf *parquet.File, name string) bool {
 	for _, f := range pf.Schema().Fields() {
@@ -673,6 +672,7 @@ func hasColumn(pf *parquet.File, name string) bool {
 	return false
 }
 
+// ParquetStore is a Store backed by the three-file Parquet set.
 type ParquetStore struct {
 	base        string
 	calls       *member
@@ -1113,7 +1113,7 @@ func (s *ParquetStore) callsWithRef(p *plan, keep rowGroupFilter) ([]Call, error
 	}
 
 	var out []Call
-	err = scanParquetPruned(s.sites, siteScanFilter(p.q), func(site Site) bool {
+	err = scanParquetPruned(s.sites, callsFilter(p.q), func(site Site) bool {
 		loc := site.Locus()
 		if !p.wantsSite(loc, site.RefEnd) {
 			return true
@@ -1370,18 +1370,10 @@ func (s *ParquetStore) Site(l Locus) (Site, bool, error) {
 // the boundary of what can be answered at all, so callers presenting results to
 // a user should say so rather than let "0 carriers" read as "nobody carries it".
 func (s *ParquetStore) SiteKnown(l Locus) (bool, error) {
-	if !s.hasSites {
-		return false, fmt.Errorf("%w: %s is missing", ErrNotClassifiable, SitesPath(s.base))
-	}
-	found := false
-	err := scanParquetPruned(s.sites, locusFilter(l), func(site Site) bool {
-		if SameLocus(site.Locus(), l) {
-			found = true
-			return false
-		}
-		return true
-	})
-	return found, err
+	// Site already does this scan, with the same guard, the same filter and the
+	// same early stop; this was a second copy that discarded the payload.
+	_, ok, err := s.Site(l)
+	return ok, err
 }
 
 // Close releases the three members, which are held open for the store's life.
