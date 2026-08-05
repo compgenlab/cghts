@@ -935,7 +935,16 @@ func verifyAgainstManifest(man *Manifest, calls *parquet.File, sites, regions *m
 func openOptionalMember(ctx context.Context, locator string) (*member, bool, error) {
 	m, err := openMember(ctx, locator)
 	if err != nil {
-		return nil, false, nil
+		// Absent is an answer; anything else is a failure. This used to discard
+		// every error alike, so a member that existed but could not be read --
+		// bad permissions, an I/O error, a symlink loop -- was reported as one
+		// that was never written, and the store opened with a quietly missing
+		// half. Remote absence reads the same way as local now: iosource wraps
+		// a 404 in fs.ErrNotExist.
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("opening %s: %w", locator, err)
 	}
 	if _, err := parquet.OpenFile(m.ra, m.size); err != nil {
 		m.Close()

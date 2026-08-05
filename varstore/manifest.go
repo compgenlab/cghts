@@ -146,6 +146,22 @@ func WriteManifest(base string, m Manifest) error {
 	if err := os.Rename(tmpName, ManifestPath(base)); err != nil {
 		return fmt.Errorf("installing manifest: %w", err)
 	}
+	// And fsync the directory, so the rename itself survives a crash.
+	//
+	// Syncing the file only guarantees its contents; the directory entry that
+	// makes it visible under its final name is separate metadata, and without
+	// this a power loss could leave the members complete and the marker that
+	// says so gone -- which readers refuse permanently. That is the one failure
+	// this whole file exists to prevent, so it is worth the extra syscall on a
+	// path that runs once per conversion.
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("syncing store directory: %w", err)
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("syncing store directory: %w", err)
+	}
 	return nil
 }
 
