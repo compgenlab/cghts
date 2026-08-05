@@ -55,6 +55,12 @@ type Manifest struct {
 	Command string   `json:"command,omitempty"`
 	Sources []string `json:"sources,omitempty"`
 
+	// Meta is what the caller said the store *is*, where the fields above record
+	// how it was made. See ReservedMetaKeys. Omitted entirely when empty, so a
+	// store converted without any reads back identical to one written before
+	// this field existed -- absent means "not stated", never "stated as nothing".
+	Meta map[string]string `json:"meta,omitempty"`
+
 	Params  ManifestParams        `json:"params"`
 	Samples []string              `json:"samples"`
 	Counts  ManifestCounts        `json:"counts"`

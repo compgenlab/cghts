@@ -42,6 +42,135 @@ const (
 	MetaContigs = "cgkit.contigs"
 )
 
+// MetaPrefix namespaces caller-supplied metadata inside the parquet key/value
+// metadata, so a WriterOpts.Meta key can never shadow one of the keys above --
+// "cgkit.meta.source" and "cgkit.source" are different keys, and only the
+// latter is provenance the writer vouches for.
+const MetaPrefix = "cgkit.meta."
+
+// Reserved metadata keys. Nothing rejects a key outside this set; they exist so
+// that the writer, a reader, and a CLI exposing them as flags agree on spelling
+// rather than each inventing "ref" or "genome" for the same fact.
+//
+// What earns a place here is a fact the store cannot recover about itself.
+// Sources, sample roster, creation time and the per-chromosome census are all
+// recorded already; the assembly is not, and neither is the name of the release
+// a set of per-chromosome inputs came from.
+const (
+	// MetaKeyDataset names the release or callset the store was built from --
+	// the thing a directory of 24 per-chromosome VCFs is collectively called.
+	MetaKeyDataset = "dataset"
+
+	// MetaKeyReference names the assembly the calls were made against. The
+	// ##contig lines in MetaContigs carry lengths that imply it, but implying is
+	// not declaring, and a store read against the wrong assembly does not fail --
+	// it answers with coordinates that mean something else.
+	MetaKeyReference = "reference"
+
+	// MetaKeyCaller names the variant caller and version. It bears on queries
+	// rather than just on provenance: DP, GQ and RGQ mean different things
+	// between callers, and those are the fields Gate acts on.
+	MetaKeyCaller = "caller"
+
+	// MetaKeyAccession is the study or dataset accession (phs000000, EGAD...).
+	MetaKeyAccession = "accession"
+
+	// MetaKeyURL is where the data was retrieved from. Kept separate from
+	// MetaKeyAccession because an accession identifies and a URL locates: a
+	// store can have either without the other, and folding them loses whichever
+	// was not written.
+	MetaKeyURL = "url"
+
+	// MetaKeyVersion is the dataset's own release version, as opposed to the
+	// cgkit version that did the conversion -- which is already in MetaProgram.
+	MetaKeyVersion = "version"
+
+	// MetaKeyDescription is free text.
+	MetaKeyDescription = "description"
+)
+
+// ReservedMetaKeys lists the reserved keys in the order a report should present
+// them, most identifying first. A CLI generating one flag per key should range
+// over this rather than repeat the list, so the two cannot drift.
+var ReservedMetaKeys = []string{
+	MetaKeyDataset,
+	MetaKeyReference,
+	MetaKeyCaller,
+	MetaKeyAccession,
+	MetaKeyURL,
+	MetaKeyVersion,
+	MetaKeyDescription,
+}
+
+// ValidMetaKey reports whether k is usable as a metadata key.
+//
+// Keys are constrained where values are not. A value is a claim by the caller
+// and is recorded verbatim -- the writer cannot know whether "GRCh38" is true,
+// and normalizing it would turn a caller's assertion into the library's. A key
+// is an identifier that has to survive a round trip through a parquet metadata
+// key and a JSON object member, and be greppable afterwards, so it is held to
+// lowercase [a-z0-9_-]. The dot is excluded specifically: MetaPrefix already
+// uses it as a separator, and a key containing one would read back ambiguously.
+func ValidMetaKey(k string) bool {
+	if k == "" {
+		return false
+	}
+	for _, r := range k {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// copyMeta returns an independent copy of m, or nil when m is empty so the
+// manifest's omitempty elides the field rather than writing "meta": {}. The copy
+// matters because the manifest outlives the WriterOpts the caller passed in.
+func copyMeta(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// sortedKeys returns m's keys in sorted order, so that metadata is stamped
+// deterministically and two conversions given the same inputs produce the same
+// bytes. Go map iteration would not.
+func sortedKeys(m map[string]string) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
+}
+
+// validateMeta checks every key, naming all the bad ones rather than only the
+// first: a caller passing several flags wants one round trip, not one per typo.
+func validateMeta(m map[string]string) error {
+	var bad []string
+	for k := range m {
+		if !ValidMetaKey(k) {
+			bad = append(bad, strconv.Quote(k))
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Strings(bad)
+	return fmt.Errorf("invalid metadata key(s) %s: keys must be non-empty and use only "+
+		"lowercase letters, digits, underscore and hyphen", strings.Join(bad, ", "))
+}
+
 // SpanSemantics records what the intervals in the regions file are entitled to
 // claim, which depends entirely on what the source format asserted.
 type SpanSemantics string
@@ -95,6 +224,12 @@ type WriterOpts struct {
 	// Spans declares what the run intervals may claim. Defaults to SpansSites,
 	// which is all a plain VCF can support.
 	Spans SpanSemantics
+
+	// Meta is caller-supplied metadata describing what the store *is*, as
+	// opposed to how it was built: see ReservedMetaKeys for the keys with an
+	// agreed meaning. The map is open, so a caller may record anything; keys are
+	// validated by NewWriter, values never are.
+	Meta map[string]string
 }
 
 // Writer builds the three files of a Parquet store. Rows are buffered and
@@ -159,6 +294,12 @@ const batchSize = 8192
 // EnsureStoreDir remains for callers that want the directory to exist earlier,
 // and is idempotent.
 func NewWriter(base string, o WriterOpts) (*Writer, error) {
+	// Before anything on disk is touched. The next step removes the previous
+	// run's manifest, so a bad key caught later would already have unmade a
+	// readable store in order to reject the run that was meant to replace it.
+	if err := validateMeta(o.Meta); err != nil {
+		return nil, err
+	}
 	if o.Codec == nil {
 		o.Codec = &zstd.Codec{}
 	}
@@ -220,6 +361,9 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 		w.calls.SetKeyValueMetadata(MetaContigs, strings.Join(o.Contigs, "\n"))
 	}
 	w.calls.SetKeyValueMetadata(MetaSpans, string(o.Spans))
+	for _, k := range sortedKeys(o.Meta) {
+		w.calls.SetKeyValueMetadata(MetaPrefix+k, o.Meta[k])
+	}
 	if o.NoCallable {
 		w.calls.SetKeyValueMetadata(MetaNoCall, "1")
 	}
@@ -328,6 +472,7 @@ func (w *Writer) manifest() (Manifest, error) {
 		Program:       w.opts.Program,
 		Command:       w.opts.Command,
 		Sources:       w.opts.Sources,
+		Meta:          copyMeta(w.opts.Meta),
 		Params: ManifestParams{
 			MinDP:         w.opts.MinDP,
 			NoCallable:    w.opts.NoCallable,
@@ -541,6 +686,12 @@ type Provenance struct {
 	NoCallable bool
 	Spans      SpanSemantics
 	NumSamples int
+
+	// Meta is the caller-supplied metadata recorded at conversion, read back
+	// from the calls file rather than the manifest -- so a query-time caller
+	// that already has the store open need not open a second file to learn what
+	// dataset it is holding. Nil when none was recorded.
+	Meta map[string]string
 }
 
 // Provenance returns the conversion metadata recorded in the calls file.
@@ -553,7 +704,26 @@ func (s *ParquetStore) Provenance() Provenance {
 		NoCallable: s.noCallable,
 		Spans:      s.spans,
 		NumSamples: len(s.samples),
+		Meta:       s.metaFields(),
 	}
+}
+
+// metaFields recovers the caller-supplied metadata from the calls file's
+// key/value metadata by stripping MetaPrefix. Returns nil rather than an empty
+// map when none was recorded, so a caller can tell "not stated" from "empty".
+func (s *ParquetStore) metaFields() map[string]string {
+	var out map[string]string
+	for k, v := range s.meta {
+		key, ok := strings.CutPrefix(k, MetaPrefix)
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[key] = v
+	}
+	return out
 }
 
 // OpenParquet opens a Parquet store. base may be given either as the base name
@@ -591,6 +761,13 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error)
 	for _, k := range []string{MetaSource, MetaProgram, MetaCommand, MetaMinDP, MetaContigs} {
 		if v, ok := pf.Lookup(k); ok {
 			s.meta[k] = v
+		}
+	}
+	// Caller metadata is open-ended, so it cannot be read by an allowlist the way
+	// the keys above are; sweep the file's metadata for the namespace instead.
+	for _, kv := range pf.Metadata().KeyValueMetadata {
+		if strings.HasPrefix(kv.Key, MetaPrefix) {
+			s.meta[kv.Key] = kv.Value
 		}
 	}
 	if v, err := strconv.Atoi(s.meta[MetaMinDP]); err == nil {
