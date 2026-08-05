@@ -159,7 +159,18 @@ func (r *FastqReader) NextFastqSeq() (*FastqSeqRecord, error) {
 // NextSeq returns the next record as a [SeqRecord], satisfying [SeqReader]. It
 // is a thin wrapper around [FastqReader.NextFastqSeq].
 func (r *FastqReader) NextSeq() (SeqRecord, error) {
-	return r.NextFastqSeq()
+	// Not `return r.NextFastqSeq()`. That returns a *FastqSeqRecord, and at EOF
+	// it returns a nil one -- which, boxed into a SeqRecord interface, is a
+	// non-nil interface holding a nil pointer. Every caller checking `rec == nil`
+	// to detect the end therefore sailed past it and dereferenced the nil on the
+	// next method call. FastaReader.NextSeq returns a literal nil and so has
+	// never had the problem, which is what made the two readers behave
+	// differently through one interface.
+	rec, err := r.NextFastqSeq()
+	if rec == nil {
+		return nil, err
+	}
+	return rec, err
 }
 
 // Names returns an iterator over the record names in the file. Because a FASTQ
