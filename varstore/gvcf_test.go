@@ -41,14 +41,21 @@ var gvcfLines = []string{
 // scans, which is slower and must not be *different*.
 func writeGvcf(t *testing.T) (plain, indexed string) {
 	t.Helper()
+	return writeGvcfLines(t, gvcfLines)
+}
+
+// writeGvcfLines is writeGvcf over an arbitrary line set, so a test needing one
+// more block does not have to fork the whole fixture.
+func writeGvcfLines(t *testing.T, lines []string) (plain, indexed string) {
+	t.Helper()
 	dir := t.TempDir()
 	plain = filepath.Join(dir, "s.g.vcf")
-	if err := os.WriteFile(plain, []byte(strings.Join(gvcfLines, "\n")+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(plain, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	indexed = filepath.Join(dir, "s.g.vcf.gz")
 	w := tabix.NewWriter(indexed, tabix.NewWriterOpts().VCF().AutoIndex())
-	for _, l := range gvcfLines {
+	for _, l := range lines {
 		if strings.HasPrefix(l, "#") {
 			w.WriteHeader(l)
 			continue
@@ -150,8 +157,16 @@ func TestGvcfGateUsesBlockMinDP(t *testing.T) {
 	}
 
 	gated := rowsOf(t, indexed, Query{Spans: span, IncludeRef: true, Gate: Gate{MinDP: 10}})
-	if len(gated) != 0 {
-		t.Errorf("a block whose MIN_DP is 3 must not pass --min-dp 10, got %+v", gated)
+	if len(gated) != 1 {
+		t.Fatalf("the block should still be reported, as a no-call: got %+v", gated)
+	}
+	if gated[0].GT != NoCallGT {
+		t.Errorf("a block whose MIN_DP is 3 must not report reference under --min-dp 10: GT = %q",
+			gated[0].GT)
+	}
+	// The evidence survives the downgrade, so a caller can see why.
+	if gated[0].MinDP != 3 {
+		t.Errorf("gated MinDP = %d, want 3", gated[0].MinDP)
 	}
 
 	// And a well-covered block still passes, so the gate is not simply rejecting
@@ -162,6 +177,87 @@ func TestGvcfGateUsesBlockMinDP(t *testing.T) {
 	})
 	if len(ok) != 1 {
 		t.Errorf("a block with MIN_DP 28 must pass --min-dp 10, got %+v", ok)
+	}
+	if ok[0].GT != "0/0" {
+		t.Errorf("a block with MIN_DP 28 should report reference, got GT %q", ok[0].GT)
+	}
+}
+
+// zeroDPGvcf is the fixture plus a block that claims 0/0 over ground no read
+// covered. The existing MIN_DP=0 block in gvcfLines has GT "./." and so is
+// rejected by IsHomRef before the gate is ever consulted -- which is exactly why
+// the bug below survived having a fixture for it.
+func zeroDPGvcf(t *testing.T) string {
+	t.Helper()
+	lines := append(append([]string(nil), gvcfLines...),
+		"chr1\t30000\t.\tA\t<NON_REF>\t.\t.\tEND=31000\tGT:DP:MIN_DP:RGQ\t0/0:12:0:40")
+	_, indexed := writeGvcfLines(t, lines)
+	return indexed
+}
+
+// TestGvcfZeroMinDPNeverVouchesForReference is the bug this fix exists for.
+//
+// A gVCF may legitimately record MIN_DP=0: no read covered any base of the block.
+// Call.MinDP uses 0 for unknown, so Gate.Admits fell back to Call.DP -- which
+// blockRefCall pins to Missing precisely because a block measures no single base --
+// and Missing passes every gate. A kilobase of zero coverage therefore answered 0/0
+// under any --min-dp, inflating the reference denominator with sequence nobody read.
+func TestGvcfZeroMinDPNeverVouchesForReference(t *testing.T) {
+	indexed := zeroDPGvcf(t)
+	span := []Span{{Chrom: "chr1", Start: 30499, End: 30600}}
+
+	ungated := rowsOf(t, indexed, Query{Spans: span, IncludeRef: true})
+	if len(ungated) != 1 || ungated[0].GT != "0/0" {
+		t.Fatalf("ungated: want one 0/0 row, got %+v", ungated)
+	}
+	if ungated[0].MinDP != 0 {
+		t.Fatalf("ungated MinDP = %d, want 0", ungated[0].MinDP)
+	}
+
+	for _, minDP := range []int32{1, 10, 30} {
+		got := rowsOf(t, indexed, Query{
+			Spans: span, IncludeRef: true, Gate: Gate{MinDP: minDP},
+		})
+		if len(got) != 1 {
+			t.Fatalf("--min-dp %d: want the block reported, got %+v", minDP, got)
+		}
+		if got[0].GT != NoCallGT {
+			t.Errorf("--min-dp %d: a MIN_DP=0 block reported %q; zero coverage cannot "+
+				"establish a reference call", minDP, got[0].GT)
+		}
+	}
+}
+
+// Classify must agree with Calls: a block that cannot vouch for the gate's depth has
+// looked without concluding, which is not-assayed. Calling it non-carrier is the same
+// overclaim wearing the other API.
+func TestGvcfZeroMinDPClassifiesAsNotAssayed(t *testing.T) {
+	s, err := OpenVcf(zeroDPGvcf(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	loc := Locus{Chrom: "chr1", Pos: 30500, Ref: "A", Alt: "T"}
+
+	ungated, err := s.Classify(loc, Gate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ungated) != 1 || ungated[0].State != StateNonCarrier {
+		t.Fatalf("ungated: want non-carrier, got %+v", ungated)
+	}
+
+	gated, err := s.Classify(loc, Gate{MinDP: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gated) != 1 {
+		t.Fatalf("want one state, got %+v", gated)
+	}
+	if gated[0].State != StateNotAssayed {
+		t.Errorf("a MIN_DP=0 block under --min-dp 10 classified as %v, want %v",
+			gated[0].State, StateNotAssayed)
 	}
 }
 

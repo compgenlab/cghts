@@ -176,8 +176,13 @@ func ReadSample(rec *vcf.VcfRecord, i int) (SampleFields, error) {
 	return s, nil
 }
 
-// RecordLoci returns one Locus per ALT allele of a record, in ALT order, with
-// chromosome naming normalized.
+// RecordLoci returns one Locus per ALT allele of a record, in ALT order.
+//
+// The chromosome keeps the record's own spelling, deliberately: a store records
+// the naming its source used rather than rewriting it, and comparisons are made
+// by canonical identity at query time instead (see CanonKey). This comment used
+// to claim the name was normalized here, which is not what the code has ever
+// done -- a trap for the converter that calls it.
 func RecordLoci(rec *vcf.VcfRecord) []Locus {
 	alts := rec.Alt()
 	out := make([]Locus, 0, len(alts))

@@ -43,9 +43,23 @@ var PrimaryHumanContigs = map[string]bool{
 }
 
 // IsPrimaryHuman reports whether chrom (UCSC or Ensembl named) is a primary
-// human contig.
+// human contig. Naming is matched case-insensitively, so "chr1", "Chr1" and
+// "CHR1" agree; see stripChrPrefix.
 func IsPrimaryHuman(chrom string) bool {
-	return PrimaryHumanContigs[strings.TrimPrefix(chrom, "chr")]
+	return PrimaryHumanContigs[stripChrPrefix(chrom)]
+}
+
+// stripChrPrefix upper-cases a contig name and then removes a leading "CHR".
+//
+// The order matters, and used to be the other way round. TrimPrefix is
+// case-sensitive, so stripping "chr" before upper-casing left "Chr1" and "CHR1"
+// untouched: they upper-cased to "CHR1", missed the contig table, fell through
+// to the NCBI accession parser and came back as not primary at all. Both
+// spellings occur in the wild, and the failure is silent -- CanonicalContig
+// returns ok=false, callers fall back to exact-name matching, and a query
+// against a differently spelled file quietly matches nothing.
+func stripChrPrefix(name string) string {
+	return strings.TrimPrefix(strings.ToUpper(name), "CHR")
 }
 
 // CanonicalContig returns a canonical chromosome key (Ensembl-style: "1".."22",
@@ -56,7 +70,9 @@ func IsPrimaryHuman(chrom string) bool {
 // [ContigConverter] and the vcf-annotate --auto-convert option.
 func CanonicalContig(name string) (key string, ok bool) {
 	// UCSC/Ensembl: strip a "chr" prefix, normalize the mitochondrion to "MT".
-	s := strings.ToUpper(strings.TrimPrefix(name, "chr"))
+	// Shared with IsPrimaryHuman so the two cannot disagree about what "primary"
+	// means for a given spelling.
+	s := stripChrPrefix(name)
 	if s == "M" {
 		s = "MT"
 	}

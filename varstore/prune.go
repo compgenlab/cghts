@@ -271,7 +271,7 @@ func unionFilter(q Query) rowGroupFilter {
 
 // eachRowGroup calls fn for every row group, without reading any rows.
 func eachRowGroup(m *member, fn func(parquet.RowGroup)) error {
-	pf, err := parquet.OpenFile(m.ra, m.size)
+	pf, err := m.parsed()
 	if err != nil {
 		return err
 	}
@@ -286,12 +286,18 @@ func eachRowGroup(m *member, fn func(parquet.RowGroup)) error {
 // Rows are addressed by seeking the generic reader to each surviving group's
 // offset, so decoding still goes through the same typed path as a full scan.
 func scanParquetPruned[T any](m *member, keep rowGroupFilter, fn func(T) bool) error {
-	pf, err := parquet.OpenFile(m.ra, m.size)
+	pf, err := m.parsed()
 	if err != nil {
 		return err
 	}
 
-	r := parquet.NewGenericReader[T](m.ra)
+	// pf, not m.ra. NewGenericReader calls openFile on whatever it is handed,
+	// and that short-circuits only when the input already is a *parquet.File --
+	// handing it the raw ReaderAt made it size and re-parse the footer that was
+	// parsed one line above, on every single scan. Classify does three scans, so
+	// it was six footer parses per locus, each its own request against a remote
+	// store.
+	r := parquet.NewGenericReader[T](pf)
 	defer r.Close()
 
 	buf := make([]T, 1024)
