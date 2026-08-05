@@ -227,8 +227,12 @@ func (s *VcfStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 					return true, nil
 				}
 				for _, sf := range fields {
-					c, ok := blockRefCall(rec, sf.col, sf.name, sf.f, refEnd)
-					if !ok || !q.Gate.Admits(c) {
+					// The gate is inside blockRefCall, which downgrades the
+					// genotype to a no-call rather than dropping the row: the
+					// block did report on this span, and losing the row would
+					// make it indistinguishable from one never reported at all.
+					c, ok := blockRefCall(rec, sf.col, sf.name, sf.f, refEnd, q.Gate)
+					if !ok {
 						continue
 					}
 					if !emit(c) {
@@ -359,12 +363,20 @@ func (s *VcfStore) Classify(l Locus, g Gate) ([]SampleState, error) {
 					if err != nil {
 						return false, err
 					}
-					c, ok := blockRefCall(rec, i, name, sf, int32(rec.RefSpanEnd()))
-					if !ok || !g.Admits(c) {
+					c, ok := blockRefCall(rec, i, name, sf, int32(rec.RefSpanEnd()), g)
+					if !ok {
 						continue
 					}
 					cc := c
-					byBlock[name] = SampleState{SampleID: name, State: StateNonCarrier, Call: &cc}
+					// A block that cannot vouch for the depth the gate asks for
+					// has looked without concluding, which is not-assayed rather
+					// than non-carrier. Reporting it as non-carrier is what would
+					// let an uncovered span enlarge the reference denominator.
+					state := StateNonCarrier
+					if cc.GT == NoCallGT {
+						state = StateNotAssayed
+					}
+					byBlock[name] = SampleState{SampleID: name, State: state, Call: &cc}
 				}
 			}
 			return true, nil
@@ -627,7 +639,11 @@ func ParseSpan(region string) (*Span, error) {
 //   - The genotype is the recorded one, so ploidy and phasing survive -- and a block
 //     whose genotype is a no-call is not a reference observation at all, so it is
 //     skipped rather than reported as 0/0.
-func blockRefCall(rec *vcf.VcfRecord, col int, sample string, sf SampleFields, refEnd int32) (Call, bool) {
+//   - The genotype becomes "./." when the block's own depth does not clear the gate.
+//     See blockVouchesReference.
+func blockRefCall(rec *vcf.VcfRecord, col int, sample string, sf SampleFields,
+	refEnd int32, g Gate) (Call, bool) {
+
 	if !IsHomRef(sf.GT) {
 		return Call{}, false
 	}
@@ -650,7 +666,48 @@ func blockRefCall(rec *vcf.VcfRecord, col int, sample string, sf SampleFields, r
 	if v, ok := rec.BlockRGQ(col); ok {
 		c.GQ = v
 	}
+	if !blockVouchesReference(c, g) {
+		c.GT = NoCallGT
+	}
 	return c, true
+}
+
+// NoCallGT is the genotype reported where a source looked but cannot support a
+// conclusion. It is distinct from an absent row, which means nothing looked.
+const NoCallGT = "./."
+
+// blockVouchesReference reports whether a reference block's own numbers support
+// calling a sample reference at the gate.
+//
+// This is the one place a gate is *not* allowed to fail open. Gate.Admits treats
+// an unknown value as no evidence of poor quality and lets it through, which is
+// right for an ALT call: the call is evidence of itself, and a VCF carrying no DP
+// column should still return its variants under --min-dp. A reference call is the
+// opposite kind of claim. It asserts that a position was observed and found to be
+// reference, so absent evidence cannot establish it, and a gate that admits the
+// row anyway inflates the reference denominator -- exactly the error the four
+// states exist to keep apart.
+//
+// The case that made this concrete: a gVCF block may legitimately record MIN_DP=0,
+// meaning no read covered any base of it. Call.MinDP uses 0 for unknown, so Admits
+// fell back to Call.DP, which blockRefCall pins to Missing precisely because a block
+// measures no single base -- and Missing passes. A kilobase of zero coverage was
+// therefore answering 0/0 under --min-dp 30.
+//
+// Note the caller does not drop the row. Dropping it would make the span look
+// never-assayed, which is the opposite error: the source did report here, and what
+// it reported does not support a reference call. "./." says both.
+func blockVouchesReference(c Call, g Gate) bool {
+	// c.MinDP is 0 both when the block says zero coverage and when it says
+	// nothing at all. Neither vouches for anything, and both compare below any
+	// positive threshold, so the two need no telling apart here.
+	if g.MinDP > 0 && c.MinDP < g.MinDP {
+		return false
+	}
+	if g.MinGQ > 0 && (c.GQ == Missing || c.GQ < g.MinGQ) {
+		return false
+	}
+	return true
 }
 
 // blockCovers reports whether a reference block covers a 1-based position. RefSpanEnd

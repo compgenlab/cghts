@@ -26,6 +26,30 @@ type member struct {
 	size int64
 	name string // locator, for error messages
 	src  iosource.ByteSource
+
+	// file is the parsed footer, kept because parsing it is the expensive half
+	// of holding the member open and it does not change for the life of the
+	// store. Populated lazily by parsed(); a store is opened for many queries
+	// but a member it never reads should not pay for one.
+	file *parquet.File
+}
+
+// parsed returns the member's parquet footer, parsing it once.
+//
+// Everything that reads a member wants this, and before it existed each caller
+// parsed its own: ParquetStore parsed the calls footer at open and discarded it,
+// scanParquetPruned parsed one per scan and then handed the raw ReaderAt to
+// NewGenericReader, which parsed a second. Remotely each parse is a request.
+func (m *member) parsed() (*parquet.File, error) {
+	if m.file != nil {
+		return m.file, nil
+	}
+	f, err := parquet.OpenFile(m.ra, m.size)
+	if err != nil {
+		return nil, err
+	}
+	m.file = f
+	return f, nil
 }
 
 // openMember opens a store member from any locator: a filesystem path, an
