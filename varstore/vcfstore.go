@@ -6,7 +6,6 @@ import (
 	"io"
 	"iter"
 	"math"
-	"strconv"
 	"strings"
 
 	"github.com/compgenlab/cghts/htsio"
@@ -509,59 +508,43 @@ func (s *VcfStore) Sites(fn func(Site) bool) error {
 			gts = append(gts, f.GT)
 		}
 
-		// AN counts every called allele at the record, so it is the same for all
-		// of its alternates and is computed once.
+		// One pass per genotype through AddAlleleCounts, which returns AN and
+		// accumulates per-allele AC together. This used to be calledAlleles plus
+		// a copiesOf sweep per alternate -- a second implementation of the same
+		// counting, in the file whose header says it exists so the converter and
+		// this backend cannot drift apart.
+		alts := rec.Alt()
+		ac := make([]int32, len(alts))
+		carriers := make([]int32, len(alts))
+		perSample := make([]int32, len(alts))
 		var an int32
 		for _, gt := range gts {
-			an += calledAlleles(gt)
+			for i := range perSample {
+				perSample[i] = 0
+			}
+			an += AddAlleleCounts(gt, perSample)
+			for i, c := range perSample {
+				ac[i] += c
+				if c > 0 {
+					carriers[i]++
+				}
+			}
 		}
 
 		refEnd := int32(rec.RefSpanEnd())
-		for j, alt := range rec.Alt() {
+		for j, alt := range alts {
 			if vcf.IsRefBlockAlt(alt) {
 				continue
 			}
-			idx := j + 1
-			var ac, carriers int32
-			for _, gt := range gts {
-				c := copiesOf(gt, idx)
-				ac += c
-				if c > 0 {
-					carriers++
-				}
-			}
 			if !fn(Site{
 				Chrom: rec.Chrom, Pos: int32(rec.Pos), Ref: rec.Ref, Alt: alt,
-				RefEnd: refEnd, AC: ac, AN: an, NCarriers: carriers,
+				RefEnd: refEnd, AC: ac[j], AN: an, NCarriers: carriers[j],
 			}) {
 				return false, nil
 			}
 		}
 		return true, nil
 	})
-}
-
-// calledAlleles counts the alleles a genotype actually called, "." excluded.
-func calledAlleles(gt string) int32 {
-	var n int32
-	for _, a := range strings.Split(strings.ReplaceAll(gt, "|", "/"), "/") {
-		if a != "" && a != "." {
-			n++
-		}
-	}
-	return n
-}
-
-// copiesOf counts how many times allele idx appears in a genotype.
-func copiesOf(gt string, idx int) int32 {
-	want := strconv.Itoa(idx)
-	var n int32
-	for _, a := range strings.Split(strings.ReplaceAll(gt, "|", "/"), "/") {
-		if a == want {
-			n++
-		}
-	}
-	return n
 }
 
 // Close is a no-op; VcfStore opens the file per query.
