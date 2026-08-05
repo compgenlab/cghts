@@ -3,6 +3,7 @@ package iosource
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"strconv"
@@ -68,18 +69,46 @@ func NewHTTPRange(url string, opts ...HTTPOption) (*HTTPRange, error) {
 		opt(h)
 	}
 
-	// Best-effort size probe via HEAD; failures are tolerated because size can
-	// still be recovered from the first ranged GET's Content-Range header.
+	// The HEAD does two jobs: it learns the length, and it establishes that the
+	// resource is there at all. Only the first is best-effort.
+	//
+	// Every failure used to be swallowed, so Open on a 404 succeeded and the
+	// error surfaced later from whatever first tried to read -- a parquet footer
+	// parse, a bgzf seek -- as a confusing failure about the file's contents
+	// rather than a plain statement that the URL is not there.
 	req, err := http.NewRequest(http.MethodHead, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	h.applyHeader(req)
-	if resp, err := h.client.Do(req); err == nil {
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK && resp.ContentLength >= 0 {
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", url, err)
+	}
+	resp.Body.Close()
+
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		// A server may answer HEAD without a length (chunked, or just
+		// unhelpful). That is still a live resource, and Size recovers the
+		// length from the first ranged GET's Content-Range.
+		if resp.ContentLength >= 0 {
 			h.size.Store(resp.ContentLength)
 		}
+	case resp.StatusCode == http.StatusMethodNotAllowed,
+		resp.StatusCode == http.StatusNotImplemented:
+		// HEAD is not universally implemented, and refusing the *method* says
+		// nothing about the resource. Fall through to lazy sizing rather than
+		// declare a file missing because a server is old.
+	case resp.StatusCode == http.StatusNotFound,
+		resp.StatusCode == http.StatusGone:
+		// Wrapped so that errors.Is(err, fs.ErrNotExist) holds for a remote
+		// absence exactly as it does for a local one -- callers that treat a
+		// missing file as an answer rather than a failure should not have to
+		// know which transport they are on.
+		return nil, fmt.Errorf("%s: %s: %w", url, resp.Status, fs.ErrNotExist)
+	default:
+		return nil, fmt.Errorf("%s: %s", url, resp.Status)
 	}
 	return h, nil
 }
