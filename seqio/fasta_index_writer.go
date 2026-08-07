@@ -38,14 +38,13 @@ func BuildFastaIndex(path string) ([]FaiEntry, error) {
 
 	var entries []FaiEntry
 	if magic[0] == 0x1f && magic[1] == 0x8b {
-		data, blocks, err := bgzf.WalkBlocks(f)
-		if err != nil {
+		// Streamed, not buffered: a human genome is ~3 GB uncompressed, and
+		// holding that to find block boundaries turns indexing into an OOM kill.
+		ir := bgzf.NewIndexingReader(f)
+		if entries, err = indexFasta(ir); err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
-		if entries, err = indexFasta(bytes.NewReader(data)); err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
-		if err := bgzf.WriteGZIndex(path+".gzi", blocks); err != nil {
+		if err := bgzf.WriteGZIndex(path+".gzi", ir.Blocks()); err != nil {
 			return nil, err
 		}
 	} else if entries, err = indexFasta(f); err != nil {
@@ -75,6 +74,13 @@ func indexFasta(r io.Reader) ([]FaiEntry, error) {
 	br := bufio.NewReaderSize(r, 1<<20)
 	for {
 		line, err := br.ReadBytes('\n')
+		// A read error is not end-of-input. Treating the two alike would turn a
+		// truncated or corrupt stream into a short index that looks complete —
+		// and, when the reader is decompressing, would swallow "this is not
+		// BGZF" entirely.
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
 		if len(line) == 0 && err != nil {
 			break
 		}
