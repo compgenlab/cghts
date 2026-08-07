@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -195,5 +196,52 @@ func TestBuildFastaIndexRejectsRaggedLines(t *testing.T) {
 	}
 	if _, err := BuildFastaIndex(p); err == nil {
 		t.Error("uneven line lengths were accepted")
+	}
+}
+
+// Indexing must not scale with the file.
+//
+// The first version of this decompressed the whole stream into a bytes.Buffer to
+// find block boundaries — which passes every correctness test and then dies on
+// the only input anyone cares about: a human genome is ~3 GB uncompressed, and
+// the worker was OOM-killed indexing GRCh38.
+//
+// The fixture is small next to a genome but large next to the working set, so
+// the assertion is about the *ratio*: peak heap must stay a small fraction of
+// the uncompressed size, not track it.
+func TestBuildFastaIndexDoesNotBufferTheFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates a multi-megabyte fixture")
+	}
+	dir := t.TempDir()
+	gz := filepath.Join(dir, "big.fa.gz")
+
+	// ~64 MB uncompressed across many blocks.
+	var b strings.Builder
+	line := strings.Repeat("ACGT", 15)
+	b.WriteString(">chr1 big\n")
+	for i := 0; i < 1_000_000; i++ {
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	body := b.String()
+	bgzipTo(t, gz, body)
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	if _, err := BuildFastaIndex(gz); err != nil {
+		t.Fatal(err)
+	}
+	runtime.ReadMemStats(&after)
+
+	// TotalAlloc grows with everything allocated, including per-block buffers,
+	// so compare live heap: a streaming implementation ends near where it
+	// started, a buffering one holds the whole file.
+	grew := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	uncompressed := int64(len(body))
+	if grew > uncompressed/4 {
+		t.Errorf("heap grew %d bytes indexing a %d-byte file — this is buffering "+
+			"the stream, which OOMs on a real genome", grew, uncompressed)
 	}
 }
