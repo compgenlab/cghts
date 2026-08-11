@@ -124,8 +124,36 @@ func TestTsTv(t *testing.T) {
 func TestAutoID(t *testing.T) {
 	h, recs := readRecs(t, "chr1\t100\trs9\tA\tG,T\t.\tPASS\t.\tGT\t0/0\t0/1")
 	setupAnnotate(t, h, recs, NewAutoID())
-	if got := recs[0].ID(); got != "chr1_100_A_G;chr1_100_A_T" {
+	// One identifier per alt, ';'-joined the way the ID column joins them.
+	if got := recs[0].ID(); got != "1-100-A-G;1-100-A-T" {
 		t.Errorf("auto-id = %q", got)
+	}
+}
+
+func TestVariantIDFormat(t *testing.T) {
+	cases := []struct {
+		chrom    string
+		pos      int
+		ref, alt string
+		want     string
+		why      string
+	}{
+		{"chr1", 115256529, "T", "C", "1-115256529-T-C", "the ordinary case"},
+		{"chrX", 9720345, "CCAGA", "C", "X-9720345-CCAGA-C", "a deletion keeps both alleles whole"},
+		{"chrM", 8993, "T", "G", "M-8993-T-G", "the mitochondrion is a contig like any other"},
+		// An assembly that never used the prefix is left alone, so one function
+		// is correct for UCSC-style and Ensembl-style names alike.
+		{"1", 100, "A", "T", "1-100-A-T", "nothing to trim"},
+		{"chrUn_GL000220v1", 5, "G", "A", "Un_GL000220v1-5-G-A", "an unplaced contig keeps the rest of its name"},
+		// "chr" with nothing after it is not a chromosome named "".
+		{"chr", 1, "A", "T", "chr-1-A-T", "a bare prefix is not a name to erase"},
+		{"CHR7", 140753336, "A", "T", "7-140753336-A-T", "case does not change what the prefix means"},
+	}
+	for _, c := range cases {
+		if got := VariantID(c.chrom, c.pos, c.ref, c.alt); got != c.want {
+			t.Errorf("VariantID(%q,%d,%q,%q) = %q, want %q — %s",
+				c.chrom, c.pos, c.ref, c.alt, got, c.want, c.why)
+		}
 	}
 }
 
@@ -282,7 +310,7 @@ func TestPipelineSerialization(t *testing.T) {
 	w.Close()
 
 	// ID set, QUAL reformatted (50.0->50), INFO has CG_TSTV, FORMAT gains CG_DS.
-	want := "chr1\t100\tchr1_100_A_G\tA\tG\t50\tPASS\tCG_TSTV=TS\tGT:AD:CG_DS\t0/0:14,1:0\t1/1:0,30:2\n"
+	want := "chr1\t100\t1-100-A-G\tA\tG\t50\tPASS\tCG_TSTV=TS\tGT:AD:CG_DS\t0/0:14,1:0\t1/1:0,30:2\n"
 	if buf.String() != want {
 		t.Errorf("pipeline output mismatch.\n got: %q\nwant: %q", buf.String(), want)
 	}
@@ -296,7 +324,7 @@ func TestTupleBuilderAnnotation(t *testing.T) {
 			t.Fatalf("annotate tuple: %v", err)
 		}
 	}
-	if rec.ID() != "chr1_100_A_G" {
+	if rec.ID() != "1-100-A-G" {
 		t.Errorf("tuple auto-id = %q", rec.ID())
 	}
 	if got := infoVal(t, rec, "CG_TSTV"); got != "TS" {

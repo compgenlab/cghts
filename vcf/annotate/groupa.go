@@ -7,24 +7,67 @@ import (
 	"github.com/compgenlab/cghts/vcf"
 )
 
-// AutoID sets the ID column to chrom_pos_ref_alt (one per alt, ';'-joined).
+// AutoID sets the ID column to a canonical variant identifier, one per alt,
+// ';'-joined:
+//
+//	1-115256529-T-C
+//	X-9720345-CCAGA-C
+//
+// The chromosome loses its "chr" and the four fields are joined with hyphens.
+// That is the form gnomAD, ClinGen and most variant portals use, so an id
+// written here can be pasted into one of them and an id from one of them
+// recognized here — which is the point of synthesizing one at all.
+//
+// It was chrom_pos_ref_alt before, which matched nothing in particular.
 type AutoID struct{ closeNoop }
 
 // NewAutoID returns an AutoID annotator (--auto-id).
 func NewAutoID() *AutoID { return &AutoID{} }
 
-// SetupHeader adds no header definitions.
+// SetupHeader adds no header definitions: this writes the ID column, which
+// every VCF already has.
 func (a *AutoID) SetupHeader(*vcf.VcfHeader) error { return nil }
 
 // Annotate sets the record ID.
+//
+// Multiple identifiers are ';'-joined, which is the ID column's own separator
+// for exactly that.
 func (a *AutoID) Annotate(rec *vcf.VcfRecord) error {
 	alt := rec.Alt()
 	ids := make([]string, len(alt))
 	for i, al := range alt {
-		ids[i] = rec.Chrom + "_" + strconv.Itoa(rec.Pos) + "_" + rec.Ref + "_" + al
+		ids[i] = VariantID(rec.Chrom, rec.Pos, rec.Ref, al)
 	}
 	rec.SetID(strings.Join(ids, ";"))
 	return nil
+}
+
+// VariantID renders one variant as "1-115256529-T-C".
+//
+// Exported because it is a format rather than an implementation detail:
+// anything producing or recognizing the same identifier should come through
+// here instead of rebuilding the string and drifting from it.
+//
+// Nothing is normalized beyond the chromosome. REF and ALT are written exactly
+// as they arrived and the position is the VCF position — no left-alignment, no
+// trimming of a shared first base. An identifier that quietly disagreed with the
+// row it labels would be worse than none.
+func VariantID(chrom string, pos int, ref, alt string) string {
+	return TrimChrom(chrom) + "-" + strconv.Itoa(pos) + "-" + ref + "-" + alt
+}
+
+// TrimChrom drops a leading "chr" from a contig name.
+//
+// Only that exact prefix, in any case, and only with something after it: the
+// convention is "chr1" and "chrUn_GL000220v1", and a contig genuinely named
+// "chr" is not one to render as the empty string. A name that never had the
+// prefix — "1", "GL000220.1" — comes back untouched, which is what makes this
+// safe on an assembly that does not use it.
+func TrimChrom(chrom string) string {
+	if len(chrom) > 3 && strings.EqualFold(chrom[:3], "chr") {
+		return chrom[3:]
+	}
+	return chrom
 }
 
 // ConstantTag adds a fixed INFO flag or key=value to every record.
