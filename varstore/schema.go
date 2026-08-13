@@ -186,6 +186,21 @@ type CalledSiteRun struct {
 	Start    int32  `parquet:"start"`
 	End      int32  `parquet:"end"`
 	NSites   int32  `parquet:"n_sites"`
+
+	// MinDP is the lowest depth seen anywhere inside the run: the tightest
+	// bound the source vouches for across the whole span.
+	//
+	// WITHOUT IT A REFERENCE CALL CARRIES NO CONFIDENCE. `0/0` is never stored,
+	// so a Ref is inferred from being inside a run -- and a run alone says only
+	// "at or above the conversion gate", which makes a reference at 60x and one
+	// at exactly 10x indistinguishable forever. That is fine until two sources
+	// disagree about a person, at which point the reference side of the
+	// argument has nothing to say.
+	//
+	// Zero in stores written before this column existed. Treat that as unknown
+	// and fall back to the manifest's MinDP, never as a depth of zero -- the
+	// same rule the schema already carries for RefEnd.
+	MinDP int32 `parquet:"min_dp"`
 }
 
 // The members of a store. A store IS a directory, and they sit inside it under
