@@ -202,6 +202,11 @@ func CodecFor(name string) (compress.Codec, error) {
 
 // WriterOpts configures a Parquet store writer.
 type WriterOpts struct {
+	// Sink is where the members are written. Nil means "work it out from the
+	// base", which is what every caller wants; it is settable so a test can
+	// supply one without a filesystem or a bucket.
+	Sink Sink
+
 	Codec        compress.Codec
 	RowGroupSize int64
 	Samples      []string
@@ -243,7 +248,11 @@ type Writer struct {
 	siteBuf   []Site
 	regionBuf []CalledSiteRun
 
-	files []*os.File
+	// The members being written, in creation order, with the names they will
+	// have. Held so Close can finish them and abort can undo them -- and named
+	// rather than handled, because a remote member has no file to name itself.
+	sink    Sink
+	members []memberSink
 
 	// base and opts are kept so Finish can describe the store without the
 	// caller having to hand back what it already passed to NewWriter.
@@ -292,6 +301,14 @@ func (w *Writer) census(chrom string, pos int32) *ChromCensus {
 
 const batchSize = 8192
 
+// memberSink is one store member being written: the writer it is fed through
+// and the file name it will have. Named around the sink because `member` and
+// `openMember` both already mean something on the reading side.
+type memberSink struct {
+	name string
+	sw   io.WriteCloser
+}
+
 // NewWriter creates the store directory at base and the member files inside it.
 //
 // The directory is created here rather than left to the caller because a store
@@ -315,25 +332,29 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	if o.Spans == "" {
 		o.Spans = SpansSites
 	}
-	if err := EnsureStoreDir(base); err != nil {
-		return nil, err
+	sink := o.Sink
+	if sink == nil {
+		var err error
+		if sink, err = OpenSink(base); err != nil {
+			return nil, err
+		}
 	}
 	// Remove any manifest before touching the members. From here until Finish
 	// the store is under construction and must not carry a completion marker --
 	// otherwise a --force re-run that dies partway would leave the previous
 	// run's manifest vouching for this run's half-written members.
-	if err := os.Remove(ManifestPath(base)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := sink.Remove(ManifestFile); err != nil {
 		return nil, fmt.Errorf("clearing previous manifest: %w", err)
 	}
-	w := &Writer{base: base, opts: o}
+	w := &Writer{base: base, opts: o, sink: sink}
 
-	open := func(path string) (*os.File, error) {
-		f, err := os.Create(path)
+	open := func(name string) (io.Writer, error) {
+		f, err := sink.Create(name)
 		if err != nil {
 			_ = w.abort()
 			return nil, err
 		}
-		w.files = append(w.files, f)
+		w.members = append(w.members, memberSink{name: name, sw: f})
 		return f, nil
 	}
 
@@ -353,7 +374,7 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	callOpts := append(append([]parquet.WriterOption{}, sortedByLocus...),
 		parquet.BloomFilters(parquet.SplitBlockFilter(10, "sample_id")))
 
-	cf, err := open(CallsPath(base))
+	cf, err := open(MemberFile(CallsMember))
 	if err != nil {
 		return nil, err
 	}
@@ -374,13 +395,13 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 		w.calls.SetKeyValueMetadata(MetaNoCall, "1")
 	}
 
-	sf, err := open(SitesPath(base))
+	sf, err := open(MemberFile(SitesMember))
 	if err != nil {
 		return nil, err
 	}
 	w.sites = parquet.NewGenericWriter[Site](sf, sortedByLocus...)
 
-	rf, err := open(RegionsPath(base))
+	rf, err := open(MemberFile(RegionsMember))
 	if err != nil {
 		return nil, err
 	}
@@ -407,18 +428,30 @@ func (w *Writer) abort() error {
 	// A --force re-run over a previous store is the case where a stale one could
 	// survive, and a completion marker sitting beside discarded members is the
 	// worst outcome available.
-	if err := os.Remove(ManifestPath(w.base)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		errs = append(errs, fmt.Errorf("removing %s: %w", ManifestPath(w.base), err))
+	if err := w.sink.Remove(ManifestFile); err != nil {
+		errs = append(errs, fmt.Errorf("removing %s: %w", ManifestFile, err))
 	}
-	for _, f := range w.files {
+	aborter, remote := w.sink.(Aborter)
+	for _, m := range w.members {
+		// ABANDON where a member only becomes visible when it is finished, and
+		// UNLINK where it is visible as it is written. On an object store there
+		// is no half-written member to delete -- what exists is an upload in
+		// progress, and Remove would delete nothing while leaving its parts
+		// behind, invisible to a listing and billed.
+		if remote {
+			if err := aborter.Abort(m.name); err != nil {
+				errs = append(errs, err)
+			}
+			continue
+		}
 		// The handle may already be closed by a failed Close; the unlink is the
 		// part that matters, so the close error is not interesting here.
-		f.Close()
-		if err := os.Remove(f.Name()); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("removing %s: %w", f.Name(), err))
+		m.sw.Close()
+		if err := w.sink.Remove(m.name); err != nil {
+			errs = append(errs, fmt.Errorf("removing %s: %w", m.name, err))
 		}
 	}
-	w.files = nil
+	w.members = nil
 	return errors.Join(errs...)
 }
 
@@ -459,7 +492,7 @@ func (w *Writer) Finish() error {
 	if err != nil {
 		return errors.Join(err, w.Discard())
 	}
-	if err := WriteManifest(w.base, m); err != nil {
+	if err := WriteManifestTo(w.sink, m); err != nil {
 		return errors.Join(err, w.Discard())
 	}
 	return nil
@@ -474,11 +507,14 @@ func (w *Writer) manifest() (Manifest, error) {
 		SitesMember:   w.NSites,
 		RegionsMember: w.NRegions,
 	} {
-		st, err := os.Stat(MemberPath(w.base, member))
+		size, ok, err := w.sink.Stat(MemberFile(member))
 		if err != nil {
 			return Manifest{}, fmt.Errorf("sizing %s member: %w", member, err)
 		}
-		members[member] = MemberInfo{Rows: rows, Bytes: st.Size()}
+		if !ok {
+			return Manifest{}, fmt.Errorf("the %s member is missing from %s", member, w.sink.Describe())
+		}
+		members[member] = MemberInfo{Rows: rows, Bytes: size}
 	}
 	return Manifest{
 		FormatVersion: ManifestVersion,
@@ -623,9 +659,9 @@ func (w *Writer) Close() error {
 // closeFiles releases the underlying handles without removing anything.
 func (w *Writer) closeFiles() error {
 	var errs []error
-	for _, f := range w.files {
-		if err := f.Close(); err != nil {
-			errs = append(errs, err)
+	for _, m := range w.members {
+		if err := m.sw.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("finishing %s: %w", m.name, err))
 		}
 	}
 	return errors.Join(errs...)
