@@ -265,3 +265,44 @@ func (r InfoRow) value(column string) (parquet.Value, bool) {
 	}
 	return r.row[i], true
 }
+
+// Depth banding for callable runs.
+//
+// THE PROBLEM IT SOLVES. A run means "called at or above the gate throughout",
+// and recording the lowest depth inside it gives a Ref call a confidence it
+// otherwise has none of. But one poorly covered base drags a whole run's bound
+// down: a megabase at 60x containing a single site at 11x reports MinDP 11, and
+// every reference call across that span inherits the worst moment in it.
+//
+// Banding is the standard answer, and it is what a gVCF does. Break the run
+// when depth crosses a boundary, so each run spans a depth CLASS rather than an
+// arbitrary stretch. Bounds stay tight, and run counts grow only where coverage
+// is genuinely ragged -- for 30x WGS most of the genome sits inside one band and
+// the extra breaks are few.
+//
+// The boundaries are recorded in the manifest, because two stores banded
+// differently do not mean the same thing by a run and a consumer comparing
+// their MinDP values across parts needs to know.
+
+// DefaultDepthBands are the boundaries a conversion uses unless told otherwise.
+//
+// 10/20/50 spans the range that actually changes an answer: below 10 nothing is
+// callable under the usual gate, 20 is comfortable for a het, and past 50 the
+// extra depth stops changing what anyone would believe.
+var DefaultDepthBands = []int32{10, 20, 50}
+
+// DepthBand returns the index of the band a depth falls in, or -1 when bands
+// are not in use. Depths below the first boundary share band 0 with it, since
+// they are already excluded by the gate.
+func DepthBand(bands []int32, dp int32) int {
+	if len(bands) == 0 {
+		return -1
+	}
+	band := 0
+	for i, b := range bands {
+		if dp >= b {
+			band = i
+		}
+	}
+	return band
+}

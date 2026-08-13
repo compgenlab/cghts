@@ -77,6 +77,15 @@ type ManifestParams struct {
 	RowGroupSize  int64         `json:"row_group_size"`
 	SpanSemantics SpanSemantics `json:"span_semantics"`
 
+	// DepthBands are the boundaries at which callable runs were broken, empty
+	// when they were not banded.
+	//
+	// Recorded because two stores banded differently do not mean the same thing
+	// by a run: the same MinDP describes a tight class in one and a whole
+	// chromosome arm in the other, and a consumer comparing them across parts
+	// has no other way to find out.
+	DepthBands []int32 `json:"depth_bands,omitempty"`
+
 	// Info are the INFO fields captured into sites.parquet, if any.
 	//
 	// THIS IS THE ONLY PLACE ABSENCE IS ANSWERABLE. A typed reader gets a zero
