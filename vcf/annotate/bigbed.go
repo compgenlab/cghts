@@ -32,6 +32,11 @@ type BigBedOptions struct {
 
 	// AutoConvert matches contig names across UCSC/Ensembl/NCBI naming.
 	AutoConvert bool
+	// Type declares what the copied value is, for the ##INFO/##FORMAT def.
+	// Empty falls back to IsNumber (Float when set, else String). See
+	// [InfoType] — a column is text on the way in and only the caller knows
+	// whether it holds a score or a label.
+	Type InfoType
 }
 
 // BigBedAnnotator adds an INFO or FORMAT annotation from a bigBed file — a column
@@ -87,9 +92,9 @@ func (a *BigBedAnnotator) SetupHeader(h *vcf.VcfHeader) error {
 		h.AddInfo(infoDefSrc(a.opts.Name, "0", "Flag", "Present in bigBed file", a.opts.Filename))
 		return nil
 	}
-	typ := "String"
-	if a.opts.IsNumber {
-		typ = "Float"
+	typ, err := resolveInfoType(a.opts.Type, a.opts.IsNumber)
+	if err != nil {
+		return err
 	}
 	desc := fmt.Sprintf("Column %d from bigBed", a.col+1)
 	if a.opts.Sample != "" {

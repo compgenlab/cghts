@@ -42,6 +42,11 @@ type TabixOptions struct {
 	// Ownership transfers: Close releases it, exactly as it would a reader this
 	// package opened itself.
 	Reader *tabix.Reader
+	// Type declares what the copied value is, for the ##INFO/##FORMAT def.
+	// Empty falls back to IsNumber (Float when set, else String). See
+	// [InfoType] — a column is text on the way in and only the caller knows
+	// whether it holds a score or a label.
+	Type InfoType
 }
 
 // TabixAnnotator adds INFO or FORMAT annotations from a tabix-indexed file. It
@@ -124,9 +129,9 @@ func (a *TabixAnnotator) SetupHeader(h *vcf.VcfHeader) error {
 		h.AddInfo(infoDefSrc(a.opts.Name, "0", "Flag", "Present in Tabix file", a.opts.Filename))
 		return nil
 	}
-	typ := "String"
-	if a.opts.IsNumber {
-		typ = "Float"
+	typ, err := resolveInfoType(a.opts.Type, a.opts.IsNumber)
+	if err != nil {
+		return err
 	}
 	desc := fmt.Sprintf("Column %d from file", a.col+1)
 	if a.opts.Sample != "" {
@@ -272,6 +277,11 @@ type TabixFieldOptions struct {
 	First    bool   // keep only the first value
 	Max      bool   // keep the numeric maximum
 	NoHeader bool   // do not add a def
+	// Type declares what the copied value is, for the ##INFO/##FORMAT def.
+	// Empty falls back to IsNumber (Float when set, else String). See
+	// [InfoType] — a column is text on the way in and only the caller knows
+	// whether it holds a score or a label.
+	Type InfoType
 }
 
 // TabixGroupOptions configures a [TabixAnnotationGroup]: one tabix-indexed source and
@@ -302,6 +312,7 @@ type tabixRule struct {
 	first     bool
 	max       bool
 	noHeader  bool
+	typ       InfoType
 }
 
 // TabixAnnotationGroup adds several INFO/FORMAT annotations from one tabix source
@@ -366,7 +377,7 @@ func NewTabixAnnotationGroup(opts TabixGroupOptions) (*TabixAnnotationGroup, err
 		}
 		g.rules = append(g.rules, tabixRule{
 			name: f.Name, sample: f.Sample, sampleIdx: -1,
-			col: col - 1, isNumber: f.IsNumber,
+			col: col - 1, isNumber: f.IsNumber, typ: f.Type,
 			collapse: f.Collapse, first: f.First, max: f.Max, noHeader: f.NoHeader,
 		})
 	}
@@ -398,9 +409,9 @@ func (g *TabixAnnotationGroup) SetupHeader(h *vcf.VcfHeader) error {
 			h.AddInfo(infoDefSrc(r.name, "0", "Flag", "Present in Tabix file", g.filename))
 			continue
 		}
-		typ := "String"
-		if r.isNumber {
-			typ = "Float"
+		typ, err := resolveInfoType(r.typ, r.isNumber)
+		if err != nil {
+			return err
 		}
 		desc := fmt.Sprintf("Column %d from file", r.col+1)
 		if r.sample != "" {
