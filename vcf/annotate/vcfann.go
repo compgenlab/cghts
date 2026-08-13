@@ -20,6 +20,11 @@ type VcfOptions struct {
 	Unique   bool   // de-duplicate (sorted) when multiple values match
 	NoHeader bool   // do not add a ##INFO def
 
+	// Type declares what the copied value is, for the ##INFO def. Empty means
+	// String — the source is a VCF and its INFO values are text on the way in,
+	// so nothing here can tell a score from a label. See [InfoType].
+	Type InfoType
+
 	// AutoConvert matches contig names across UCSC/Ensembl/NCBI naming (human
 	// primary contigs 1-22,X,Y,MT) instead of requiring an exact-string match.
 	AutoConvert bool
@@ -82,9 +87,13 @@ func (a *VcfAnnotation) SetupHeader(h *vcf.VcfHeader) error {
 	suffix := vcfModifierSuffix(a.opts.Passing, a.opts.Exact, a.opts.Unique)
 	if a.opts.Field == "" { // flag
 		h.AddInfo(infoDefSrc(a.opts.Name, "0", "Flag", "Present in VCF file"+suffix, a.opts.Filename))
-	} else {
-		h.AddInfo(infoDefSrc(a.opts.Name, "1", "String", a.opts.Field+" from VCF file"+suffix, a.opts.Filename))
+		return nil
 	}
+	typ, err := resolveInfoType(a.opts.Type, false)
+	if err != nil {
+		return err
+	}
+	h.AddInfo(infoDefSrc(a.opts.Name, "1", typ, a.opts.Field+" from VCF file"+suffix, a.opts.Filename))
 	return nil
 }
 
@@ -165,6 +174,7 @@ type VcfFieldOptions struct {
 	Passing  bool   // only consider source records that pass filters
 	Unique   bool   // de-duplicate (sorted) when multiple values match
 	NoHeader bool   // do not add a ##INFO def
+	Type     InfoType // declared type of the copied value; empty = String
 }
 
 // VcfGroupOptions configures a [VcfAnnotationGroup]: one tabix-indexed source VCF and
@@ -188,6 +198,7 @@ type vcfRule struct {
 	unique   bool
 	noHeader bool
 	isID     bool
+	typ      InfoType
 }
 
 // VcfAnnotationGroup annotates a record with several fields from one source VCF using
@@ -222,7 +233,7 @@ func NewVcfAnnotationGroup(opts VcfGroupOptions) (*VcfAnnotationGroup, error) {
 		}
 		g.rules = append(g.rules, vcfRule{
 			name: f.Name, field: f.Field, exact: f.Exact, passing: f.Passing,
-			unique: f.Unique, noHeader: f.NoHeader, isID: isID,
+			unique: f.Unique, noHeader: f.NoHeader, isID: isID, typ: f.Type,
 		})
 	}
 	if opts.AutoConvert {
@@ -247,9 +258,13 @@ func (g *VcfAnnotationGroup) SetupHeader(h *vcf.VcfHeader) error {
 		suffix := vcfModifierSuffix(r.passing, r.exact, r.unique)
 		if r.field == "" {
 			h.AddInfo(infoDefSrc(r.name, "0", "Flag", "Present in VCF file"+suffix, g.filename))
-		} else {
-			h.AddInfo(infoDefSrc(r.name, "1", "String", r.field+" from VCF file"+suffix, g.filename))
+			continue
 		}
+		typ, err := resolveInfoType(r.typ, false)
+		if err != nil {
+			return err
+		}
+		h.AddInfo(infoDefSrc(r.name, "1", typ, r.field+" from VCF file"+suffix, g.filename))
 	}
 	return nil
 }

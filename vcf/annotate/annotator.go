@@ -18,8 +18,61 @@
 package annotate
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/compgenlab/cghts/vcf"
 )
+
+// InfoType is the declared type of an INFO or FORMAT value, spelled as the VCF
+// specification spells it.
+//
+// It exists because only the caller knows. An annotator that copies a value out
+// of a source — a VCF INFO field, a tabix column, a bigBed column — sees text
+// and cannot tell a score from a label, so the type has to be declared by
+// whoever set the annotation up. Annotators that compute their own value
+// (bigWig, variant distance, flanking bases) know it already and take none.
+//
+// Guessing is worse than it looks: a numeric field declared String reads as a
+// string to every consumer, so a downstream tool sorts "10" before "9" and
+// filters on it lexically. The file is well-formed and the numbers are right;
+// only the declaration is wrong, which is why nothing catches it.
+type InfoType string
+
+// The types a VCF INFO or FORMAT value may declare.
+const (
+	TypeInteger   InfoType = "Integer"
+	TypeFloat     InfoType = "Float"
+	TypeFlag      InfoType = "Flag"
+	TypeCharacter InfoType = "Character"
+	TypeString    InfoType = "String"
+)
+
+// resolveInfoType returns the type to declare for a copied value.
+//
+// An unset type falls back to isNumber, the older two-valued way of saying the
+// same thing and still what most callers pass. Setting both is not an error —
+// Type wins, being the more specific statement.
+//
+// Matching is case-insensitive, so "float" out of a config file is accepted. An
+// unrecognised type is an error rather than a silent String: a caller who wrote
+// "Double" meant something, and quietly declaring the opposite of what they
+// asked for is how a wrong type reaches a file nobody reads again.
+func resolveInfoType(t InfoType, isNumber bool) (string, error) {
+	if t == "" {
+		if isNumber {
+			return string(TypeFloat), nil
+		}
+		return string(TypeString), nil
+	}
+	for _, known := range []InfoType{TypeInteger, TypeFloat, TypeFlag, TypeCharacter, TypeString} {
+		if strings.EqualFold(string(t), string(known)) {
+			return string(known), nil
+		}
+	}
+	return "", fmt.Errorf("annotate: unknown INFO type %q (want %s, %s, %s, %s or %s)",
+		string(t), TypeInteger, TypeFloat, TypeFlag, TypeCharacter, TypeString)
+}
 
 // Annotator reads a variant record and writes annotations (INFO/FORMAT/ID) back
 // onto it. SetupHeader declares the ##INFO/##FORMAT defs the annotator adds.
