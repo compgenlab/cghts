@@ -173,3 +173,83 @@ func equal(a, b []string) bool {
 }
 
 var _ = fmt.Sprintf
+
+// The overwrite guard has to mean the same thing wherever the store is going.
+//
+// It used to stat local paths, so against a remote base it found nothing and
+// waved through exactly the overwrite it exists to prevent -- silently, because
+// the members it looks for cannot be seen with os.Stat. This is that case: a
+// sink holding a store, asked whether it may be written over.
+func TestTheOverwriteGuardSeesMembersInAnySink(t *testing.T) {
+	sink := newMemSink()
+
+	// Nothing there yet.
+	if err := CheckStoreTargetIn(sink, false); err != nil {
+		t.Fatalf("refused an empty destination: %v", err)
+	}
+
+	// Write a store into it, then ask again.
+	w, err := NewWriter("memory://store", WriterOpts{Sink: sink, Samples: []string{"S1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Finish(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = CheckStoreTargetIn(sink, false)
+	if err == nil {
+		t.Fatal("a populated destination was accepted; this is the silent-overwrite case")
+	}
+	// The reader has to be able to go and look at what stopped them.
+	if !strings.Contains(err.Error(), "calls.parquet") {
+		t.Errorf("the refusal does not name a member: %v", err)
+	}
+	if CheckStoreTargetIn(sink, true) != nil {
+		t.Error("--force did not override the guard")
+	}
+}
+
+// A partial set stops it too: the members are only meaningful together, so a
+// half-replaced store is worse than either keeping or replacing the old one.
+func TestASingleSurvivingMemberIsEnoughToStop(t *testing.T) {
+	sink := newMemSink()
+	w, err := NewWriter("memory://store", WriterOpts{Sink: sink, Samples: []string{"S1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"calls.parquet", "regions.parquet", ManifestFile} {
+		if err := sink.Remove(n); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err = CheckStoreTargetIn(sink, false)
+	if err == nil {
+		t.Fatal("a lone surviving member was not enough to stop an overwrite")
+	}
+	if !strings.Contains(err.Error(), "sites.parquet") {
+		t.Errorf("the refusal does not name the survivor: %v", err)
+	}
+}
+
+// EnsureStoreDir is for local paths, and says so rather than making a mess.
+//
+// On an s3:// locator it used to reach MkdirAll and create a local directory
+// literally named "s3:", which is a confusing thing to find and says nothing
+// about why the store was not written.
+func TestEnsureStoreDirRefusesARemoteBase(t *testing.T) {
+	err := EnsureStoreDir("s3://bucket/cohort")
+	if err == nil {
+		t.Fatal("EnsureStoreDir accepted an s3:// base; it would create a local `s3:` directory")
+	}
+	if !strings.Contains(err.Error(), "s3") {
+		t.Errorf("the error does not name the scheme: %v", err)
+	}
+	if err := EnsureStoreDir(t.TempDir() + "/store"); err != nil {
+		t.Errorf("EnsureStoreDir refused a local path: %v", err)
+	}
+}
