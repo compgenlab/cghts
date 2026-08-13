@@ -265,17 +265,45 @@ func RegionsPath(base string) string { return MemberPath(base, RegionsMember) }
 
 // EnsureStoreDir creates the directory a store lives in.
 //
+// LOCAL PATHS ONLY, and a remote base is an error rather than a no-op: on an
+// s3:// locator this used to reach MkdirAll and create a local directory
+// literally named "s3:". Callers that may be handed either should go through a
+// Sink, which creates whatever its destination needs when a member is created
+// -- there is nothing to make in advance on an object store.
+//
 // Note that it is not undone if the conversion later fails, so an abandoned run
 // can leave an empty directory behind. That is harmless -- ExistingMembers finds
 // nothing in it, so the retry is not blocked -- but it does mean the presence of
 // a directory says nothing about whether a store is there.
 func EnsureStoreDir(base string) error {
+	if scheme := schemeOf(base); scheme != "" {
+		return fmt.Errorf(
+			"varstore: EnsureStoreDir is for local paths; %s is a %s locator and its sink creates what it needs",
+			base, scheme)
+	}
 	return os.MkdirAll(trimStoreDir(base), 0o755)
+}
+
+// MemberFiles are the members a store is made of, manifest included, in the
+// order a conversion writes them.
+//
+// The manifest counts as a member here because a conversion writes one and
+// removes one: leaving it out of an overwrite check would let a re-run orphan a
+// marker vouching for members it replaced.
+func MemberFiles() []string {
+	return []string{
+		MemberFile(CallsMember), MemberFile(SitesMember),
+		MemberFile(RegionsMember), ManifestFile,
+	}
 }
 
 // ExistingMembers lists which member files already exist at base, the manifest
 // included: it is written by a conversion and removed by one, so leaving it out
 // would let a re-run silently orphan a marker vouching for members it replaced.
+//
+// LOCAL PATHS ONLY. Use ExistingMembersIn for a base that may be remote -- this
+// one answers "none" for every locator it cannot stat, which is the wrong
+// answer in the one direction that matters.
 func ExistingMembers(base string) []string {
 	var found []string
 	for _, m := range []string{CallsMember, SitesMember, RegionsMember} {
@@ -289,20 +317,51 @@ func ExistingMembers(base string) []string {
 	return found
 }
 
-// CheckStoreTarget refuses to write over an existing store unless force is set.
-//
-// Conversion truncates every member, so an accidental re-run against a populated
-// directory destroys the previous store outright -- and because the members are
-// only meaningful together, a half-replaced set is worse than either outcome.
-// Any single surviving member is therefore enough to stop.
-//
-// The check keys on the members, not on the directory, so pointing --out at an
-// existing directory that holds unrelated files is fine and leaves them alone.
+// ExistingMembersIn lists the members already present in a sink, by locator.
+func ExistingMembersIn(sink Sink) ([]string, error) {
+	var found []string
+	for _, name := range MemberFiles() {
+		size, ok, err := sink.Stat(name)
+		_ = size
+		if err != nil {
+			return nil, fmt.Errorf("checking %s in %s: %w", name, sink.Describe(), err)
+		}
+		if ok {
+			found = append(found, joinStore(sink.Describe(), name))
+		}
+	}
+	return found, nil
+}
+
 func CheckStoreTarget(base string, force bool) error {
 	if force {
 		return nil
 	}
-	if existing := ExistingMembers(base); len(existing) > 0 {
+	// THROUGH A SINK, so the check means the same thing wherever the store is
+	// going. It used to stat local paths, which against a remote base found
+	// nothing and waved through exactly the overwrite it exists to prevent --
+	// silently, because the members it looks for cannot be seen with os.Stat.
+	sink, err := OpenSink(base)
+	if err != nil {
+		return err
+	}
+	return CheckStoreTargetIn(sink, force)
+}
+
+// CheckStoreTargetIn is CheckStoreTarget against a sink the caller already has.
+//
+// Worth using when the caller goes on to write through that same sink: opening
+// the destination twice is how the check and the writer come to disagree about
+// where the store is.
+func CheckStoreTargetIn(sink Sink, force bool) error {
+	if force {
+		return nil
+	}
+	existing, err := ExistingMembersIn(sink)
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 {
 		return fmt.Errorf("refusing to overwrite an existing store: %s; pass --force to replace it",
 			strings.Join(existing, ", "))
 	}
