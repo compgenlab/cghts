@@ -232,3 +232,49 @@ func CallFor(rec *vcf.VcfRecord, sample string, sf SampleFields, altIdx int, alt
 		GQ:     sf.GQ,
 	}, true
 }
+
+// IsHomAlt reports whether a RECODED genotype is homozygous for the focal
+// allele: every called allele is the focal one.
+//
+// Recoded, which matters -- a store's GT has already been rewritten per ALT, so
+// the focal allele is 1, reference is 0, and any other alternate is ".". A 1/2
+// sample therefore reads as "1/." on the focal allele's row.
+func IsHomAlt(gt string) bool {
+	alleles := gtAlleles(gt)
+	if len(alleles) == 0 {
+		return false
+	}
+	for _, a := range alleles {
+		if a != "1" {
+			return false
+		}
+	}
+	return true
+}
+
+// IsHet reports whether a recoded genotype is a CLEAN heterozygote: exactly the
+// focal allele and the reference.
+//
+// Deliberately excludes 1/. -- a sample carrying the focal allele and some other
+// alternate. Its AD holds reads for the reference and the focal allele, and the
+// third allele's reads are somewhere else or nowhere, so the alt fraction is not
+// a quantity an allele-balance threshold can be applied to. Gating it on a
+// number that does not describe it would discard real compound carriers.
+func IsHet(gt string) bool {
+	alleles := gtAlleles(gt)
+	if len(alleles) != 2 {
+		return false
+	}
+	var ref, focal int
+	for _, a := range alleles {
+		switch a {
+		case "0":
+			ref++
+		case "1":
+			focal++
+		default:
+			return false
+		}
+	}
+	return ref == 1 && focal == 1
+}

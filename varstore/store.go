@@ -111,6 +111,40 @@ type Gate struct {
 	// disagree about which samples are reference. Set it only where every row
 	// carries a recorded GQ.
 	MinGQ int32
+
+	// The allele-balance gates, which catch what depth cannot.
+	//
+	// A het called on AD=(50,2) has a depth of 52 and sails through any DP
+	// gate, but 4% alt reads is contamination or mismapping rather than a
+	// heterozygote. Depth says how hard a site was looked at; these say whether
+	// what was seen there looks like the genotype claimed.
+	//
+	// THEY GATE, THEY DO NOT RE-CALL. A call that fails becomes uncertain --
+	// never a different genotype, and never a reference. The caller had local
+	// realignment, haplotype assembly and population priors when it decided,
+	// and none of that is recoverable from AD; the only honest thing a reader
+	// of AD can do is decline to believe.
+	//
+	// Applied at QUERY time rather than baked at conversion, because AD is
+	// stored on every ALT call. Nothing is lost by deciding later, a threshold
+	// that turns out wrong costs a re-query rather than a re-conversion, and
+	// parts cannot come to disagree about it -- unlike MinDP, which conversion
+	// bakes into the callable runs.
+
+	// MinADAlt is the fewest alt-supporting reads a carrier call may rest on.
+	MinADAlt int32
+
+	// MinABHet is the smallest allele balance -- AD_alt / (AD_ref + AD_alt) --
+	// a heterozygous call may have. A true het sits near 0.5.
+	//
+	// ALLELE BALANCE, NOT ALLELE FREQUENCY. This is one sample's reads at one
+	// site. AF in this package is AC/AN over a population, and a filter that
+	// confused the two would look entirely reasonable and mean something else.
+	MinABHet float64
+
+	// MaxRefFracHom is the largest share of reference reads a homozygous-alt
+	// call may carry. A 1/1 at AD=(20,25) is a het.
+	MaxRefFracHom float64
 }
 
 // Admits reports whether a call passes the gate. Missing values pass.
@@ -133,11 +167,39 @@ func (g Gate) Admits(c Call) bool {
 	if g.MinGQ > 0 && c.GQ != Missing && c.GQ < g.MinGQ {
 		return false
 	}
+
+	// Allele depths are frequently absent -- a gVCF reference block carries
+	// none, and some callers omit AD entirely. Missing passes, like every other
+	// gate here: a threshold cannot refuse evidence that was never recorded
+	// without silently discarding whole callsets.
+	if c.ADRef == Missing && c.ADAlt == Missing {
+		return true
+	}
+	if g.MinADAlt > 0 && c.ADAlt != Missing && c.ADAlt < g.MinADAlt {
+		return false
+	}
+	total := float64(c.ADRef) + float64(c.ADAlt)
+	if total <= 0 {
+		return true
+	}
+	if g.MinABHet > 0 && IsHet(c.GT) {
+		if float64(c.ADAlt)/total < g.MinABHet {
+			return false
+		}
+	}
+	if g.MaxRefFracHom > 0 && IsHomAlt(c.GT) {
+		if float64(c.ADRef)/total > g.MaxRefFracHom {
+			return false
+		}
+	}
 	return true
 }
 
 // IsZero reports whether the gate constrains nothing.
-func (g Gate) IsZero() bool { return g.MinDP <= 0 && g.MinGQ <= 0 }
+func (g Gate) IsZero() bool {
+	return g.MinDP <= 0 && g.MinGQ <= 0 && g.MinADAlt <= 0 &&
+		g.MinABHet <= 0 && g.MaxRefFracHom <= 0
+}
 
 // Query selects sites on one axis and samples on the other.
 //

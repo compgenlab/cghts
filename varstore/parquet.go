@@ -215,6 +215,12 @@ type WriterOpts struct {
 	Program      string
 	Command      string
 
+	// DepthBands are the boundaries at which a callable run is broken, so each
+	// run spans one depth class and its MinDP is a tight bound rather than the
+	// worst moment in an arbitrary stretch. Empty leaves runs unbanded, which is
+	// what every store written before this existed is.
+	DepthBands []int32
+
 	// Info are INFO fields to capture from the source into sites.parquet, each
 	// as its own typed column. Empty -- the usual case -- writes exactly the
 	// schema this store has always had. See info.go for why these are columns
@@ -577,6 +583,7 @@ func (w *Writer) manifest() (Manifest, error) {
 			NoCallable:    w.opts.NoCallable,
 			RowGroupSize:  w.opts.RowGroupSize,
 			SpanSemantics: w.opts.Spans,
+			DepthBands:    w.opts.DepthBands,
 			Info:          w.opts.Info,
 		},
 		Samples: w.opts.Samples,
@@ -1621,6 +1628,18 @@ func (s *ParquetStore) Sites(fn func(Site) bool) error {
 		return fmt.Errorf("%s is missing", SitesPath(s.base))
 	}
 	return scanParquet(s.sites, fn)
+}
+
+// Regions walks the callable runs.
+//
+// The counterpart to Sites, and the way a consumer inspects what a reference
+// call rests on: a run carries the span, the site count and -- since depth
+// banding -- the lowest depth vouched for across the whole of it.
+func (s *ParquetStore) Regions(fn func(CalledSiteRun) bool) error {
+	if !s.hasRegions {
+		return fmt.Errorf("%s is missing", RegionsPath(s.base))
+	}
+	return scanParquet(s.regions, fn)
 }
 
 // InfoFields reports the INFO fields this store captured, nil if none.
