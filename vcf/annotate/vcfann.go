@@ -93,7 +93,8 @@ func (a *VcfAnnotation) SetupHeader(h *vcf.VcfHeader) error {
 	if err != nil {
 		return err
 	}
-	h.AddInfo(infoDefSrc(a.opts.Name, "1", typ, a.opts.Field+" from VCF file"+suffix, a.opts.Filename))
+	h.AddInfo(infoDefSrc(a.opts.Name, infoNumberFor(a.opts.Exact), typ,
+		a.opts.Field+" from VCF file"+suffix, a.opts.Filename))
 	return nil
 }
 
@@ -119,7 +120,8 @@ func (a *VcfAnnotation) Annotate(rec *vcf.VcfRecord) error {
 		return err
 	}
 
-	var vals []string
+	var vals []string                        // position match: a list for the locus
+	byAlt := make([][]string, len(rec.Alt())) // exact match: one bucket per ALT
 	for src, err := range seq {
 		if err != nil {
 			return err
@@ -130,8 +132,14 @@ func (a *VcfAnnotation) Annotate(rec *vcf.VcfRecord) error {
 		if a.opts.Passing && src.IsFiltered() {
 			continue
 		}
-		if a.opts.Exact && !altRefMatch(src, rec) {
-			continue
+		// Which alleles this source record answers for, not merely whether it
+		// answers for any. That distinction is the whole fix: the value has to
+		// go to the allele it describes.
+		var alts []int
+		if a.opts.Exact {
+			if alts = altMatches(src, rec); len(alts) == 0 {
+				continue
+			}
 		}
 
 		if a.isID { // --vcf-id: copy the source ID and finish
@@ -142,17 +150,30 @@ func (a *VcfAnnotation) Annotate(rec *vcf.VcfRecord) error {
 			rec.AddInfoFlag(a.opts.Name)
 			return nil
 		}
+		var val string
 		if a.opts.Field == "@ID" {
-			if id := src.ID(); id != "" {
-				vals = append(vals, id)
-			}
+			val = src.ID()
 		} else if v, ok := src.InfoValue(a.opts.Field); ok {
-			if s := v.String(); s != "" {
-				vals = append(vals, s)
-			}
+			val = v.String()
 		}
+		if val == "" {
+			continue
+		}
+		if a.opts.Exact {
+			for _, i := range alts {
+				byAlt[i] = append(byAlt[i], val)
+			}
+			continue
+		}
+		vals = append(vals, val)
 	}
 
+	if a.opts.Exact {
+		if field, ok := perAlleleField(byAlt, a.opts.Unique); ok {
+			rec.AddInfo(a.opts.Name, field)
+		}
+		return nil
+	}
 	if len(vals) > 0 {
 		if a.opts.Unique {
 			vals = sortedUnique(vals)
@@ -264,7 +285,8 @@ func (g *VcfAnnotationGroup) SetupHeader(h *vcf.VcfHeader) error {
 		if err != nil {
 			return err
 		}
-		h.AddInfo(infoDefSrc(r.name, "1", typ, r.field+" from VCF file"+suffix, g.filename))
+		h.AddInfo(infoDefSrc(r.name, infoNumberFor(r.exact), typ,
+			r.field+" from VCF file"+suffix, g.filename))
 	}
 	return nil
 }
@@ -291,7 +313,14 @@ func (g *VcfAnnotationGroup) Annotate(rec *vcf.VcfRecord) error {
 		return err
 	}
 
-	vals := make([][]string, len(g.rules))
+	nAlt := len(rec.Alt())
+	vals := make([][]string, len(g.rules))     // position match: a list per rule
+	byAlt := make([][][]string, len(g.rules))  // exact match: one bucket per ALT
+	for i := range g.rules {
+		if g.rules[i].exact {
+			byAlt[i] = make([][]string, nAlt)
+		}
+	}
 	done := make([]bool, len(g.rules)) // @ID / flag rules: set once
 
 	for src, err := range seq {
@@ -302,7 +331,10 @@ func (g *VcfAnnotationGroup) Annotate(rec *vcf.VcfRecord) error {
 			continue
 		}
 		filtered := src.IsFiltered()
-		arMatch := altRefMatch(src, rec)
+		// Which alleles this source record answers for, computed once and
+		// shared by every exact rule — they all ask the same question of the
+		// same pair of records.
+		alts := altMatches(src, rec)
 		for i := range g.rules {
 			r := &g.rules[i]
 			if done[i] {
@@ -311,7 +343,7 @@ func (g *VcfAnnotationGroup) Annotate(rec *vcf.VcfRecord) error {
 			if r.passing && filtered {
 				continue
 			}
-			if r.exact && !arMatch {
+			if r.exact && len(alts) == 0 {
 				continue
 			}
 			if r.isID {
@@ -324,20 +356,33 @@ func (g *VcfAnnotationGroup) Annotate(rec *vcf.VcfRecord) error {
 				done[i] = true
 				continue
 			}
+			var val string
 			if r.field == "@ID" {
-				if id := src.ID(); id != "" {
-					vals[i] = append(vals[i], id)
-				}
+				val = src.ID()
 			} else if v, ok := src.InfoValue(r.field); ok {
-				if s := v.String(); s != "" {
-					vals[i] = append(vals[i], s)
-				}
+				val = v.String()
 			}
+			if val == "" {
+				continue
+			}
+			if r.exact {
+				for _, ai := range alts {
+					byAlt[i][ai] = append(byAlt[i][ai], val)
+				}
+				continue
+			}
+			vals[i] = append(vals[i], val)
 		}
 	}
 
 	for i := range g.rules {
 		r := &g.rules[i]
+		if r.exact {
+			if field, ok := perAlleleField(byAlt[i], r.unique); ok {
+				rec.AddInfo(r.name, field)
+			}
+			continue
+		}
 		if len(vals[i]) == 0 {
 			continue
 		}
