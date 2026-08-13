@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/compgenlab/cghts/htsio/bgzf"
 )
@@ -227,21 +229,63 @@ func TestBuildFastaIndexDoesNotBufferTheFile(t *testing.T) {
 	body := b.String()
 	bgzipTo(t, gz, body)
 
+	// PEAK during the call, not the heap after it.
+	//
+	// Two things were wrong with measuring afterwards. HeapAlloc is live heap
+	// PLUS garbage the collector has not reached, and there was no GC before
+	// the second reading -- so what it measured was partly how recently a GC
+	// cycle had run. Under a full-suite run, with other packages competing for
+	// memory, that reached 33 MB against a 15 MB threshold and failed a
+	// correct implementation.
+	//
+	// The property is about the peak anyway: the bug this guards against was an
+	// OOM *during* indexing, which a reading taken afterwards has already
+	// survived. A buffering implementation holds the file live at its widest
+	// point, whatever the collector does later.
+	sampling := make(chan struct{})
 	runtime.GC()
-	var before, after runtime.MemStats
+	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
-	if _, err := BuildFastaIndex(gz); err != nil {
+
+	var peak int64
+	sampled := make(chan struct{})
+	go func() {
+		defer close(sampled)
+		var m runtime.MemStats
+		for {
+			select {
+			case <-sampling:
+				return
+			case <-time.After(2 * time.Millisecond):
+			}
+			runtime.ReadMemStats(&m)
+			if int64(m.HeapAlloc) > atomic.LoadInt64(&peak) {
+				atomic.StoreInt64(&peak, int64(m.HeapAlloc))
+			}
+		}
+	}()
+
+	_, err := BuildFastaIndex(gz)
+	close(sampling)
+	<-sampled
+	if err != nil {
 		t.Fatal(err)
 	}
-	runtime.ReadMemStats(&after)
 
-	// TotalAlloc grows with everything allocated, including per-block buffers,
-	// so compare live heap: a streaming implementation ends near where it
-	// started, a buffering one holds the whole file.
-	grew := int64(after.HeapAlloc) - int64(before.HeapAlloc)
 	uncompressed := int64(len(body))
-	if grew > uncompressed/4 {
-		t.Errorf("heap grew %d bytes indexing a %d-byte file — this is buffering "+
+	if grew := atomic.LoadInt64(&peak) - int64(before.HeapAlloc); grew > uncompressed/4 {
+		t.Errorf("peak heap grew %d bytes indexing a %d-byte file -- this is buffering "+
 			"the stream, which OOMs on a real genome", grew, uncompressed)
+	}
+
+	// And nothing is retained once it returns: an index holding onto the blocks
+	// would keep a genome resident for as long as the caller kept the index.
+	runtime.GC()
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	if held := int64(after.HeapAlloc) - int64(before.HeapAlloc); held > uncompressed/100 {
+		t.Errorf("the index still holds %d bytes of a %d-byte file after it was built",
+			held, uncompressed)
 	}
 }
