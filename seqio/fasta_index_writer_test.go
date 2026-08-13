@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -242,6 +243,20 @@ func TestBuildFastaIndexDoesNotBufferTheFile(t *testing.T) {
 	// OOM *during* indexing, which a reading taken afterwards has already
 	// survived. A buffering implementation holds the file live at its widest
 	// point, whatever the collector does later.
+	// AND the peak has to be of the LIVE set, which took one more thing.
+	// HeapAlloc counts garbage the collector has not reached yet, so sampling it
+	// during the call measured how much rubbish piled up between GC cycles -- a
+	// correct streaming implementation that allocates and drops a buffer per
+	// block accumulates tens of megabytes of dead bytes without ever holding two
+	// of them at once. That is why this still failed about one run in three
+	// after the reading was moved.
+	//
+	// Collecting aggressively for the duration pins HeapAlloc near the live set,
+	// which is the quantity the failure message actually claims to be about. It
+	// makes the call slower, which costs nothing: none of this is timed.
+	restore := debug.SetGCPercent(1)
+	defer debug.SetGCPercent(restore)
+
 	sampling := make(chan struct{})
 	runtime.GC()
 	var before runtime.MemStats

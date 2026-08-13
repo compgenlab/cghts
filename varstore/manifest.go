@@ -76,6 +76,16 @@ type ManifestParams struct {
 	NoCallable    bool          `json:"no_callable"`
 	RowGroupSize  int64         `json:"row_group_size"`
 	SpanSemantics SpanSemantics `json:"span_semantics"`
+
+	// Info are the INFO fields captured into sites.parquet, if any.
+	//
+	// THIS IS THE ONLY PLACE ABSENCE IS ANSWERABLE. A typed reader gets a zero
+	// both for a column that is not in the file and for one holding zero, and
+	// this store's own schema records the same trap for RefEnd -- "zero in
+	// stores written before this column existed; treat that as unknown". A
+	// consumer asking "does this store know its imputation quality" must be
+	// able to get "no" rather than "0.0".
+	Info []InfoField `json:"info,omitempty"`
 }
 
 // ManifestCounts are store-wide totals.

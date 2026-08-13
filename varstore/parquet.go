@@ -215,6 +215,12 @@ type WriterOpts struct {
 	Program      string
 	Command      string
 
+	// Info are INFO fields to capture from the source into sites.parquet, each
+	// as its own typed column. Empty -- the usual case -- writes exactly the
+	// schema this store has always had. See info.go for why these are columns
+	// and why the source key is preserved rather than normalized.
+	Info []InfoField
+
 	// Sources are the inputs the conversion was asked to consume, in order.
 	// The manifest keeps the list rather than a joined string, because "which
 	// of these actually went in" is the question a partial store raises.
@@ -244,9 +250,28 @@ type Writer struct {
 	sites   *parquet.GenericWriter[Site]
 	regions *parquet.GenericWriter[CalledSiteRun]
 
+	// The dynamic sites writer, used only when INFO fields are captured. Exactly
+	// one of sites and sitesAny is ever non-nil.
+	sitesAny   *parquet.GenericWriter[any]
+	siteSchema *parquet.Schema
+
 	callBuf   []Call
 	siteBuf   []Site
 	regionBuf []CalledSiteRun
+
+	// Rows for the dynamic path, allocated once and refilled. A whole-genome
+	// catalog is tens of millions of sites and a map per row would be the
+	// dominant cost of writing one.
+	siteRows []any
+
+	// Backing storage for captured values, one slot per buffered row per field.
+	//
+	// Optional columns are written through POINTERS, because parquet-go encodes
+	// an optional field's zero value as null -- so a plain float64(0) would
+	// store R2=0 as "no R2 here", which is a different claim and the one this
+	// column exists to avoid making. Pointers into a preallocated batch keep
+	// that correct without an allocation per value.
+	infoScratch []infoSlots
 
 	// The members being written, in creation order, with the names they will
 	// have. Held so Close can finish them and abort can undo them -- and named
@@ -323,6 +348,13 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	if err := validateMeta(o.Meta); err != nil {
 		return nil, err
 	}
+	// Same reason as validateMeta: refuse before the previous manifest is
+	// cleared, so a bad --info spelling cannot unmake a readable store on its
+	// way to rejecting the run meant to replace it.
+	if err := ValidateInfo(o.Info); err != nil {
+		return nil, err
+	}
+	o.Info = normalizeInfo(o.Info)
 	if o.Codec == nil {
 		o.Codec = &zstd.Codec{}
 	}
@@ -399,7 +431,23 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	if err != nil {
 		return nil, err
 	}
-	w.sites = parquet.NewGenericWriter[Site](sf, sortedByLocus...)
+	// The sites writer has two shapes. Without captured INFO it stays exactly the
+	// typed writer it always was, so the default path is unchanged down to the
+	// physical column order and nothing about an ordinary conversion moves. With
+	// INFO the schema is built at runtime, which GenericWriter[Site] cannot
+	// express -- its schema comes from the type parameter.
+	//
+	// Only the WRITE side needs the split. Every reader keeps its
+	// GenericReader[Site] and simply does not see the extra columns, because
+	// parquet-go matches by name and ignores what the struct does not declare.
+	if len(o.Info) > 0 {
+		w.siteSchema = siteSchemaWith(o.Info)
+		w.infoScratch = newInfoSlots(o.Info, batchSize)
+		w.sitesAny = parquet.NewGenericWriter[any](sf,
+			append(append([]parquet.WriterOption{}, sortedByLocus...), w.siteSchema)...)
+	} else {
+		w.sites = parquet.NewGenericWriter[Site](sf, sortedByLocus...)
+	}
 
 	rf, err := open(MemberFile(RegionsMember))
 	if err != nil {
@@ -529,6 +577,7 @@ func (w *Writer) manifest() (Manifest, error) {
 			NoCallable:    w.opts.NoCallable,
 			RowGroupSize:  w.opts.RowGroupSize,
 			SpanSemantics: w.opts.Spans,
+			Info:          w.opts.Info,
 		},
 		Samples: w.opts.Samples,
 		Counts: ManifestCounts{
@@ -557,14 +606,183 @@ func (w *Writer) WriteCall(c Call) error {
 
 // WriteSite buffers one catalog entry.
 func (w *Writer) WriteSite(s Site) error {
+	return w.WriteSiteInfo(s, nil)
+}
+
+// WriteSiteInfo buffers one catalog entry along with the INFO values captured at
+// it, keyed by the source VCF's own INFO key ("R2", not "info_r2").
+//
+// A key with no value at this site is simply LEFT OUT of the map rather than
+// given a zero: the columns are optional precisely so that "the program emitted
+// no R2 here" and "R2 is 0 here" stay different claims. Passing a nil map is
+// what WriteSite does, and is correct for a store capturing nothing.
+//
+// The map may be reused between calls -- values are converted on the spot.
+func (w *Writer) WriteSiteInfo(s Site, info map[string]any) error {
 	s.RefEnd = defaultRefEnd(s.Pos, s.Ref, s.RefEnd)
 	w.census(s.Chrom, s.Pos).Sites++
-	w.siteBuf = append(w.siteBuf, s)
 	w.NSites++
-	if len(w.siteBuf) >= batchSize {
+
+	if w.sitesAny == nil {
+		// Captured nothing: values, if any were offered, have nowhere to go.
+		// Silently dropping them would be worse than the error, since the store
+		// would look like it holds them.
+		if len(info) > 0 {
+			return fmt.Errorf("site %s:%d carries INFO values but the store captures none", s.Chrom, s.Pos)
+		}
+		w.siteBuf = append(w.siteBuf, s)
+		if len(w.siteBuf) >= batchSize {
+			return w.flushSites()
+		}
+		return nil
+	}
+
+	row, err := w.siteRow(s, info)
+	if err != nil {
+		return err
+	}
+	w.siteRows = append(w.siteRows, row)
+	if len(w.siteRows) >= batchSize {
 		return w.flushSites()
 	}
 	return nil
+}
+
+// siteRow renders one site as a map matching the dynamic schema.
+//
+// The map is taken from the buffer's own slot and refilled, so a full batch
+// allocates batchSize maps once for the life of the writer rather than one per
+// site. Keys absent from info are DELETED rather than left over from the
+// previous occupant of this slot -- otherwise a site would inherit the R2 of
+// whatever site used the map 8,192 rows ago, which is the kind of wrong that
+// looks entirely plausible.
+func (w *Writer) siteRow(s Site, info map[string]any) (map[string]any, error) {
+	var m map[string]any
+	if n := len(w.siteRows); cap(w.siteRows) > n {
+		if prev, ok := w.siteRows[:cap(w.siteRows)][n].(map[string]any); ok && prev != nil {
+			m = prev
+			clear(m)
+		}
+	}
+	if m == nil {
+		m = make(map[string]any, len(w.opts.Info)+8)
+	}
+
+	m["chrom"] = s.Chrom
+	m["pos"] = s.Pos
+	m["ref"] = s.Ref
+	m["alt"] = s.Alt
+	m["ref_end"] = s.RefEnd
+	m["ac"] = s.AC
+	m["an"] = s.AN
+	m["n_carriers"] = s.NCarriers
+	m["n_called"] = s.NCalled
+	m["n_lowdp"] = s.NLowDP
+
+	slot := len(w.siteRows)
+	for i, f := range w.opts.Info {
+		raw, ok := info[f.Name]
+		if !ok {
+			if f.Type == InfoFlag {
+				m[f.Column] = false
+			}
+			continue
+		}
+		v, err := w.infoScratch[i].store(f, slot, raw)
+		if err != nil {
+			return nil, fmt.Errorf("site %s:%d: %w", s.Chrom, s.Pos, err)
+		}
+		m[f.Column] = v
+	}
+	return m, nil
+}
+
+// infoSlots is one captured field's backing storage for a batch of rows.
+//
+// Only the slice its declared type needs is allocated; the others stay nil.
+type infoSlots struct {
+	f64 []float64
+	i32 []int32
+	str []string
+}
+
+func newInfoSlots(fields []InfoField, n int) []infoSlots {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make([]infoSlots, len(fields))
+	for i, f := range fields {
+		switch f.Type {
+		case InfoFloat:
+			out[i].f64 = make([]float64, n)
+		case InfoInteger:
+			out[i].i32 = make([]int32, n)
+		case InfoString:
+			out[i].str = make([]string, n)
+		}
+	}
+	return out
+}
+
+// store puts a value in this row's slot and returns what the parquet writer
+// should receive for it.
+//
+// A POINTER for the optional columns, and the reason is not style: parquet-go
+// encodes an optional field's zero value as null, so handing it a plain
+// float64(0) would record a genuine R2 of 0 as "no R2 at this site". Those are
+// different claims -- "worthless" and "unknown" -- and a filter for R2 >= 0.3
+// only treats them alike by accident. A Flag is required rather than optional,
+// where false is a real value and needs no pointer.
+//
+// Deliberately narrow about types: a Float column takes a float, not a string
+// that looks like one. Parsing belongs to whoever read the VCF header and knows
+// the declared type; accepting both here would let a caller's mistake become a
+// column of zeros nobody questions.
+func (s *infoSlots) store(f InfoField, slot int, raw any) (any, error) {
+	switch f.Type {
+	case InfoInteger:
+		var n int32
+		switch x := raw.(type) {
+		case int32:
+			n = x
+		case int:
+			n = int32(x)
+		case int64:
+			n = int32(x)
+		default:
+			return nil, fmt.Errorf("info %s declared Integer, given %T", f.Name, raw)
+		}
+		s.i32[slot] = n
+		return &s.i32[slot], nil
+
+	case InfoFloat:
+		var x float64
+		switch v := raw.(type) {
+		case float64:
+			x = v
+		case float32:
+			x = float64(v)
+		default:
+			return nil, fmt.Errorf("info %s declared Float, given %T", f.Name, raw)
+		}
+		s.f64[slot] = x
+		return &s.f64[slot], nil
+
+	case InfoFlag:
+		b, ok := raw.(bool)
+		if !ok {
+			return nil, fmt.Errorf("info %s declared Flag, given %T", f.Name, raw)
+		}
+		return b, nil
+
+	default:
+		v, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("info %s declared String, given %T", f.Name, raw)
+		}
+		s.str[slot] = v
+		return &s.str[slot], nil
+	}
 }
 
 // defaultRefEnd fills in a reference end the caller left unset.
@@ -607,6 +825,17 @@ func (w *Writer) flushCalls() error {
 }
 
 func (w *Writer) flushSites() error {
+	if w.sitesAny != nil {
+		if len(w.siteRows) == 0 {
+			return nil
+		}
+		if _, err := w.sitesAny.Write(w.siteRows); err != nil {
+			return fmt.Errorf("writing sites: %w", err)
+		}
+		// Length only: the maps beyond it stay allocated for siteRow to reclaim.
+		w.siteRows = w.siteRows[:0]
+		return nil
+	}
 	if len(w.siteBuf) == 0 {
 		return nil
 	}
@@ -647,7 +876,12 @@ func (w *Writer) Close() error {
 			return err
 		}
 	}
-	for _, c := range []io.Closer{w.calls, w.sites, w.regions} {
+	// Whichever sites writer this store used; exactly one is non-nil.
+	sitesCloser := io.Closer(w.sites)
+	if w.sitesAny != nil {
+		sitesCloser = w.sitesAny
+	}
+	for _, c := range []io.Closer{w.calls, sitesCloser, w.regions} {
 		if err := c.Close(); err != nil {
 			w.closeFiles()
 			return err
@@ -1387,6 +1621,115 @@ func (s *ParquetStore) Sites(fn func(Site) bool) error {
 		return fmt.Errorf("%s is missing", SitesPath(s.base))
 	}
 	return scanParquet(s.sites, fn)
+}
+
+// InfoFields reports the INFO fields this store captured, nil if none.
+//
+// Read from the manifest rather than from the file's schema, because the two
+// answer different questions: the schema says which columns exist, the manifest
+// says what they MEAN -- which VCF key each came from, its declared type, and
+// its Number. A column called info_r2 alone cannot tell a consumer whether it
+// holds minimac's R2 or something a caller mapped onto that name.
+func (s *ParquetStore) InfoFields() []InfoField {
+	if s.manifest == nil {
+		return nil
+	}
+	return s.manifest.Params.Info
+}
+
+// SitesInfo walks the catalog yielding each site with its captured INFO values.
+//
+// The InfoRow is only valid for the duration of the call: it is a view onto the
+// scan's reusable buffer, so a caller keeping one past its callback gets
+// whatever site came next. Copy what you need.
+//
+// A store that captured nothing walks normally with an empty InfoRow, so a
+// caller need not branch on whether capture was on -- Present reports false for
+// every field, which is the truth.
+func (s *ParquetStore) SitesInfo(fn func(Site, InfoRow) bool) error {
+	if !s.hasSites {
+		return fmt.Errorf("%s is missing", SitesPath(s.base))
+	}
+	if len(s.InfoFields()) == 0 {
+		return s.Sites(func(site Site) bool { return fn(site, InfoRow{}) })
+	}
+
+	pf, err := s.sites.parsed()
+	if err != nil {
+		return err
+	}
+	schema := pf.Schema()
+
+	// Column indexes by name, resolved once. The dynamic schema is ordered by
+	// name rather than by struct order, so nothing may assume a position.
+	cols := map[string]int{}
+	for _, path := range schema.Columns() {
+		lc, ok := schema.Lookup(path...)
+		if !ok {
+			continue
+		}
+		cols[strings.Join(path, ".")] = lc.ColumnIndex
+	}
+
+	// Sites come back through the typed reader as well as the row reader: the
+	// struct decoding is the part worth not reimplementing, and reading the
+	// file twice would double the IO. So rows are read once and Site is
+	// reconstructed from the same row.
+	r := parquet.NewGenericReader[any](pf, schema)
+	defer r.Close()
+
+	buf := make([]parquet.Row, 512)
+	for {
+		n, err := r.ReadRows(buf)
+		for i := 0; i < n; i++ {
+			row := buf[i]
+			site := siteFromRow(row, cols)
+			if !fn(site, InfoRow{row: row, cols: cols}) {
+				return nil
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+	}
+}
+
+// siteFromRow rebuilds a Site from a dynamically-read row.
+//
+// By name, never by position: a group-built schema orders its columns
+// alphabetically rather than in struct order, so the two do not agree and an
+// index taken from one would silently read the wrong column in the other.
+func siteFromRow(row parquet.Row, cols map[string]int) Site {
+	str := func(name string) string {
+		if i, ok := cols[name]; ok && i < len(row) && !row[i].IsNull() {
+			return row[i].Clone().String()
+		}
+		return ""
+	}
+	i32 := func(name string) int32 {
+		if i, ok := cols[name]; ok && i < len(row) && !row[i].IsNull() {
+			return row[i].Int32()
+		}
+		return 0
+	}
+	return Site{
+		Chrom:     str("chrom"),
+		Pos:       i32("pos"),
+		Ref:       str("ref"),
+		Alt:       str("alt"),
+		RefEnd:    i32("ref_end"),
+		AC:        i32("ac"),
+		AN:        i32("an"),
+		NCarriers: i32("n_carriers"),
+		NCalled:   i32("n_called"),
+		NLowDP:    i32("n_lowdp"),
+	}
 }
 
 // Site returns the catalog entry for a locus, if the source reported it.
