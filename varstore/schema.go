@@ -212,6 +212,11 @@ const (
 	RegionsMember = "regions"
 )
 
+// MemberFile returns the file name one member of a store is stored under,
+// without a directory. What a Sink is addressed by: where the store lives is
+// the sink's business, and the member is the same name wherever it goes.
+func MemberFile(member string) string { return member + ".parquet" }
+
 // MemberPath returns the file holding one member of the store at base.
 func MemberPath(base, member string) string {
 	return joinStore(base, member+".parquet")
