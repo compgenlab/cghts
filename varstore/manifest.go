@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/compgenlab/cghts/iosource"
@@ -115,57 +114,47 @@ type ChromCensus struct {
 // half-written one would be worse than none at all -- it would claim the store
 // is finished while being unreadable proof of the opposite.
 func WriteManifest(base string, m Manifest) error {
-	dir := trimStoreDir(base)
-	tmp, err := os.CreateTemp(dir, ".manifest-*.json.gz")
+	sink, err := OpenSink(base)
 	if err != nil {
-		return fmt.Errorf("creating manifest in %s: %w", dir, err)
+		return err
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once the rename below succeeds
+	return WriteManifestTo(sink, m)
+}
 
-	zw := gzip.NewWriter(tmp)
+// WriteManifestTo writes the manifest through a sink.
+//
+// SIMPLER THAN THE LOCAL PATH IT REPLACED, and deliberately so. Writing a
+// manifest used to mean a temporary file, an fsync and a rename, because a
+// half-written local file is visible while it is being written and a manifest
+// is a completion marker: one that appeared before its own contents would claim
+// a store is finished while being proof of the opposite.
+//
+// A sink does not have that problem to solve. A local member is created and
+// closed in one call here, and an object store's member does not exist at all
+// until its upload completes -- so "appears whole or not at all" is the sink's
+// property rather than something this function has to arrange.
+func WriteManifestTo(sink Sink, m Manifest) error {
+	f, err := sink.Create(ManifestFile)
+	if err != nil {
+		return fmt.Errorf("creating the manifest in %s: %w", sink.Describe(), err)
+	}
+	zw := gzip.NewWriter(f)
 	enc := json.NewEncoder(zw)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(m); err != nil {
-		tmp.Close()
+		f.Close()
 		return fmt.Errorf("encoding manifest: %w", err)
 	}
 	if err := zw.Close(); err != nil {
-		tmp.Close()
+		f.Close()
 		return fmt.Errorf("compressing manifest: %w", err)
 	}
-	// Flush to disk before the rename. The manifest asserts that the members are
-	// complete, so it must not become visible ahead of its own contents.
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("syncing manifest: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing manifest: %w", err)
-	}
-	if err := os.Rename(tmpName, ManifestPath(base)); err != nil {
-		return fmt.Errorf("installing manifest: %w", err)
-	}
-	// And fsync the directory, so the rename itself survives a crash.
-	//
-	// Syncing the file only guarantees its contents; the directory entry that
-	// makes it visible under its final name is separate metadata, and without
-	// this a power loss could leave the members complete and the marker that
-	// says so gone -- which readers refuse permanently. That is the one failure
-	// this whole file exists to prevent, so it is worth the extra syscall on a
-	// path that runs once per conversion.
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("syncing store directory: %w", err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("syncing store directory: %w", err)
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("writing the manifest to %s: %w", sink.Describe(), err)
 	}
 	return nil
 }
 
-// ReadManifest reads the manifest of the store at base.
 func ReadManifest(base string) (*Manifest, error) {
 	return ReadManifestContext(context.Background(), base)
 }

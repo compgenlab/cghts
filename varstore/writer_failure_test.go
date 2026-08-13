@@ -100,8 +100,8 @@ func TestCloseStopsAtTheFirstFailure(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
 	w := writeSomeRows(t, base)
 
-	// Close the calls handle out from under the writer so its flush fails.
-	if err := w.files[0].Close(); err != nil {
+	// Close the calls member out from under the writer so its flush fails.
+	if err := w.members[0].sw.Close(); err != nil {
 		t.Fatal(err)
 	}
 

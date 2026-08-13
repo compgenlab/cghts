@@ -184,6 +184,26 @@ other two files are what make the absent rows interpretable: without them a
 missing row cannot be told apart from a position nobody ever looked at, which is
 the distinction the four states exist to draw.
 
+A store can be **written** to an object store as well as read from one. Parquet
+emits row groups forward and puts its footer last, so a member needs an
+`io.Writer` and never seeks — the filesystem was only ever what the writer
+happened to be spelled in. `Sink` is that spelling made replaceable, and a
+remote one registers itself the way a read transport does:
+
+```go
+import _ "github.com/compgenlab/cghts/varstore/sinks3"
+
+w, _ := varstore.NewWriter("s3://bucket/cohort", opts)   // or a local directory
+```
+
+Members are uploaded in parts and appear only when complete, which the format
+already relies on: the manifest is written last, so a conversion that dies
+partway leaves members but no marker, and a store without a marker is not a
+store. What it does leave is an incomplete multipart upload — invisible to a
+bucket listing and billed until removed. The writer abandons them on every
+failure it can see; set a lifecycle rule with `AbortIncompleteMultipartUpload`
+for the ones it cannot, such as a killed process.
+
 One method queries either backend, and the two must agree — the same question
 against a VCF and against a store converted from it:
 
