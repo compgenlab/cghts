@@ -241,6 +241,14 @@ type WriterOpts struct {
 	// what every store written before this existed is.
 	DepthBands []int32
 
+	// Format are FORMAT fields to capture onto the ALT calls, each as its own
+	// typed column in calls.parquet.
+	//
+	// Empty by default and deliberately so: calls is the large member, so a
+	// column here costs roughly a hundred times what the same column costs on
+	// the sites catalog. See format.go.
+	Format []FormatField
+
 	// Info are INFO fields to capture from the source into sites.parquet, each
 	// as its own typed column. Empty -- the usual case -- writes exactly the
 	// schema this store has always had. See info.go for why these are columns
@@ -280,6 +288,12 @@ type Writer struct {
 	// one of sites and sitesAny is ever non-nil.
 	sitesAny   *parquet.GenericWriter[any]
 	siteSchema *parquet.Schema
+
+	// The same, for calls, when FORMAT fields are captured.
+	callsAny   *parquet.GenericWriter[any]
+	callSchema *parquet.Schema
+	callRows   []any
+	fmtScratch []infoSlots
 
 	callBuf   []Call
 	siteBuf   []Site
@@ -402,6 +416,10 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 		return nil, err
 	}
 	o.Info = normalizeInfo(o.Info)
+	if err := ValidateFormat(o.Format); err != nil {
+		return nil, err
+	}
+	o.Format = normalizeFormat(o.Format)
 	if o.Codec == nil {
 		o.Codec = &zstd.Codec{}
 	}
@@ -482,25 +500,34 @@ func (w *Writer) openShard() error {
 	if err != nil {
 		return err
 	}
-	w.calls = parquet.NewGenericWriter[Call](cf, callOpts...)
+	if len(o.Format) > 0 {
+		w.callSchema = callSchemaWith(o.Format)
+		w.fmtScratch = newInfoSlots(formatAsInfo(o.Format), batchSize)
+		w.callsAny = parquet.NewGenericWriter[any](cf,
+			append(append([]parquet.WriterOption{}, callOpts...), w.callSchema)...)
+		w.calls = nil
+	} else {
+		w.calls = parquet.NewGenericWriter[Call](cf, callOpts...)
+		w.callsAny = nil
+	}
 	// THE STORE'S METADATA GOES ON EVERY SHARD, not only the first. A shard is a
 	// parquet file somebody may open on its own -- with DuckDB, with pyarrow,
 	// with anything -- and one that could not say which samples it holds or what
 	// depth gate it was written under would be a file with no provenance.
-	w.calls.SetKeyValueMetadata(MetaSamples, strings.Join(o.Samples, "\n"))
-	w.calls.SetKeyValueMetadata(MetaMinDP, fmt.Sprint(o.MinDP))
-	w.calls.SetKeyValueMetadata(MetaProgram, o.Program)
-	w.calls.SetKeyValueMetadata(MetaCommand, o.Command)
-	w.calls.SetKeyValueMetadata(MetaSource, strings.Join(o.Sources, ", "))
+	w.setCallMeta(MetaSamples, strings.Join(o.Samples, "\n"))
+	w.setCallMeta(MetaMinDP, fmt.Sprint(o.MinDP))
+	w.setCallMeta(MetaProgram, o.Program)
+	w.setCallMeta(MetaCommand, o.Command)
+	w.setCallMeta(MetaSource, strings.Join(o.Sources, ", "))
 	if len(o.Contigs) > 0 {
-		w.calls.SetKeyValueMetadata(MetaContigs, strings.Join(o.Contigs, "\n"))
+		w.setCallMeta(MetaContigs, strings.Join(o.Contigs, "\n"))
 	}
-	w.calls.SetKeyValueMetadata(MetaSpans, string(o.Spans))
+	w.setCallMeta(MetaSpans, string(o.Spans))
 	for _, k := range sortedKeys(o.Meta) {
-		w.calls.SetKeyValueMetadata(MetaPrefix+k, o.Meta[k])
+		w.setCallMeta(MetaPrefix+k, o.Meta[k])
 	}
 	if o.NoCallable {
-		w.calls.SetKeyValueMetadata(MetaNoCall, "1")
+		w.setCallMeta(MetaNoCall, "1")
 	}
 
 	sf, err := open(w.memberName(SitesMember))
@@ -674,6 +701,7 @@ func (w *Writer) manifest() (Manifest, error) {
 			SpanSemantics: w.opts.Spans,
 			DepthBands:    w.opts.DepthBands,
 			Info:          w.opts.Info,
+			Format:        w.opts.Format,
 		},
 		Samples: w.opts.Samples,
 		Counts: ManifestCounts{
@@ -690,15 +718,85 @@ func (w *Writer) manifest() (Manifest, error) {
 
 // WriteCall buffers one ALT-carrying genotype.
 func (w *Writer) WriteCall(c Call) error {
+	return w.WriteCallFormat(c, nil)
+}
+
+// WriteCallFormat buffers one ALT call along with the FORMAT values captured
+// for it, keyed by the source VCF's own FORMAT key ("PID", not "fmt_pid").
+//
+// A key with no value for this sample is LEFT OUT rather than zeroed: the
+// columns are optional so that "this sample had no PID here" and "its PID is 0"
+// stay different claims. The map may be reused between calls.
+func (w *Writer) WriteCallFormat(c Call, values map[string]any) error {
 	w.shardRows[CallsMember]++
 	c.RefEnd = defaultRefEnd(c.Pos, c.Ref, c.RefEnd)
 	w.census(c.Chrom, c.Pos).Calls++
-	w.callBuf = append(w.callBuf, c)
 	w.NCalls++
-	if len(w.callBuf) >= batchSize {
+
+	if w.callsAny == nil {
+		if len(values) > 0 {
+			return fmt.Errorf("call %s at %s:%d carries FORMAT values but the store captures none",
+				c.SampleID, c.Chrom, c.Pos)
+		}
+		w.callBuf = append(w.callBuf, c)
+		if len(w.callBuf) >= batchSize {
+			return w.flushCalls()
+		}
+		return nil
+	}
+
+	row, err := w.callRow(c, values)
+	if err != nil {
+		return err
+	}
+	w.callRows = append(w.callRows, row)
+	if len(w.callRows) >= batchSize {
 		return w.flushCalls()
 	}
 	return nil
+}
+
+// callRow renders one call as a map matching the dynamic schema, reusing the
+// buffer's own slot so a full batch allocates its maps once. Keys absent from
+// values are DELETED rather than inherited from the slot's previous occupant.
+func (w *Writer) callRow(c Call, values map[string]any) (map[string]any, error) {
+	var m map[string]any
+	if n := len(w.callRows); cap(w.callRows) > n {
+		if prev, ok := w.callRows[:cap(w.callRows)][n].(map[string]any); ok && prev != nil {
+			m = prev
+			clear(m)
+		}
+	}
+	if m == nil {
+		m = make(map[string]any, len(w.opts.Format)+12)
+	}
+	m["sample_id"] = c.SampleID
+	m["chrom"] = c.Chrom
+	m["pos"] = c.Pos
+	m["ref"] = c.Ref
+	m["alt"] = c.Alt
+	m["ref_end"] = c.RefEnd
+	m["gt"] = c.GT
+	m["dp"] = c.DP
+	m["ad_ref"] = c.ADRef
+	m["ad_alt"] = c.ADAlt
+	m["gq"] = c.GQ
+	m["min_dp"] = c.MinDP
+
+	slot := len(w.callRows)
+	for i, f := range w.opts.Format {
+		raw, ok := values[f.Name]
+		if !ok {
+			continue
+		}
+		v, err := w.fmtScratch[i].store(
+			InfoField{Name: f.Name, Type: f.Type}, slot, raw)
+		if err != nil {
+			return nil, fmt.Errorf("call %s at %s:%d: %w", c.SampleID, c.Chrom, c.Pos, err)
+		}
+		m[f.Column] = v
+	}
+	return m, nil
 }
 
 // WriteSite buffers one catalog entry.
@@ -944,6 +1042,17 @@ func (w *Writer) WriteRegion(r CalledSiteRun) error {
 }
 
 func (w *Writer) flushCalls() error {
+	if w.callsAny != nil {
+		if len(w.callRows) == 0 {
+			return nil
+		}
+		if _, err := w.callsAny.Write(w.callRows); err != nil {
+			return fmt.Errorf("writing calls: %w", err)
+		}
+		// Length only: the maps beyond it stay allocated for callRow to reclaim.
+		w.callRows = w.callRows[:0]
+		return nil
+	}
 	if len(w.callBuf) == 0 {
 		return nil
 	}
@@ -1801,6 +1910,94 @@ func (s *ParquetStore) Regions(fn func(CalledSiteRun) bool) error {
 	return scanParquet(s.regions, fn)
 }
 
+// FormatFields reports the FORMAT fields this store captured onto its calls,
+// nil if none.
+//
+// From the manifest rather than the schema, for the same reason InfoFields is:
+// the schema says which columns exist, the manifest says what they MEAN -- which
+// VCF key each came from, its declared type, and its Number.
+func (s *ParquetStore) FormatFields() []FormatField {
+	if s.manifest == nil {
+		return nil
+	}
+	return s.manifest.Params.Format
+}
+
+// CallsFormat walks the ALT calls yielding each with its captured FORMAT
+// values.
+//
+// The FormatRow is only valid for the duration of the call -- it views the
+// scan's reusable buffer -- so copy what you keep. A store that captured
+// nothing walks normally with an empty row, so a caller need not branch.
+func (s *ParquetStore) CallsFormat(fn func(Call, FormatRow) bool) error {
+	if len(s.FormatFields()) == 0 {
+		return scanParquet(s.calls, func(c Call) bool { return fn(c, FormatRow{}) })
+	}
+	for _, sh := range s.calls.shards {
+		pf, err := sh.m.parsed()
+		if err != nil {
+			return err
+		}
+		schema := pf.Schema()
+		cols := map[string]int{}
+		for _, path := range schema.Columns() {
+			if lc, ok := schema.Lookup(path...); ok {
+				cols[strings.Join(path, ".")] = lc.ColumnIndex
+			}
+		}
+		r := parquet.NewGenericReader[any](pf, schema)
+		buf := make([]parquet.Row, 512)
+		stop := false
+		for !stop {
+			n, err := r.ReadRows(buf)
+			for i := 0; i < n; i++ {
+				row := buf[i]
+				if !fn(callFromRow(row, cols), FormatRow{row: row, cols: cols}) {
+					stop = true
+					break
+				}
+			}
+			if err == io.EOF || n == 0 {
+				break
+			}
+			if err != nil {
+				r.Close()
+				return err
+			}
+		}
+		r.Close()
+		if stop {
+			return nil
+		}
+	}
+	return nil
+}
+
+// callFromRow rebuilds a Call from a dynamically-read row, BY NAME rather than
+// by position: a group-built schema orders its columns alphabetically rather
+// than in struct order, so an index taken from one would read the wrong column
+// in the other.
+func callFromRow(row parquet.Row, cols map[string]int) Call {
+	str := func(name string) string {
+		if i, ok := cols[name]; ok && i < len(row) && !row[i].IsNull() {
+			return row[i].Clone().String()
+		}
+		return ""
+	}
+	i32 := func(name string) int32 {
+		if i, ok := cols[name]; ok && i < len(row) && !row[i].IsNull() {
+			return row[i].Int32()
+		}
+		return 0
+	}
+	return Call{
+		SampleID: str("sample_id"), Chrom: str("chrom"), Pos: i32("pos"),
+		Ref: str("ref"), Alt: str("alt"), RefEnd: i32("ref_end"),
+		GT: str("gt"), DP: i32("dp"), ADRef: i32("ad_ref"),
+		ADAlt: i32("ad_alt"), GQ: i32("gq"), MinDP: i32("min_dp"),
+	}
+}
+
 // InfoFields reports the INFO fields this store captured, nil if none.
 //
 // Read from the manifest rather than from the file's schema, because the two
@@ -1977,3 +2174,12 @@ func (s *ParquetStore) HasRefSpans() bool { return s.hasRefSpans }
 // them from here rather than re-deriving them, which is the point of writing
 // them down.
 func (s *ParquetStore) Manifest() *Manifest { return s.manifest }
+
+// setCallMeta writes key/value metadata to whichever calls writer is live.
+func (w *Writer) setCallMeta(k, v string) {
+	if w.callsAny != nil {
+		w.callsAny.SetKeyValueMetadata(k, v)
+		return
+	}
+	w.calls.SetKeyValueMetadata(k, v)
+}
