@@ -86,6 +86,11 @@ type ManifestParams struct {
 	// has no other way to find out.
 	DepthBands []int32 `json:"depth_bands,omitempty"`
 
+	// Format are the FORMAT fields captured onto the ALT calls, if any. The
+	// same reasoning as Info: absence and a zero read alike from a typed
+	// reader, and only this can tell them apart.
+	Format []FormatField `json:"format,omitempty"`
+
 	// Info are the INFO fields captured into sites.parquet, if any.
 	//
 	// THIS IS THE ONLY PLACE ABSENCE IS ANSWERABLE. A typed reader gets a zero

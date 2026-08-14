@@ -75,12 +75,26 @@ func (w *Writer) closeShard() error {
 		}
 	}
 	// Exactly one of the two sites writers is live; see openShard.
-	closers := []interface{ Close() error }{w.calls, w.regions}
+	// CALLS, THEN SITES, THEN REGIONS, and the order is load-bearing rather
+	// than arbitrary. A parquet footer is written by Close, so a member that
+	// closes is a member that looks finished -- and if calls fails, a finalised
+	// regions would leave a set that reads as complete while calls is short.
+	// Closing in the order the members are written means a failure stops the
+	// ones after it.
+	//
+	// Exactly one writer of each pair is live; see openShard.
+	var closers []interface{ Close() error }
+	if w.callsAny != nil {
+		closers = append(closers, w.callsAny)
+	} else {
+		closers = append(closers, w.calls)
+	}
 	if w.sitesAny != nil {
 		closers = append(closers, w.sitesAny)
 	} else {
 		closers = append(closers, w.sites)
 	}
+	closers = append(closers, w.regions)
 	for _, c := range closers {
 		if err := c.Close(); err != nil {
 			return err
