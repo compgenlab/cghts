@@ -215,6 +215,26 @@ type WriterOpts struct {
 	Program      string
 	Command      string
 
+	// ShardSites splits each member every N sites, so a locus query reads one
+	// small file rather than pruning row groups inside a large one. Zero writes
+	// the store unsplit, which is what every store before this is.
+	//
+	// The win is not the pruning -- Parquet already prunes row groups -- it is
+	// that the statistics doing the pruning live in the FOOTER, so deciding not
+	// to read a whole-genome member still costs fetching and parsing a footer
+	// describing it. A shard index in the manifest decides the same thing having
+	// read only the manifest.
+	ShardSites int64
+
+	// BeforeRotate is called just before a shard is closed, so a caller holding
+	// state that spans sites can flush it into the shard it belongs to.
+	//
+	// The converter's open callable runs are exactly that. A run must lie wholly
+	// inside one shard -- otherwise a query would have to read every earlier
+	// shard in case a run started there and reached in -- so runs are broken
+	// here, exactly as they are already broken at depth-band boundaries.
+	BeforeRotate func() error
+
 	// DepthBands are the boundaries at which a callable run is broken, so each
 	// run spans one depth class and its MinDP is a tight bound rather than the
 	// worst moment in an arbitrary stretch. Empty leaves runs unbanded, which is
@@ -269,6 +289,21 @@ type Writer struct {
 	// catalog is tens of millions of sites and a map per row would be the
 	// dominant cost of writing one.
 	siteRows []any
+
+	// Sharding: the coordinate ranges each member is split into.
+	//
+	// A shard is cut every ShardSites sites and at every chromosome change,
+	// which is what keeps First and Last comparable without a chromosome test.
+	// The three members are cut TOGETHER on the same site boundaries, so shard
+	// k of calls, sites and regions cover the same interval and a locus query
+	// reads the k'th of each rather than reconciling two partitionings.
+	shardIdx   int
+	shardChrom string
+	shardFirst int32
+	shardLast  int32
+	shardSites int64
+	shardRows  map[string]int64
+	shards     map[string][]ShardInfo
 
 	// Backing storage for captured values, one slot per buffered row per field.
 	//
@@ -338,6 +373,12 @@ const batchSize = 8192
 type memberSink struct {
 	name string
 	sw   io.WriteCloser
+
+	// closed once, by whoever finished the shard it belongs to. Without this a
+	// split store closed each shard's sink at the rotation AND again at the end,
+	// and the second close is an error the writer reported as a failed
+	// conversion.
+	closed bool
 }
 
 // NewWriter creates the store directory at base and the member files inside it.
@@ -386,8 +427,33 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	}
 	w := &Writer{base: base, opts: o, sink: sink}
 
+	w.shards = map[string][]ShardInfo{}
+	w.shardRows = map[string]int64{}
+
+	if err := w.openShard(); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// memberName is where a member's rows go: its own file when unsplit, or the
+// current shard's file when split.
+func (w *Writer) memberName(member string) string {
+	if w.opts.ShardSites <= 0 {
+		return MemberFile(member)
+	}
+	return ShardFile(member, w.shardIdx)
+}
+
+// openShard creates the three member writers for the current shard.
+//
+// Called once for an unsplit store and once per shard for a split one, so the
+// two paths cannot drift: a split store's first shard is written by exactly the
+// code that writes an unsplit store's only file.
+func (w *Writer) openShard() error {
+	o := w.opts
 	open := func(name string) (io.Writer, error) {
-		f, err := sink.Create(name)
+		f, err := w.sink.Create(name)
 		if err != nil {
 			_ = w.abort()
 			return nil, err
@@ -412,11 +478,15 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	callOpts := append(append([]parquet.WriterOption{}, sortedByLocus...),
 		parquet.BloomFilters(parquet.SplitBlockFilter(10, "sample_id")))
 
-	cf, err := open(MemberFile(CallsMember))
+	cf, err := open(w.memberName(CallsMember))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	w.calls = parquet.NewGenericWriter[Call](cf, callOpts...)
+	// THE STORE'S METADATA GOES ON EVERY SHARD, not only the first. A shard is a
+	// parquet file somebody may open on its own -- with DuckDB, with pyarrow,
+	// with anything -- and one that could not say which samples it holds or what
+	// depth gate it was written under would be a file with no provenance.
 	w.calls.SetKeyValueMetadata(MetaSamples, strings.Join(o.Samples, "\n"))
 	w.calls.SetKeyValueMetadata(MetaMinDP, fmt.Sprint(o.MinDP))
 	w.calls.SetKeyValueMetadata(MetaProgram, o.Program)
@@ -433,38 +503,34 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 		w.calls.SetKeyValueMetadata(MetaNoCall, "1")
 	}
 
-	sf, err := open(MemberFile(SitesMember))
+	sf, err := open(w.memberName(SitesMember))
 	if err != nil {
-		return nil, err
+		return err
 	}
-	// The sites writer has two shapes. Without captured INFO it stays exactly the
-	// typed writer it always was, so the default path is unchanged down to the
-	// physical column order and nothing about an ordinary conversion moves. With
-	// INFO the schema is built at runtime, which GenericWriter[Site] cannot
-	// express -- its schema comes from the type parameter.
-	//
-	// Only the WRITE side needs the split. Every reader keeps its
-	// GenericReader[Site] and simply does not see the extra columns, because
-	// parquet-go matches by name and ignores what the struct does not declare.
 	if len(o.Info) > 0 {
 		w.siteSchema = siteSchemaWith(o.Info)
 		w.infoScratch = newInfoSlots(o.Info, batchSize)
 		w.sitesAny = parquet.NewGenericWriter[any](sf,
 			append(append([]parquet.WriterOption{}, sortedByLocus...), w.siteSchema)...)
+		w.sites = nil
 	} else {
 		w.sites = parquet.NewGenericWriter[Site](sf, sortedByLocus...)
+		w.sitesAny = nil
 	}
 
-	rf, err := open(MemberFile(RegionsMember))
+	rf, err := open(w.memberName(RegionsMember))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	w.regions = parquet.NewGenericWriter[CalledSiteRun](rf, append(append([]parquet.WriterOption{}, opts...),
 		parquet.SortingWriterConfig(parquet.SortingColumns(
 			parquet.Ascending("chrom"), parquet.Ascending("start"))),
 		parquet.BloomFilters(parquet.SplitBlockFilter(10, "sample_id")))...)
 
-	return w, nil
+	w.shardSites = 0
+	w.shardChrom = ""
+	w.shardRows = map[string]int64{}
+	return nil
 }
 
 // abort closes and removes any files opened so far, used when construction
@@ -561,6 +627,29 @@ func (w *Writer) manifest() (Manifest, error) {
 		SitesMember:   w.NSites,
 		RegionsMember: w.NRegions,
 	} {
+		// A SPLIT MEMBER IS SIZED SHARD BY SHARD, and each shard's size is read
+		// back from the sink rather than accumulated -- the manifest describes
+		// the files that exist, not the rows the writer believes it wrote, which
+		// is what makes it able to catch a member that does not belong.
+		if shards := w.shards[member]; len(shards) > 0 {
+			var total int64
+			sized := make([]ShardInfo, 0, len(shards))
+			for _, si := range shards {
+				size, ok, err := w.sink.Stat(si.Name)
+				if err != nil {
+					return Manifest{}, fmt.Errorf("sizing %s: %w", si.Name, err)
+				}
+				if !ok {
+					return Manifest{}, fmt.Errorf("%s is missing from %s", si.Name, w.sink.Describe())
+				}
+				si.Bytes = size
+				total += size
+				sized = append(sized, si)
+			}
+			members[member] = MemberInfo{Rows: rows, Bytes: total, Shards: sized}
+			continue
+		}
+
 		size, ok, err := w.sink.Stat(MemberFile(member))
 		if err != nil {
 			return Manifest{}, fmt.Errorf("sizing %s member: %w", member, err)
@@ -601,6 +690,7 @@ func (w *Writer) manifest() (Manifest, error) {
 
 // WriteCall buffers one ALT-carrying genotype.
 func (w *Writer) WriteCall(c Call) error {
+	w.shardRows[CallsMember]++
 	c.RefEnd = defaultRefEnd(c.Pos, c.Ref, c.RefEnd)
 	w.census(c.Chrom, c.Pos).Calls++
 	w.callBuf = append(w.callBuf, c)
@@ -627,8 +717,13 @@ func (w *Writer) WriteSite(s Site) error {
 // The map may be reused between calls -- values are converted on the spot.
 func (w *Writer) WriteSiteInfo(s Site, info map[string]any) error {
 	s.RefEnd = defaultRefEnd(s.Pos, s.Ref, s.RefEnd)
+	// Before anything is buffered, so a rotation lands between sites.
+	if err := w.noteSite(s.Chrom, s.Pos); err != nil {
+		return err
+	}
 	w.census(s.Chrom, s.Pos).Sites++
 	w.NSites++
+	w.shardRows[SitesMember]++
 
 	if w.sitesAny == nil {
 		// Captured nothing: values, if any were offered, have nowhere to go.
@@ -812,6 +907,24 @@ func defaultRefEnd(pos int32, ref string, refEnd int32) int32 {
 
 // WriteRegion buffers one callable run.
 func (w *Writer) WriteRegion(r CalledSiteRun) error {
+	// A RUN MUST LIE WHOLLY INSIDE ONE SHARD, and a caller that lets one span a
+	// boundary is refused rather than obeyed.
+	//
+	// The reader prunes region shards by coordinate, so a run filed in shard 3
+	// but starting in shard 1 is a run no query for shard 1 will ever see --
+	// and every locus it covered there reads as NEVER ASSAYED instead of
+	// reference. That is silent, plausible, and moves a denominator, which is
+	// exactly the failure this package is arranged against. Callers break their
+	// runs in BeforeRotate; this is what catches one that forgot.
+	if w.opts.ShardSites > 0 && w.shardSites > 0 &&
+		SameChrom(r.Chrom, w.shardChrom) && r.Start < w.shardFirst {
+		return fmt.Errorf(
+			"run %s %s:%d-%d begins before the current shard (%s:%d-%d): break runs at shard "+
+				"boundaries with WriterOpts.BeforeRotate, or every locus it covers in an earlier "+
+				"shard will read as never assayed",
+			r.SampleID, r.Chrom, r.Start, r.End, w.shardChrom, w.shardFirst, w.shardLast)
+	}
+	w.shardRows[RegionsMember]++
 	w.regionBuf = append(w.regionBuf, r)
 	w.NRegions++
 	if len(w.regionBuf) >= batchSize {
@@ -877,22 +990,12 @@ func (w *Writer) flushRegions() error {
 // expected to Discard. The file handles are released either way, since leaking
 // them helps nobody, but the members are left in place for Discard to remove.
 func (w *Writer) Close() error {
-	for _, fn := range []func() error{w.flushCalls, w.flushSites, w.flushRegions} {
-		if err := fn(); err != nil {
-			w.closeFiles()
-			return err
-		}
-	}
-	// Whichever sites writer this store used; exactly one is non-nil.
-	sitesCloser := io.Closer(w.sites)
-	if w.sitesAny != nil {
-		sitesCloser = w.sitesAny
-	}
-	for _, c := range []io.Closer{w.calls, sitesCloser, w.regions} {
-		if err := c.Close(); err != nil {
-			w.closeFiles()
-			return err
-		}
+	// The last shard is closed the same way every other one was, so its bounds
+	// and row counts are recorded by the same code -- a final shard described
+	// differently from its siblings is a shard a reader would prune wrongly.
+	if err := w.closeShard(); err != nil {
+		w.closeFiles()
+		return err
 	}
 	return w.closeFiles()
 }
@@ -900,10 +1003,14 @@ func (w *Writer) Close() error {
 // closeFiles releases the underlying handles without removing anything.
 func (w *Writer) closeFiles() error {
 	var errs []error
-	for _, m := range w.members {
-		if err := m.sw.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("finishing %s: %w", m.name, err))
+	for i := range w.members {
+		if w.members[i].closed {
+			continue
 		}
+		if err := w.members[i].sw.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("finishing %s: %w", w.members[i].name, err))
+		}
+		w.members[i].closed = true
 	}
 	return errors.Join(errs...)
 }
@@ -1115,7 +1222,7 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error)
 	s.regions, s.hasRegions = regions, hasRegions
 	s.manifest = man
 
-	if err := verifyAgainstManifest(man, pf, sites, regions); err != nil {
+	if err := verifyAgainstManifest(man, pf, calls, sites, regions); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("%s: %w", base, err)
 	}
@@ -1160,14 +1267,18 @@ func requireManifest(ctx context.Context, base string) (*Manifest, error) {
 // because sites and regions carry no metadata of their own.
 //
 // It costs nothing: every count here is footer metadata that was already read.
-func verifyAgainstManifest(man *Manifest, calls *parquet.File, sites, regions *shardSet) error {
+func verifyAgainstManifest(man *Manifest, callsFile *parquet.File, calls, sites, regions *shardSet) error {
 	type check struct {
 		name string
 		file *parquet.File
 		set  *shardSet
 	}
 	for _, c := range []check{
-		{CallsMember, calls, nil},
+		// The parsed file is the FIRST SHARD when calls are split, so it is
+		// passed alongside the set rather than instead of it -- checking it
+		// against the member's total would compare one shard's rows with all of
+		// them, which is how this first failed.
+		{CallsMember, callsFile, calls},
 		{SitesMember, nil, sites},
 		{RegionsMember, nil, regions},
 	} {
@@ -1181,6 +1292,7 @@ func verifyAgainstManifest(man *Manifest, calls *parquet.File, sites, regions *s
 		// is strictly stronger than the whole-member total: a store missing one
 		// shard and gaining rows in another would still total correctly.
 		if c.set != nil && c.set.split() {
+			c.file = nil
 			var total int64
 			for _, sh := range c.set.shards {
 				f, err := parquet.OpenFile(sh.m.ra, sh.m.size)
