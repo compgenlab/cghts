@@ -12,7 +12,10 @@ import (
 // is a look-ahead annotator: it must see the next variant before emitting the
 // current one, so it wraps the record stream. Isolated variants get -1. Ports
 // ngsutilsj VariantDistance.
-type VariantDistance struct{ closeNoop }
+type VariantDistance struct {
+	namedFields
+	closeNoop
+}
 
 // NewVariantDistance returns a VariantDistance annotator (--vardist).
 func NewVariantDistance() *VariantDistance { return &VariantDistance{} }
@@ -20,7 +23,7 @@ func NewVariantDistance() *VariantDistance { return &VariantDistance{} }
 // SetupHeader declares the CG_VARDIST INFO field. (ngsutilsj registers this as a
 // FORMAT def, a bug; this package registers it as INFO.)
 func (a *VariantDistance) SetupHeader(h *vcf.VcfHeader) error {
-	h.AddInfo(infoDef("CG_VARDIST", "1", "Integer", "Distance to the nearest variant (absolute value)"))
+	h.AddInfo(infoDef(a.key(VarDistField), "1", "Integer", "Distance to the nearest variant (absolute value)"))
 	return nil
 }
 
@@ -32,7 +35,7 @@ func (a *VariantDistance) Wrap(next Source) Source {
 	done := false
 
 	annotate := func(rec *vcf.VcfRecord, d int64) {
-		rec.AddInfo("CG_VARDIST", strconv.FormatInt(d, 10))
+		rec.AddInfo(a.key(VarDistField), strconv.FormatInt(d, 10))
 	}
 
 	return func() (*vcf.VcfRecord, error) {
