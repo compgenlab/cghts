@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -154,6 +155,15 @@ type fileSink struct{ dir string }
 func (f fileSink) Create(name string) (io.WriteCloser, error) {
 	if err := os.MkdirAll(f.dir, 0o755); err != nil {
 		return nil, err
+	}
+	// A split member's name carries a directory -- "calls/00007.parquet" -- and
+	// on an object store that is just a key with a slash in it. On a filesystem
+	// it is a directory that has to exist first, which is the one place the two
+	// kinds of sink genuinely differ.
+	if dir := filepath.Dir(filepath.Join(f.dir, name)); dir != f.dir {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
 	}
 	return os.Create(joinStore(f.dir, name))
 }
