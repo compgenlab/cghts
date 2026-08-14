@@ -382,3 +382,17 @@ func CheckStoreTargetIn(sink Sink, force bool) error {
 	}
 	return nil
 }
+
+// ShardFile returns the file name one shard of a split member is stored under,
+// relative to the store: "calls/00007.parquet".
+//
+// A DIRECTORY PER MEMBER rather than a directory per shard, because the members
+// are read independently -- a locus lookup touches calls and regions and may
+// never open sites -- and because it keeps the unsplit layout recognisable:
+// `calls.parquet` becomes `calls/`, which reads as the same thing having grown.
+//
+// Zero-padded so a plain listing sorts into coordinate order, which is how
+// anybody debugging one will first look at it.
+func ShardFile(member string, i int) string {
+	return fmt.Sprintf("%s/%05d.parquet", member, i)
+}
