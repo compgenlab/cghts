@@ -5,6 +5,7 @@ import (
 	"math"
 
 	"github.com/parquet-go/parquet-go"
+	"sync"
 )
 
 // Row-group pruning. Parquet records min/max statistics per column per row
@@ -370,6 +371,11 @@ func eachRowGroup(m *member, fn func(parquet.RowGroup)) error {
 // Rows are addressed by seeking the generic reader to each surviving group's
 // offset, so decoding still goes through the same typed path as a full scan.
 func scanParquetPruned[T any](set *shardSet, keep scanFilter, fn func(T) bool) error {
+	// SEQUENTIAL, because fn is the caller's and may not be safe to call from
+	// several goroutines. Concurrency across shards lives in ScanShards, which
+	// hands each worker its own accumulator and merges afterwards -- a caller
+	// that wants it says so rather than discovering that its closure is being
+	// entered twice at once.
 	for _, sh := range set.shards {
 		// SHARD PRUNING FIRST, and it is decided from the manifest alone -- no
 		// footer is fetched, no bytes of the shard are touched. That is the
@@ -442,4 +448,83 @@ func scanOneShard[T any](m *member, keep rowGroupFilter, fn func(T) bool) (bool,
 		offset += n
 	}
 	return false, nil
+}
+
+// shardsMatching returns the shards a filter admits, in order.
+//
+// Split out so a parallel scan can decide what to visit without duplicating the
+// pruning rule -- two copies of "which shards can match" is how a fast path and
+// a slow path come to disagree.
+func (s *shardSet) shardsMatching(keep scanFilter) []*shard {
+	out := make([]*shard, 0, len(s.shards))
+	for _, sh := range s.shards {
+		if sh.bounds && keep.shard != nil && !keep.shard(sh.info) {
+			continue
+		}
+		out = append(out, sh)
+	}
+	return out
+}
+
+// scanShardsParallel visits every matching shard concurrently, giving each
+// worker its own accumulator and merging in shard order afterwards.
+//
+// EACH SHARD IS ITS OWN FILE, which is what makes this safe. A member holds an
+// io.SectionReader, and a SectionReader is not safe for concurrent use -- so the
+// unit of parallelism is the file, never rows within one. Nothing here touches
+// two goroutines to one reader.
+//
+// Order is restored on merge rather than relied upon during the scan, so a
+// result never depends on which worker finished first.
+func scanShardsParallel[T any, A any](
+	set *shardSet, keep scanFilter, workers int,
+	newAcc func() A,
+	visit func(acc A, row T) bool,
+	merge func(acc A),
+) error {
+	shards := set.shardsMatching(keep)
+	if len(shards) == 0 {
+		return nil
+	}
+	if workers <= 1 || len(shards) == 1 {
+		acc := newAcc()
+		for _, sh := range shards {
+			if _, err := scanOneShard(sh.m, keep.rowGroup, func(row T) bool {
+				return visit(acc, row)
+			}); err != nil {
+				return err
+			}
+		}
+		merge(acc)
+		return nil
+	}
+
+	accs := make([]A, len(shards))
+	errs := make([]error, len(shards))
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for i, sh := range shards {
+		wg.Add(1)
+		go func(i int, sh *shard) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			acc := newAcc()
+			accs[i] = acc
+			_, errs[i] = scanOneShard(sh.m, keep.rowGroup, func(row T) bool {
+				return visit(acc, row)
+			})
+		}(i, sh)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	// In shard order, which is coordinate order.
+	for _, acc := range accs {
+		merge(acc)
+	}
+	return nil
 }

@@ -1,5 +1,12 @@
 package varstore
 
+import (
+	"os"
+	"runtime"
+	"strconv"
+	"sync"
+)
+
 // Classifying a whole locus set in one pass.
 //
 // WHY THIS EXISTS. Classify answers one locus, and answering N of them meant
@@ -39,6 +46,29 @@ func (s *ParquetStore) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleSta
 		return nil, err
 	}
 
+	// THREE MEMBERS, THREE GOROUTINES, and each internally parallel across the
+	// shards it must visit.
+	//
+	// The scans are independent -- sites says what was interrogated, calls says
+	// who carried something, regions says who was covered -- so the query costs
+	// the SLOWEST of them rather than their sum. Measured sequentially at
+	// 175ms for calls and 123ms for regions on a 500-sample store, which is
+	// 298ms of waiting for 175ms of work.
+	//
+	// Each member is a distinct set of files, and within a member each shard is
+	// a distinct file, so no two goroutines ever touch one reader. That is the
+	// rule the whole scheme rests on: an io.SectionReader is not safe for
+	// concurrent use, and the unit of parallelism is therefore the file.
+	workers := runtime.GOMAXPROCS(0)
+	// An escape hatch for measuring, and for a deployment that would rather
+	// spend its cores elsewhere. Setting it to 1 restores the sequential scan
+	// exactly.
+	if n := os.Getenv("VARSTORE_SCAN_WORKERS"); n != "" {
+		if v, err := strconv.Atoi(n); err == nil && v > 0 {
+			workers = v
+		}
+	}
+
 	// Which of the requested loci the source actually reported. Asked once for
 	// the whole set: an off-catalog locus must not consult the run intervals,
 	// because a run bracketing a position the source never mentioned does not
@@ -48,58 +78,109 @@ func (s *ParquetStore) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleSta
 		want[canonLocus(l)] = true
 	}
 	interrogated := make(map[Locus]bool, len(loci))
-	q := Query{Loci: loci}
-	if err := scanParquetPruned(s.sites, callsFilter(q), func(site Site) bool {
-		if k := canonLocus(site.Locus()); want[k] {
-			interrogated[k] = true
-		}
-		return true
-	}); err != nil {
-		return nil, err
-	}
-
-	// ONE pass over the calls for every locus in the set.
 	calls := make(map[Locus]map[string]Call, len(loci))
-	if err := scanParquetPruned(s.calls, callsFilter(q), func(c Call) bool {
-		k := canonLocus(c.Locus())
-		if !want[k] {
-			return true
-		}
-		if calls[k] == nil {
-			calls[k] = map[string]Call{}
-		}
-		calls[k][c.SampleID] = c
-		return true
-	}); err != nil {
-		return nil, err
-	}
+	called := make(map[Locus]map[string]bool, len(loci))
+	q := Query{Loci: loci}
 
-	// ONE pass over the runs, and the reason this function is worth having. A
-	// run is kept if it covers ANY requested locus, and each is recorded
-	// against the loci it actually brackets -- so the file is read once rather
-	// than once per locus.
-	//
-	// Positions are collected per chromosome and sorted, so a run tests against
-	// a slice rather than against the whole set.
+	// Positions per chromosome, so a run tests against a slice rather than the
+	// whole set. Built before the scans start, since all three read it.
 	byChrom := map[string][]Locus{}
 	for l := range want {
-		key := CanonKey(l.Chrom)
-		byChrom[key] = append(byChrom[key], l)
+		byChrom[CanonKey(l.Chrom)] = append(byChrom[CanonKey(l.Chrom)], l)
 	}
-	called := make(map[Locus]map[string]bool, len(loci))
-	if err := scanParquetPruned(s.regions, runScanFilter(q), func(r CalledSiteRun) bool {
-		for _, l := range byChrom[CanonKey(r.Chrom)] {
-			if l.Pos < r.Start || l.Pos > r.End {
-				continue
-			}
-			if called[l] == nil {
-				called[l] = map[string]bool{}
-			}
-			called[l][r.SampleID] = true
+
+	var wg sync.WaitGroup
+	errs := make([]error, 3)
+
+	// 1. Which of the requested loci the source actually reported. An
+	//    off-catalog locus must not consult the run intervals, because a run
+	//    bracketing a position the source never mentioned does not mean the
+	//    position was examined.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errs[0] = scanShardsParallel(s.sites, callsFilter(q), workers,
+			func() map[Locus]bool { return map[Locus]bool{} },
+			func(acc map[Locus]bool, site Site) bool {
+				if k := canonLocus(site.Locus()); want[k] {
+					acc[k] = true
+				}
+				return true
+			},
+			func(acc map[Locus]bool) {
+				for k := range acc {
+					interrogated[k] = true
+				}
+			})
+	}()
+
+	// 2. The ALT calls, for every locus in the set at once.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errs[1] = scanShardsParallel(s.calls, callsFilter(q), workers,
+			func() map[Locus]map[string]Call { return map[Locus]map[string]Call{} },
+			func(acc map[Locus]map[string]Call, c Call) bool {
+				k := canonLocus(c.Locus())
+				if !want[k] {
+					return true
+				}
+				if acc[k] == nil {
+					acc[k] = map[string]Call{}
+				}
+				acc[k][c.SampleID] = c
+				return true
+			},
+			func(acc map[Locus]map[string]Call) {
+				for k, at := range acc {
+					if calls[k] == nil {
+						calls[k] = at
+						continue
+					}
+					for name, c := range at {
+						calls[k][name] = c
+					}
+				}
+			})
+	}()
+
+	// 3. The coverage, and the expensive one. A run is kept if it covers any
+	//    requested locus, and recorded against the loci it brackets.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errs[2] = scanShardsParallel(s.regions, runScanFilter(q), workers,
+			func() map[Locus]map[string]bool { return map[Locus]map[string]bool{} },
+			func(acc map[Locus]map[string]bool, r CalledSiteRun) bool {
+				for _, l := range byChrom[CanonKey(r.Chrom)] {
+					if l.Pos < r.Start || l.Pos > r.End {
+						continue
+					}
+					if acc[l] == nil {
+						acc[l] = map[string]bool{}
+					}
+					acc[l][r.SampleID] = true
+				}
+				return true
+			},
+			func(acc map[Locus]map[string]bool) {
+				for k, cov := range acc {
+					if called[k] == nil {
+						called[k] = cov
+						continue
+					}
+					for name := range cov {
+						called[k][name] = true
+					}
+				}
+			})
+	}()
+
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
 		}
-		return true
-	}); err != nil {
-		return nil, err
 	}
 
 	// The same decision Classify makes, per sample per locus.
