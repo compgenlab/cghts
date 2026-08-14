@@ -80,9 +80,26 @@ func OpenStore(ctx context.Context, locator, kind string) (Store, error) {
 		return OpenVcfContext(ctx, locator)
 	case KindParquet:
 		return OpenParquetContext(ctx, locator)
+	case KindSet:
+		return OpenSet(ctx, locator)
 	case "":
 	default:
 		return nil, fmt.Errorf("unknown store kind %q (use %s or %s)", kind, KindVcf, KindParquet)
+	}
+
+	// A SET IS CHECKED FIRST, and by its own marker rather than by a field
+	// inside a shared one.
+	//
+	// The alternative -- one manifest.json.gz carrying a kind -- is tidier and
+	// fails worse. Every reader that already exists, this package's older
+	// versions included, treats the presence of manifest.json.gz as "this is a
+	// store"; a set using that name would be opened as one, parse into a
+	// manifest describing no members, and fail somewhere further in with an
+	// error about a missing calls file. A distinct marker means an old reader
+	// says "not a store", which is true and is the direction a failure should
+	// point.
+	if IsSet(ctx, locator) {
+		return OpenSet(ctx, locator)
 	}
 
 	inferred, err := StoreKind(ctx, locator)
@@ -91,3 +108,6 @@ func OpenStore(ctx context.Context, locator, kind string) (Store, error) {
 	}
 	return OpenStore(ctx, locator, inferred)
 }
+
+// KindSet names a varset: several stores, disjoint by chromosome, read as one.
+const KindSet = "varset"
