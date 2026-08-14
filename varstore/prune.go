@@ -95,7 +95,30 @@ func chromExcludes(rg parquet.RowGroup, chrom string) bool {
 // meaningless. Restricting the test to single-chromosome groups keeps it sound
 // and still catches the common case, since coordinate-sorted input puts almost
 // every group inside one chromosome.
-func locusFilter(l Locus) rowGroupFilter {
+// scanFilter prunes at two scales: whole shards from the manifest's index, and
+// row groups from the footer inside whatever shard survives.
+//
+// One type rather than two arguments, so every existing call site is unchanged
+// and no caller can pass a row-group filter while forgetting the shard one --
+// which would read every shard and still get the right answer, slowly and
+// silently.
+type scanFilter struct {
+	// shard is nil when the filter cannot narrow by coordinate.
+	shard    func(ShardInfo) bool
+	rowGroup rowGroupFilter
+}
+
+// keepAllShards is the shard half of a filter that narrows nothing.
+func keepAllShards(ShardInfo) bool { return true }
+
+func locusFilter(l Locus) scanFilter {
+	return scanFilter{
+		shard:    func(si ShardInfo) bool { return si.Covers(l.Chrom, l.Pos) },
+		rowGroup: locusRowGroups(l),
+	}
+}
+
+func locusRowGroups(l Locus) rowGroupFilter {
 	return func(rg parquet.RowGroup) bool {
 		if lo, hi, ok := colBounds(rg, "pos"); ok {
 			if int64(l.Pos) < lo.Int64() || int64(l.Pos) > hi.Int64() {
@@ -145,7 +168,18 @@ func spanFilter(s *Span) rowGroupFilter {
 // coveringFilter keeps row groups whose runs could span a position. A run's
 // End is not sorted, so only Start can bound the search: any run covering pos
 // must begin at or before it.
-func coveringFilter(chrom string, pos int32) rowGroupFilter {
+func coveringFilter(chrom string, pos int32) scanFilter {
+	return scanFilter{
+		// A run lies wholly inside one shard -- the converter breaks them at
+		// boundaries -- so the shard covering the position is the only one that
+		// can hold a run covering it. Without that guarantee this would have to
+		// read every earlier shard in case a run started there and reached in.
+		shard:    func(si ShardInfo) bool { return si.Covers(chrom, pos) },
+		rowGroup: coveringRowGroups(chrom, pos),
+	}
+}
+
+func coveringRowGroups(chrom string, pos int32) rowGroupFilter {
 	return func(rg parquet.RowGroup) bool {
 		if lo, _, ok := colBounds(rg, "start"); ok {
 			if int64(pos) < lo.Int64() {
@@ -189,12 +223,56 @@ func spanRunFilter(s *Span) rowGroupFilter {
 // Sample selection deliberately does not participate, and should not be added:
 // every sample appears in nearly every row group, so the sample_id bloom filter
 // measured 429ms against 426ms, and a union over several samples is weaker still.
-func callsFilter(q Query) rowGroupFilter {
+func callsFilter(q Query) scanFilter {
+	return scanFilter{shard: querySpan(q), rowGroup: callsRowGroups(q)}
+}
+
+// querySpan narrows shards to those a query's selectors can touch.
+//
+// Collapsed to one interval per chromosome rather than tested per selector, for
+// the same reason unionFilter collapses: a panel of a million loci should cost
+// one pass over the panel, not a million predicate calls for every shard.
+func querySpan(q Query) func(ShardInfo) bool {
+	if len(q.Loci) == 0 && len(q.Spans) == 0 {
+		return keepAllShards
+	}
+	type bound struct{ lo, hi int32 }
+	byChrom := map[string]*bound{}
+	note := func(chrom string, first, last int32) {
+		k := CanonKey(chrom)
+		b := byChrom[k]
+		if b == nil {
+			byChrom[k] = &bound{lo: first, hi: last}
+			return
+		}
+		if first < b.lo {
+			b.lo = first
+		}
+		if last > b.hi {
+			b.hi = last
+		}
+	}
+	for _, l := range q.Loci {
+		note(l.Chrom, l.Pos, l.Pos)
+	}
+	for _, sp := range q.Spans {
+		note(sp.Chrom, sp.Start, sp.End)
+	}
+	return func(si ShardInfo) bool {
+		b := byChrom[CanonKey(si.Chrom)]
+		if b == nil {
+			return false
+		}
+		return si.Overlaps(si.Chrom, b.lo, b.hi)
+	}
+}
+
+func callsRowGroups(q Query) rowGroupFilter {
 	switch {
 	case len(q.Loci) == 0 && len(q.Spans) == 0:
 		return keepAll
 	case len(q.Loci) == 1 && len(q.Spans) == 0:
-		return locusFilter(q.Loci[0])
+		return locusRowGroups(q.Loci[0])
 	case len(q.Loci) == 0 && len(q.Spans) == 1:
 		return spanFilter(&q.Spans[0])
 	}
@@ -204,10 +282,14 @@ func callsFilter(q Query) rowGroupFilter {
 // runScanFilter prunes the regions file, whose position column is "start" rather
 // than "pos" and whose "end" is unsorted -- so only a lower bound on start is
 // usable, and with several selectors there is little left to prune on.
-func runScanFilter(q Query) rowGroupFilter {
+func runScanFilter(q Query) scanFilter {
+	return scanFilter{shard: querySpan(q), rowGroup: runScanRowGroups(q)}
+}
+
+func runScanRowGroups(q Query) rowGroupFilter {
 	switch {
 	case len(q.Loci) == 1 && len(q.Spans) == 0:
-		return coveringFilter(q.Loci[0].Chrom, q.Loci[0].Pos)
+		return coveringRowGroups(q.Loci[0].Chrom, q.Loci[0].Pos)
 	case len(q.Loci) == 0 && len(q.Spans) == 1:
 		return spanRunFilter(&q.Spans[0])
 	}
@@ -287,10 +369,32 @@ func eachRowGroup(m *member, fn func(parquet.RowGroup)) error {
 //
 // Rows are addressed by seeking the generic reader to each surviving group's
 // offset, so decoding still goes through the same typed path as a full scan.
-func scanParquetPruned[T any](m *member, keep rowGroupFilter, fn func(T) bool) error {
+func scanParquetPruned[T any](set *shardSet, keep scanFilter, fn func(T) bool) error {
+	for _, sh := range set.shards {
+		// SHARD PRUNING FIRST, and it is decided from the manifest alone -- no
+		// footer is fetched, no bytes of the shard are touched. That is the
+		// whole reason the index exists: over object storage, deciding not to
+		// read a shard should not cost a request.
+		if sh.bounds && keep.shard != nil && !keep.shard(sh.info) {
+			continue
+		}
+		stop, err := scanOneShard(sh.m, keep.rowGroup, fn)
+		if err != nil {
+			return err
+		}
+		if stop {
+			return nil
+		}
+	}
+	return nil
+}
+
+// scanOneShard is the original single-file scan, reporting whether the caller
+// asked to stop so the loop above does not run on into the next shard.
+func scanOneShard[T any](m *member, keep rowGroupFilter, fn func(T) bool) (bool, error) {
 	pf, err := m.parsed()
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// pf, not m.ra. NewGenericReader calls openFile on whatever it is handed,
@@ -311,7 +415,7 @@ func scanParquetPruned[T any](m *member, keep rowGroupFilter, fn func(T) bool) e
 			continue
 		}
 		if err := r.SeekToRow(offset); err != nil {
-			return err
+			return false, err
 		}
 		for remaining := n; remaining > 0; {
 			want := int64(len(buf))
@@ -321,7 +425,7 @@ func scanParquetPruned[T any](m *member, keep rowGroupFilter, fn func(T) bool) e
 			got, err := r.Read(buf[:want])
 			for i := 0; i < got; i++ {
 				if !fn(buf[i]) {
-					return nil
+					return true, nil
 				}
 			}
 			remaining -= int64(got)
@@ -329,7 +433,7 @@ func scanParquetPruned[T any](m *member, keep rowGroupFilter, fn func(T) bool) e
 				break
 			}
 			if err != nil {
-				return err
+				return false, err
 			}
 			if got == 0 {
 				break
@@ -337,5 +441,5 @@ func scanParquetPruned[T any](m *member, keep rowGroupFilter, fn func(T) bool) e
 		}
 		offset += n
 	}
-	return nil
+	return false, nil
 }

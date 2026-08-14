@@ -910,7 +910,12 @@ func (w *Writer) closeFiles() error {
 
 // scanParquet streams path in batches, calling fn per row. fn returns false to
 // stop early. Batching keeps a whole-genome store from having to be resident.
-func scanParquet[T any](m *member, fn func(T) bool) error {
+func scanParquet[T any](set *shardSet, fn func(T) bool) error {
+	return scanParquetPruned(set, scanFilter{shard: keepAllShards, rowGroup: keepAll}, fn)
+}
+
+// scanWholeMember streams one file, for callers holding a member directly.
+func scanWholeMember[T any](m *member, fn func(T) bool) error {
 	pf, err := m.parsed()
 	if err != nil {
 		return err
@@ -952,10 +957,10 @@ func hasColumn(pf *parquet.File, name string) bool {
 // ParquetStore is a Store backed by the three-file Parquet set.
 type ParquetStore struct {
 	base        string
-	calls       *member
+	calls       *shardSet
 	hasRefSpans bool
-	sites       *member
-	regions     *member
+	sites       *shardSet
+	regions     *shardSet
 	samples     []string
 	hasSites    bool
 	hasRegions  bool
@@ -1045,14 +1050,18 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error)
 	if err != nil {
 		return nil, err
 	}
-	calls, err := openMember(ctx, CallsPath(base))
+	calls, err := openShardSet(ctx, base, CallsMember, man.Members[CallsMember])
 	if err != nil {
 		return nil, fmt.Errorf("opening parquet store %s: %w", base, err)
 	}
-	pf, err := parquet.OpenFile(calls.ra, calls.size)
+	// The key/value metadata lives on the first shard: a split member writes it
+	// once rather than repeating it, and every shard of one store agrees about
+	// what the store is.
+	first := calls.single()
+	pf, err := parquet.OpenFile(first.ra, first.size)
 	if err != nil {
 		calls.Close()
-		return nil, fmt.Errorf("reading %s: %w", calls.name, err)
+		return nil, fmt.Errorf("reading %s: %w", first.name, err)
 	}
 	s := &ParquetStore{base: base, calls: calls, meta: map[string]string{}}
 	for _, k := range []string{MetaSource, MetaProgram, MetaCommand, MetaMinDP, MetaContigs} {
@@ -1091,13 +1100,13 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error)
 	// recorded nothing in them, which verifyAgainstManifest below enforces;
 	// note that the writer creates all three regardless, so --no-callable
 	// produces a present, zero-row regions member rather than a missing one.
-	sites, hasSites, err := openOptionalMember(ctx, SitesPath(base))
+	sites, hasSites, err := openOptionalShardSet(ctx, base, SitesMember, man.Members[SitesMember])
 	if err != nil {
 		calls.Close()
 		return nil, err
 	}
 	s.sites, s.hasSites = sites, hasSites
-	regions, hasRegions, err := openOptionalMember(ctx, RegionsPath(base))
+	regions, hasRegions, err := openOptionalShardSet(ctx, base, RegionsMember, man.Members[RegionsMember])
 	if err != nil {
 		calls.Close()
 		sites.Close()
@@ -1151,11 +1160,11 @@ func requireManifest(ctx context.Context, base string) (*Manifest, error) {
 // because sites and regions carry no metadata of their own.
 //
 // It costs nothing: every count here is footer metadata that was already read.
-func verifyAgainstManifest(man *Manifest, calls *parquet.File, sites, regions *member) error {
+func verifyAgainstManifest(man *Manifest, calls *parquet.File, sites, regions *shardSet) error {
 	type check struct {
 		name string
 		file *parquet.File
-		m    *member
+		set  *shardSet
 	}
 	for _, c := range []check{
 		{CallsMember, calls, nil},
@@ -1166,15 +1175,43 @@ func verifyAgainstManifest(man *Manifest, calls *parquet.File, sites, regions *m
 		if !recorded {
 			continue // a manifest that never described this member claims nothing
 		}
+
+		// A SPLIT MEMBER IS COUNTED ACROSS ITS SHARDS, and every shard's own
+		// footer is checked against the count the index recorded for it. That
+		// is strictly stronger than the whole-member total: a store missing one
+		// shard and gaining rows in another would still total correctly.
+		if c.set != nil && c.set.split() {
+			var total int64
+			for _, sh := range c.set.shards {
+				f, err := parquet.OpenFile(sh.m.ra, sh.m.size)
+				if err != nil {
+					return fmt.Errorf("reading %s: %w", sh.info.Name, err)
+				}
+				got := f.NumRows()
+				if got != sh.info.Rows {
+					return fmt.Errorf("%s holds %d rows but the manifest records %d; "+
+						"this shard does not belong to this store, or the store is damaged",
+						sh.info.Name, got, sh.info.Rows)
+				}
+				total += got
+			}
+			if total != want.Rows {
+				return fmt.Errorf("%s totals %d rows across its shards but the manifest records %d",
+					c.name, total, want.Rows)
+			}
+			continue
+		}
+
 		if c.file == nil {
-			if c.m == nil {
+			m := c.set.single()
+			if m == nil {
 				if want.Rows == 0 {
 					continue // written empty and since removed; it claimed nothing
 				}
 				return fmt.Errorf("%s.parquet is missing, but the manifest records %d rows in it",
 					c.name, want.Rows)
 			}
-			f, err := parquet.OpenFile(c.m.ra, c.m.size)
+			f, err := parquet.OpenFile(m.ra, m.size)
 			if err != nil {
 				return fmt.Errorf("reading %s.parquet: %w", c.name, err)
 			}
@@ -1350,7 +1387,7 @@ func (s *ParquetStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 }
 
 // callsWithRef assembles ALT and reference calls for a query, in store order.
-func (s *ParquetStore) callsWithRef(p *plan, keep rowGroupFilter) ([]Call, error) {
+func (s *ParquetStore) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
 	roster, err := s.Samples()
 	if err != nil {
 		return nil, err
@@ -1673,7 +1710,9 @@ func (s *ParquetStore) SitesInfo(fn func(Site, InfoRow) bool) error {
 		return s.Sites(func(site Site) bool { return fn(site, InfoRow{}) })
 	}
 
-	pf, err := s.sites.parsed()
+	// The captured-INFO columns are the same in every shard, so the first one
+	// describes the member.
+	pf, err := s.sites.single().parsed()
 	if err != nil {
 		return err
 	}
@@ -1791,7 +1830,7 @@ func (s *ParquetStore) SiteKnown(l Locus) (bool, error) {
 // or a live connection per store when the members are remote.
 func (s *ParquetStore) Close() error {
 	var first error
-	for _, m := range []*member{s.calls, s.sites, s.regions} {
+	for _, m := range []*shardSet{s.calls, s.sites, s.regions} {
 		if err := m.Close(); err != nil && first == nil {
 			first = err
 		}
