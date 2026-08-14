@@ -21,6 +21,7 @@ type FlankingOptions struct {
 // alleles are reverse-complemented. Indels and variants too close to a sequence
 // end are skipped. It ports ngsutilsj FlankingBases (--flanking).
 type FlankingBases struct {
+	namedFields
 	ref  seqio.ReferenceReader
 	size int
 }
@@ -40,8 +41,8 @@ func NewFlankingBases(opts FlankingOptions) (*FlankingBases, error) {
 
 // SetupHeader declares CG_FLANKING and CG_FLANKING_SUB.
 func (a *FlankingBases) SetupHeader(h *vcf.VcfHeader) error {
-	h.AddInfo(infoDef("CG_FLANKING", "1", "String", fmt.Sprintf("+/- %d bp flanking the variant (no indels)", a.size)))
-	h.AddInfo(infoDef("CG_FLANKING_SUB", "A", "String", "Substitution caused by variant "))
+	h.AddInfo(infoDef(a.key(FlankingSeq), "1", "String", fmt.Sprintf("+/- %d bp flanking the variant (no indels)", a.size)))
+	h.AddInfo(infoDef(a.key(FlankingSub), "A", "String", "Substitution caused by variant "))
 	return nil
 }
 
@@ -65,7 +66,7 @@ func (a *FlankingBases) Annotate(rec *vcf.VcfRecord) error {
 		return err
 	}
 	refSeq := string(seq)
-	rec.AddInfo("CG_FLANKING", refSeq)
+	rec.AddInfo(a.key(FlankingSeq), refSeq)
 
 	work := refSeq
 	revcomp := false
@@ -89,7 +90,7 @@ func (a *FlankingBases) Annotate(rec *vcf.VcfRecord) error {
 		outs = append(outs, pre+"["+varBase+">"+alt+"]"+post)
 	}
 	if len(outs) > 0 {
-		rec.AddInfo("CG_FLANKING_SUB", strings.Join(outs, ","))
+		rec.AddInfo(a.key(FlankingSub), strings.Join(outs, ","))
 	}
 	return nil
 }

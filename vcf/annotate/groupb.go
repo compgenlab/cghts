@@ -42,7 +42,10 @@ func round(val float64, places int) string {
 }
 
 // VariantAlleleFrequency adds FORMAT CG_VAF (per-alt allele frequency from SAC).
-type VariantAlleleFrequency struct{ closeNoop }
+type VariantAlleleFrequency struct {
+	namedFields
+	closeNoop
+}
 
 // NewVAF returns a variant-allele-frequency annotator (--vaf).
 func NewVAF() *VariantAlleleFrequency { return &VariantAlleleFrequency{} }
@@ -52,7 +55,7 @@ func (a *VariantAlleleFrequency) SetupHeader(h *vcf.VcfHeader) error {
 	if err := requireSAC(h); err != nil {
 		return err
 	}
-	h.AddFormat(formatDef("CG_VAF", "A", "Float", "Allele frequency for all alt-alleles"))
+	h.AddFormat(formatDef(a.key(VAFField), "A", "Float", "Allele frequency for all alt-alleles"))
 	return nil
 }
 
@@ -85,10 +88,10 @@ func (a *VariantAlleleFrequency) Annotate(rec *vcf.VcfRecord) error {
 			}
 		}
 		if len(outs) == 0 {
-			if err := rec.AddFormat(i, "CG_VAF", "."); err != nil {
+			if err := rec.AddFormat(i, a.key(VAFField), "."); err != nil {
 				return err
 			}
-		} else if err := rec.AddFormat(i, "CG_VAF", strings.Join(outs, ",")); err != nil {
+		} else if err := rec.AddFormat(i, a.key(VAFField), strings.Join(outs, ",")); err != nil {
 			return err
 		}
 	}
@@ -96,7 +99,10 @@ func (a *VariantAlleleFrequency) Annotate(rec *vcf.VcfRecord) error {
 }
 
 // MinorStrandPct adds FORMAT CG_SBPCT (percent of alt reads on the minor strand).
-type MinorStrandPct struct{ closeNoop }
+type MinorStrandPct struct {
+	namedFields
+	closeNoop
+}
 
 // NewMinorStrand returns a minor-strand-percentage annotator (--minor-strand).
 func NewMinorStrand() *MinorStrandPct { return &MinorStrandPct{} }
@@ -106,7 +112,7 @@ func (a *MinorStrandPct) SetupHeader(h *vcf.VcfHeader) error {
 	if err := requireSAC(h); err != nil {
 		return err
 	}
-	h.AddFormat(formatDef("CG_SBPCT", "A", "Float", "Percent of alt-allele reads on the minor strand"))
+	h.AddFormat(formatDef(a.key(MinorStrand), "A", "Float", "Percent of alt-allele reads on the minor strand"))
 	return nil
 }
 
@@ -138,10 +144,10 @@ func (a *MinorStrandPct) Annotate(rec *vcf.VcfRecord) error {
 			}
 		}
 		if len(outs) == 0 {
-			if err := rec.AddFormat(i, "CG_SBPCT", "."); err != nil {
+			if err := rec.AddFormat(i, a.key(MinorStrand), "."); err != nil {
 				return err
 			}
-		} else if err := rec.AddFormat(i, "CG_SBPCT", strings.Join(outs, ",")); err != nil {
+		} else if err := rec.AddFormat(i, a.key(MinorStrand), strings.Join(outs, ",")); err != nil {
 			return err
 		}
 	}
@@ -151,6 +157,7 @@ func (a *MinorStrandPct) Annotate(rec *vcf.VcfRecord) error {
 // FisherStrandBias adds FORMAT CG_FSB (Phred-scaled Fisher strand-bias p-value
 // per alt, against a theoretical 50/50 split).
 type FisherStrandBias struct {
+	namedFields
 	closeNoop
 	fisher *stats.FisherExact
 }
@@ -165,7 +172,7 @@ func (a *FisherStrandBias) SetupHeader(h *vcf.VcfHeader) error {
 	if err := requireSAC(h); err != nil {
 		return err
 	}
-	h.AddFormat(formatDef("CG_FSB", "A", "Float", "Sample-based Fisher Strand Bias for alt alleles (Phred-scale)"))
+	h.AddFormat(formatDef(a.key(FisherStrandB), "A", "Float", "Sample-based Fisher Strand Bias for alt alleles (Phred-scale)"))
 	return nil
 }
 
@@ -193,10 +200,10 @@ func (a *FisherStrandBias) Annotate(rec *vcf.VcfRecord) error {
 			outs = append(outs, round(stats.Phred(p), 3))
 		}
 		if len(outs) == 0 {
-			if err := rec.AddFormat(i, "CG_FSB", "."); err != nil {
+			if err := rec.AddFormat(i, a.key(FisherStrandB), "."); err != nil {
 				return err
 			}
-		} else if err := rec.AddFormat(i, "CG_FSB", strings.Join(outs, ",")); err != nil {
+		} else if err := rec.AddFormat(i, a.key(FisherStrandB), strings.Join(outs, ",")); err != nil {
 			return err
 		}
 	}
@@ -206,6 +213,7 @@ func (a *FisherStrandBias) Annotate(rec *vcf.VcfRecord) error {
 // CopyNumberLogRatio adds INFO CG_CNLR, the log2 ratio of somatic vs germline
 // allelic depth (AD) at the variant, optionally normalized by total counts.
 type CopyNumberLogRatio struct {
+	namedFields
 	closeNoop
 	germlineSample string
 	somaticSample  string
@@ -243,9 +251,9 @@ func (a *CopyNumberLogRatio) SetupHeader(h *vcf.VcfHeader) error {
 		return fmt.Errorf("annotate: \"AD\" FORMAT annotation missing")
 	}
 	if a.hasTotals {
-		h.AddInfo(infoDef("CG_CNLR", "1", "Float", fmt.Sprintf("Copy number (log2-ratio); Germline-total:%d, Somatic-total:%d", a.germlineCount, a.somaticCount)))
+		h.AddInfo(infoDef(a.key(CopyLogRatio), "1", "Float", fmt.Sprintf("Copy number (log2-ratio); Germline-total:%d, Somatic-total:%d", a.germlineCount, a.somaticCount)))
 	} else {
-		h.AddInfo(infoDef("CG_CNLR", "1", "Float", "Copy number (log2-ratio)"))
+		h.AddInfo(infoDef(a.key(CopyLogRatio), "1", "Float", "Copy number (log2-ratio)"))
 	}
 	a.germlineIdx = h.SampleIndex(a.germlineSample)
 	a.somaticIdx = h.SampleIndex(a.somaticSample)
@@ -287,9 +295,9 @@ func (a *CopyNumberLogRatio) Annotate(rec *vcf.VcfRecord) error {
 	germLog := stats.Log2(germAcc)
 	somLog := stats.Log2(somAcc)
 	if a.hasTotals {
-		rec.AddInfo("CG_CNLR", round((somLog-a.somTotalLog)-(germLog-a.germTotalLog), 6))
+		rec.AddInfo(a.key(CopyLogRatio), round((somLog-a.somTotalLog)-(germLog-a.germTotalLog), 6))
 	} else {
-		rec.AddInfo("CG_CNLR", round(somLog-germLog, 6))
+		rec.AddInfo(a.key(CopyLogRatio), round(somLog-germLog, 6))
 	}
 	return nil
 }

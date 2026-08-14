@@ -13,6 +13,12 @@ import (
 // (a gene model with an interval index); it may be gzip/bgzip-compressed.
 type GtfOptions struct {
 	Prefix       string   // INFO key prefix; defaults to "GTF_"
+
+	// Names overrides the INFO key each logical field is written under, keyed by
+	// the GtfGeneSymbol/GtfGeneID/… constants. A named field ignores Prefix —
+	// the caller has given the whole key, not a suffix to decorate.
+	Names FieldNames
+
 	Filename     string   // GTF file (optionally .gz)
 	RequiredTags []string // keep only features carrying every tag (the --gtf-tag filter)
 
@@ -74,17 +80,25 @@ func (a *GtfAnnotator) EnableContigMatching() {
 // actually supplies biotypes; CG_CODING/CG_NONCODING are always declared (they
 // are written per-record when an overlapping gene of that kind exists).
 func (a *GtfAnnotator) SetupHeader(h *vcf.VcfHeader) error {
-	p := a.prefix
-	h.AddInfo(infoDefSrc(p+"GENE", ".", "String", "Gene name", a.opts.Filename))
-	h.AddInfo(infoDefSrc(p+"GENEID", ".", "String", "Gene ID", a.opts.Filename))
-	h.AddInfo(infoDefSrc(p+"STRAND", ".", "String", "Gene strand", a.opts.Filename))
+	h.AddInfo(infoDefSrc(a.key(GtfGeneSymbol), ".", "String", "Gene name", a.opts.Filename))
+	h.AddInfo(infoDefSrc(a.key(GtfGeneID), ".", "String", "Gene ID", a.opts.Filename))
+	h.AddInfo(infoDefSrc(a.key(GtfStrand), ".", "String", "Gene strand", a.opts.Filename))
 	if a.src.Provides("biotype") {
-		h.AddInfo(infoDefSrc(p+"BIOTYPE", ".", "String", "Gene biotype", a.opts.Filename))
+		h.AddInfo(infoDefSrc(a.key(GtfBiotype), ".", "String", "Gene biotype", a.opts.Filename))
 	}
-	h.AddInfo(infoDefSrc(p+"REGION", ".", "String", "Genic region", a.opts.Filename))
-	h.AddInfo(infoDefSrc(p+"CODING", ".", "String", "Coding gene name", a.opts.Filename))
-	h.AddInfo(infoDefSrc(p+"NONCODING", ".", "String", "Non-coding gene name", a.opts.Filename))
+	h.AddInfo(infoDefSrc(a.key(GtfRegion), ".", "String", "Genic region", a.opts.Filename))
+	h.AddInfo(infoDefSrc(a.key(GtfCoding), ".", "String", "Coding gene name", a.opts.Filename))
+	h.AddInfo(infoDefSrc(a.key(GtfNoncoding), ".", "String", "Non-coding gene name", a.opts.Filename))
 	return nil
+}
+
+// SetFieldNames chooses the INFO key each logical field is written under.
+func (a *GtfAnnotator) SetFieldNames(n FieldNames) { a.opts.Names = n }
+
+// key is the INFO id one logical field is written under: the caller's name for
+// it, or the prefix and the historical suffix.
+func (a *GtfAnnotator) key(logical string) string {
+	return a.opts.Names.nameOr(logical, a.prefix+logical)
 }
 
 // Annotate finds the genes overlapping the variant position and writes the
@@ -134,19 +148,18 @@ func (a *GtfAnnotator) Annotate(rec *vcf.VcfRecord) error {
 		}
 	}
 
-	p := a.prefix
-	rec.AddInfo(p+"GENE", strings.Join(names, ","))
-	rec.AddInfo(p+"GENEID", strings.Join(ids, ","))
-	rec.AddInfo(p+"STRAND", strings.Join(strands, ","))
+	rec.AddInfo(a.key(GtfGeneSymbol), strings.Join(names, ","))
+	rec.AddInfo(a.key(GtfGeneID), strings.Join(ids, ","))
+	rec.AddInfo(a.key(GtfStrand), strings.Join(strands, ","))
 	if hasBiotype {
-		rec.AddInfo(p+"BIOTYPE", strings.Join(biotypes, ","))
+		rec.AddInfo(a.key(GtfBiotype), strings.Join(biotypes, ","))
 	}
-	rec.AddInfo(p+"REGION", strings.Join(regions, ","))
+	rec.AddInfo(a.key(GtfRegion), strings.Join(regions, ","))
 	if len(coding) > 0 {
-		rec.AddInfo(p+"CODING", strings.Join(coding, ","))
+		rec.AddInfo(a.key(GtfCoding), strings.Join(coding, ","))
 	}
 	if len(noncoding) > 0 {
-		rec.AddInfo(p+"NONCODING", strings.Join(noncoding, ","))
+		rec.AddInfo(a.key(GtfNoncoding), strings.Join(noncoding, ","))
 	}
 	return nil
 }
