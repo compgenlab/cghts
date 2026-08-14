@@ -73,7 +73,7 @@ func TestPruningNeverChangesTheAnswer(t *testing.T) {
 
 			// Full scan, deliberately bypassing the pruning path.
 			var full []Call
-			if err := scanParquet(mustMember(t, CallsPath(base)), func(c Call) bool {
+			if err := scanWholeMember(mustMember(t, CallsPath(base)), func(c Call) bool {
 				if SameLocus(c.Locus(), l) {
 					full = append(full, c)
 				}
@@ -104,7 +104,7 @@ func TestPruningActuallySkips(t *testing.T) {
 
 	groups, kept := 0, 0
 	l := Locus{Chrom: "chr17", Pos: 1000, Ref: "A", Alt: "G"}
-	keep := locusFilter(l)
+	keep := locusFilter(l).rowGroup
 	if err := eachRowGroup(mustMember(t, CallsPath(base)), func(rg parquet.RowGroup) {
 		groups++
 		if keep(rg) {

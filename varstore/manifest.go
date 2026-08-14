@@ -86,6 +86,11 @@ type ManifestParams struct {
 	// has no other way to find out.
 	DepthBands []int32 `json:"depth_bands,omitempty"`
 
+	// Format are the FORMAT fields captured onto the ALT calls, if any. The
+	// same reasoning as Info: absence and a zero read alike from a typed
+	// reader, and only this can tell them apart.
+	Format []FormatField `json:"format,omitempty"`
+
 	// Info are the INFO fields captured into sites.parquet, if any.
 	//
 	// THIS IS THE ONLY PLACE ABSENCE IS ANSWERABLE. A typed reader gets a zero
@@ -114,6 +119,54 @@ type ManifestCounts struct {
 type MemberInfo struct {
 	Rows  int64 `json:"rows"`
 	Bytes int64 `json:"bytes"`
+
+	// Shards, when this member is split by coordinate. Empty means one file
+	// under the member's own name, which is every store written before
+	// splitting existed and every store small enough not to want it.
+	//
+	// THE INDEX IS THE POINT. Parquet already prunes row groups by their
+	// statistics, but the footer carrying those statistics is at the end of the
+	// file -- so a locus query against a whole-genome member must fetch and
+	// parse a footer describing hundreds of gigabytes before it can decide to
+	// read none of it. A shard index in the manifest answers the same question
+	// having read only the manifest, and over object storage that is the
+	// difference between one small GET and a large one.
+	Shards []ShardInfo `json:"shards,omitempty"`
+}
+
+// ShardInfo is one coordinate range of a split member.
+//
+// Shards are ALIGNED ACROSS MEMBERS: shard k of calls, sites and regions cover
+// the same interval, so a locus query reads the k'th of each and never has to
+// reconcile two different partitionings. A shard never spans chromosomes, which
+// is what lets First and Last be compared without a chromosome check.
+type ShardInfo struct {
+	// Name is the file, relative to the store: "calls/00007.parquet".
+	Name  string `json:"name"`
+	Chrom string `json:"chrom"`
+
+	// First and Last bound the SITE coordinates this shard covers, inclusive.
+	//
+	// For regions the bound is on the interval, not on any single run: a run is
+	// broken at shard boundaries when it is written, so every run lies wholly
+	// inside one shard. That is what makes a shard answerable on its own --
+	// without it, a query would have to read every earlier shard in case a run
+	// started there and reached in.
+	First int32 `json:"first"`
+	Last  int32 `json:"last"`
+
+	Rows  int64 `json:"rows"`
+	Bytes int64 `json:"bytes"`
+}
+
+// Covers reports whether a position falls in this shard.
+func (s ShardInfo) Covers(chrom string, pos int32) bool {
+	return SameChrom(s.Chrom, chrom) && pos >= s.First && pos <= s.Last
+}
+
+// Overlaps reports whether a coordinate span touches this shard.
+func (s ShardInfo) Overlaps(chrom string, first, last int32) bool {
+	return SameChrom(s.Chrom, chrom) && last >= s.First && first <= s.Last
 }
 
 // ChromCensus is what one chromosome contributed, as counted by the writer
