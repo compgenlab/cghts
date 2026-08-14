@@ -9,7 +9,7 @@ import (
 	"github.com/compgenlab/cghts/iosource"
 )
 
-// Store kinds, as accepted by OpenVolume and returned by StoreKind.
+// Store kinds, as accepted by Open and returned by StoreKind.
 const (
 	KindVcf     = "vcf"
 	KindParquet = "parquet"
@@ -71,10 +71,11 @@ func StoreKind(ctx context.Context, locator string) (string, error) {
 		"suffix and no %s was found in it", ErrUnknownStoreKind, locator, VolumeManifestFile)
 }
 
-// OpenVolume opens whichever backend the locator names.
+// Open opens whichever backend the locator names: a multi-volume archive, a
+// single volume, or a VCF.
 //
 // kind forces one ("vcf" or "parquet"); an empty kind infers via StoreKind.
-func OpenVolume(ctx context.Context, locator, kind string) (Store, error) {
+func Open(ctx context.Context, locator, kind string) (Store, error) {
 	switch strings.ToLower(kind) {
 	case KindVcf:
 		return OpenVcfContext(ctx, locator)
@@ -99,7 +100,7 @@ func OpenVolume(ctx context.Context, locator, kind string) (Store, error) {
 	// says "not a volume", which is true and is the direction a failure should
 	// point.
 	//
-	// Falling through to OpenVolume is what makes a bare volume openable as an
+	// Falling through to Open is what makes a bare volume openable as an
 	// archive of one, so a caller opens whatever a conversion produced the same
 	// way.
 	if IsStore(ctx, locator) {
@@ -110,7 +111,7 @@ func OpenVolume(ctx context.Context, locator, kind string) (Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return OpenVolume(ctx, locator, inferred)
+	return Open(ctx, locator, inferred)
 }
 
 // KindStore names a varstore: several volumes, disjoint by chromosome, read as
