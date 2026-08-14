@@ -72,7 +72,7 @@ func TestNewWriterRejectsBadMetaKeyBeforeTouchingDisk(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
 	buildCensusStore(t, base, WriterOpts{MinDP: 10})
 
-	before, err := ReadManifest(base)
+	before, err := ReadVolumeManifest(base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestNewWriterRejectsBadMetaKeyBeforeTouchingDisk(t *testing.T) {
 		}
 	}
 
-	after, err := ReadManifest(base)
+	after, err := ReadVolumeManifest(base)
 	if err != nil {
 		t.Fatalf("the existing store was damaged by a rejected conversion: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestMetaRoundTripsThroughManifestAndStore(t *testing.T) {
 	}
 	buildCensusStore(t, base, WriterOpts{MinDP: 10, Meta: meta})
 
-	m, err := ReadManifest(base)
+	m, err := ReadVolumeManifest(base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestNoMetaIsOmittedEntirely(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
 	buildCensusStore(t, base, WriterOpts{MinDP: 10})
 
-	m, err := ReadManifest(base)
+	m, err := ReadVolumeManifest(base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestNoMetaIsOmittedEntirely(t *testing.T) {
 		t.Errorf("Meta = %v, want nil", m.Meta)
 	}
 
-	f, err := os.Open(ManifestPath(base))
+	f, err := os.Open(VolumeManifestPath(base))
 	if err != nil {
 		t.Fatal(err)
 	}

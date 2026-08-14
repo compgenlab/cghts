@@ -73,7 +73,7 @@ func TestPruningNeverChangesTheAnswer(t *testing.T) {
 
 			// Full scan, deliberately bypassing the pruning path.
 			var full []Call
-			if err := scanWholeMember(mustMember(t, CallsPath(base)), func(c Call) bool {
+			if err := scanWholeTable(mustTable(t, CallsPath(base)), func(c Call) bool {
 				if SameLocus(c.Locus(), l) {
 					full = append(full, c)
 				}
@@ -105,7 +105,7 @@ func TestPruningActuallySkips(t *testing.T) {
 	groups, kept := 0, 0
 	l := Locus{Chrom: "chr17", Pos: 1000, Ref: "A", Alt: "G"}
 	keep := locusFilter(l).rowGroup
-	if err := eachRowGroup(mustMember(t, CallsPath(base)), func(rg parquet.RowGroup) {
+	if err := eachRowGroup(mustTable(t, CallsPath(base)), func(rg parquet.RowGroup) {
 		groups++
 		if keep(rg) {
 			kept++
@@ -175,10 +175,10 @@ func summarise(cs []Call) string {
 	return out
 }
 
-// mustMember opens a store member for a test, failing the test if it cannot.
-func mustMember(t *testing.T, locator string) *member {
+// mustTable opens a store table for a test, failing the test if it cannot.
+func mustTable(t *testing.T, locator string) *table {
 	t.Helper()
-	m, err := openMember(context.Background(), locator)
+	m, err := openTable(context.Background(), locator)
 	if err != nil {
 		t.Fatal(err)
 	}

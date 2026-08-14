@@ -11,41 +11,41 @@ import (
 	"github.com/compgenlab/cghts/iosource"
 )
 
-// ManifestMember is the store member that marks a conversion complete.
-const ManifestMember = "manifest"
+// VolumeManifestName is the store table that marks a conversion complete.
+const VolumeManifestName = "manifest"
 
-// ManifestFile is the manifest's name inside the store directory.
-const ManifestFile = ManifestMember + ".json.gz"
+// VolumeManifestFile is the manifest's name inside the store directory.
+const VolumeManifestFile = VolumeManifestName + ".json.gz"
 
-// ManifestVersion is the schema version of the manifest document itself.
+// VolumeManifestVersion is the schema version of the manifest document itself.
 // It exists so a future reader can refuse a layout it does not understand
-// rather than silently misreading one; nothing about the parquet members is
+// rather than silently misreading one; nothing about the parquet tables is
 // versioned by it.
-const ManifestVersion = 1
+const VolumeManifestVersion = 1
 
-// ManifestPath returns the manifest file for a store.
-func ManifestPath(base string) string { return joinStore(base, ManifestFile) }
+// VolumeManifestPath returns the manifest file for a store.
+func VolumeManifestPath(base string) string { return joinStore(base, VolumeManifestFile) }
 
-// Manifest records what a conversion actually wrote.
+// VolumeManifest records what a conversion actually wrote.
 //
-// It exists because the parquet members cannot answer one question about
+// It exists because the parquet tables cannot answer one question about
 // themselves: whether the run that produced them reached the end. A footer is
-// written only by the writer's Close, so a member that parses is a member that
-// was finished -- but a *set* of finished members says nothing about how much of
+// written only by the writer's Close, so a table that parses is a table that
+// was finished -- but a *set* of finished tables says nothing about how much of
 // the intended input went into them. The metadata already in the calls file is
 // worse than silent on this: MetaSource and MetaContigs are stamped at
 // construction, before a single record is read, so a store holding three
 // chromosomes of a twenty-two-input conversion names all twenty-two inputs and
 // declares all twenty-two contigs.
 //
-// So the manifest is written last, after every member is closed, and only then.
+// So the manifest is written last, after every table is closed, and only then.
 // Its presence is the claim "this conversion ran to completion"; the counts in
 // it are what a reader checks that claim against.
 //
 // Chromosomes is the part that earns the file. It turns "this store is smaller
 // than I expected" into "chr4 through chr22 have no sites", which is the only
 // thing that can contradict the intent recorded at construction.
-type Manifest struct {
+type VolumeManifest struct {
 	FormatVersion int       `json:"format_version"`
 	Complete      bool      `json:"complete"`
 	Created       time.Time `json:"created"`
@@ -60,10 +60,10 @@ type Manifest struct {
 	// this field existed -- absent means "not stated", never "stated as nothing".
 	Meta map[string]string `json:"meta,omitempty"`
 
-	Params  ManifestParams        `json:"params"`
-	Samples []string              `json:"samples"`
-	Counts  ManifestCounts        `json:"counts"`
-	Members map[string]MemberInfo `json:"members"`
+	Params  ManifestParams       `json:"params"`
+	Samples []string             `json:"samples"`
+	Counts  ManifestCounts       `json:"counts"`
+	Tables  map[string]TableInfo `json:"tables"`
 
 	Chromosomes     []ChromCensus `json:"chromosomes"`
 	ContigsDeclared []string      `json:"contigs_declared,omitempty"`
@@ -110,23 +110,54 @@ type ManifestCounts struct {
 	Regions int64 `json:"regions"`
 }
 
-// MemberInfo is one member's size on disk, as written.
+// UnmarshalJSON reads a volume manifest, accepting the pre-rename key for the
+// table index.
 //
-// Rows is checked against the member's own parquet footer at open. That is the
-// check which catches a member that is present and well-formed but does not
+// The three parquet tables used to be "members", and the word had to give: it
+// named one of the tables inside a volume AND one of the volumes inside a
+// store, which are different axes entirely. Volumes kept it; tables got the
+// name they always were.
+//
+// Stores written before the rename carry the table index under "members", and
+// reading it is not cosmetic. The row counts there are what catch a table that
+// parses but belongs to a different conversion. Ignoring the old key would not
+// fail loudly -- it would leave an empty map, and the check would pass over
+// nothing at all.
+//
+// Written only as "tables". This reads both.
+func (m *VolumeManifest) UnmarshalJSON(b []byte) error {
+	type raw VolumeManifest
+	var v struct {
+		raw
+		LegacyTables map[string]TableInfo `json:"members"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*m = VolumeManifest(v.raw)
+	if len(m.Tables) == 0 {
+		m.Tables = v.LegacyTables
+	}
+	return nil
+}
+
+// TableInfo is one table's size on disk, as written.
+//
+// Rows is checked against the table's own parquet footer at open. That is the
+// check which catches a table that is present and well-formed but does not
 // belong to this store -- one copied in from another conversion, say -- which
 // nothing else can see, since sites and regions carry no metadata of their own.
-type MemberInfo struct {
+type TableInfo struct {
 	Rows  int64 `json:"rows"`
 	Bytes int64 `json:"bytes"`
 
-	// Shards, when this member is split by coordinate. Empty means one file
-	// under the member's own name, which is every store written before
+	// Shards, when this table is split by coordinate. Empty means one file
+	// under the table's own name, which is every store written before
 	// splitting existed and every store small enough not to want it.
 	//
 	// THE INDEX IS THE POINT. Parquet already prunes row groups by their
 	// statistics, but the footer carrying those statistics is at the end of the
-	// file -- so a locus query against a whole-genome member must fetch and
+	// file -- so a locus query against a whole-genome table must fetch and
 	// parse a footer describing hundreds of gigabytes before it can decide to
 	// read none of it. A shard index in the manifest answers the same question
 	// having read only the manifest, and over object storage that is the
@@ -134,7 +165,7 @@ type MemberInfo struct {
 	Shards []ShardInfo `json:"shards,omitempty"`
 }
 
-// ShardInfo is one coordinate range of a split member.
+// ShardInfo is one coordinate range of a split table.
 //
 // Shards are ALIGNED ACROSS MEMBERS: shard k of calls, sites and regions cover
 // the same interval, so a locus query reads the k'th of each and never has to
@@ -179,13 +210,13 @@ type ChromCensus struct {
 	LastPos  int32  `json:"last_pos"`
 }
 
-// WriteManifest writes the manifest for the store at base.
+// WriteVolumeManifest writes the manifest for the store at base.
 //
 // The write is atomic: the document goes to a temporary file in the store
 // directory and is renamed into place. A manifest is a completion marker, so a
 // half-written one would be worse than none at all -- it would claim the store
 // is finished while being unreadable proof of the opposite.
-func WriteManifest(base string, m Manifest) error {
+func WriteVolumeManifest(base string, m VolumeManifest) error {
 	sink, err := OpenSink(base)
 	if err != nil {
 		return err
@@ -201,12 +232,12 @@ func WriteManifest(base string, m Manifest) error {
 // is a completion marker: one that appeared before its own contents would claim
 // a store is finished while being proof of the opposite.
 //
-// A sink does not have that problem to solve. A local member is created and
-// closed in one call here, and an object store's member does not exist at all
+// A sink does not have that problem to solve. A local table is created and
+// closed in one call here, and an object store's table does not exist at all
 // until its upload completes -- so "appears whole or not at all" is the sink's
 // property rather than something this function has to arrange.
-func WriteManifestTo(sink Sink, m Manifest) error {
-	f, err := sink.Create(ManifestFile)
+func WriteManifestTo(sink Sink, m VolumeManifest) error {
+	f, err := sink.Create(VolumeManifestFile)
 	if err != nil {
 		return fmt.Errorf("creating the manifest in %s: %w", sink.Describe(), err)
 	}
@@ -227,13 +258,13 @@ func WriteManifestTo(sink Sink, m Manifest) error {
 	return nil
 }
 
-func ReadManifest(base string) (*Manifest, error) {
-	return ReadManifestContext(context.Background(), base)
+func ReadVolumeManifest(base string) (*VolumeManifest, error) {
+	return ReadVolumeManifestContext(context.Background(), base)
 }
 
-// ReadManifestContext reads the manifest from any locator.
-func ReadManifestContext(ctx context.Context, base string) (*Manifest, error) {
-	locator := ManifestPath(TrimStoreSuffix(base))
+// ReadVolumeManifestContext reads the manifest from any locator.
+func ReadVolumeManifestContext(ctx context.Context, base string) (*VolumeManifest, error) {
+	locator := VolumeManifestPath(TrimStoreSuffix(base))
 	src, err := iosource.Open(ctx, locator)
 	if err != nil {
 		return nil, err
@@ -248,7 +279,7 @@ func ReadManifestContext(ctx context.Context, base string) (*Manifest, error) {
 		return nil, fmt.Errorf("reading %s: %w", locator, err)
 	}
 	defer zr.Close()
-	var m Manifest
+	var m VolumeManifest
 	if err := json.NewDecoder(zr).Decode(&m); err != nil {
 		return nil, fmt.Errorf("reading %s: %w", locator, err)
 	}

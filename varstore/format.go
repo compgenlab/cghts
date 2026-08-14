@@ -15,10 +15,10 @@ import (
 // and a Number=1 field simply repeats down the ALTs of a multiallelic record.
 //
 // WHAT IT COSTS, which is the difference from INFO and the reason this defaults
-// to nothing. calls.parquet is the large member -- 4.7 million rows against
+// to nothing. calls.parquet is the large table -- 4.7 million rows against
 // 50,000 sites on a 500-sample fixture, a ratio of 94 -- so a column here costs
 // roughly a hundred times what the same column costs on the sites catalog. The
-// whole member compresses to about four bytes per call across its twelve
+// whole table compresses to about four bytes per call across its twelve
 // existing columns, because sample and chromosome are dictionary encoded and
 // positions delta encoded; one added integer column is 15-35% on top of that,
 // depending on how well the values compress. Worth it for something a query
@@ -27,7 +27,7 @@ import (
 // AND ONLY FOR CARRIERS. A 0/0 is never stored, so a captured FORMAT value
 // exists for ALT calls and nowhere else. Depth for reference calls comes from
 // the callable runs, which carry MinDP per depth band -- so "DP for a carrier"
-// and "DP for a non-carrier" are answered by two different members, by design.
+// and "DP for a non-carrier" are answered by two different tables, by design.
 
 // FormatField is one captured FORMAT field.
 type FormatField struct {

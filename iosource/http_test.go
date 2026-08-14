@@ -97,7 +97,7 @@ func TestHTTPRangeFailsOnServerError(t *testing.T) {
 		t.Fatal("NewHTTPRange succeeded on a 500")
 	}
 	// A server error is not an absence, and must not be mistaken for one --
-	// varstore treats a missing optional member as "written empty".
+	// varstore treats a missing optional table as "written empty".
 	if errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("a 500 should not read as fs.ErrNotExist: %v", err)
 	}

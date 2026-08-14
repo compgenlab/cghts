@@ -31,7 +31,7 @@ func TestCensusFoldsChromosomeSpellings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m, err := ReadManifest(base)
+	m, err := ReadVolumeManifest(base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestIncludeRefTailOrderIsDeterministic(t *testing.T) {
 }
 
 // Finish leaves nothing when it cannot write the manifest. By that point Close
-// has given all three members valid footers, so what is on disk is
+// has given all three tables valid footers, so what is on disk is
 // indistinguishable from a finished conversion missing only its marker -- and a
 // reader would refuse it forever, with the overwrite guard blocking the retry.
 func TestFinishDiscardsWhenTheManifestCannotBeWritten(t *testing.T) {
@@ -123,7 +123,7 @@ func TestFinishDiscardsWhenTheManifestCannotBeWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Remove a member out from under the writer. The handle stays open, so Close
+	// Remove a table out from under the writer. The handle stays open, so Close
 	// still writes its footer, but manifest()'s os.Stat then fails -- which is
 	// the failure mode this guards.
 	if err := os.Remove(SitesPath(base)); err != nil {
@@ -131,10 +131,10 @@ func TestFinishDiscardsWhenTheManifestCannotBeWritten(t *testing.T) {
 	}
 
 	if err := w.Finish(); err == nil {
-		t.Fatal("Finish succeeded despite being unable to size a member")
+		t.Fatal("Finish succeeded despite being unable to size a table")
 	}
 
-	for _, p := range []string{CallsPath(base), SitesPath(base), RegionsPath(base), ManifestPath(base)} {
+	for _, p := range []string{CallsPath(base), SitesPath(base), RegionsPath(base), VolumeManifestPath(base)} {
 		if _, err := os.Stat(p); err == nil {
 			t.Errorf("%s survived a failed Finish", filepath.Base(p))
 		}

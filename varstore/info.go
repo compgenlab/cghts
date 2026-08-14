@@ -51,7 +51,7 @@ type InfoField struct {
 	// Name is the VCF INFO key, e.g. "R2".
 	Name string `json:"name"`
 	// Column is where it lands in sites.parquet, e.g. "info_r2".
-	Column string `json:"column"`
+	Column string   `json:"column"`
 	Type   InfoType `json:"type"`
 	// Number is the VCF header's Number: "1" (one value per site) or "A" (one
 	// per ALT). Flags carry "0".

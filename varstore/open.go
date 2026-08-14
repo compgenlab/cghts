@@ -9,7 +9,7 @@ import (
 	"github.com/compgenlab/cghts/iosource"
 )
 
-// Store kinds, as accepted by OpenStore and returned by StoreKind.
+// Store kinds, as accepted by OpenVolume and returned by StoreKind.
 const (
 	KindVcf     = "vcf"
 	KindParquet = "parquet"
@@ -52,62 +52,67 @@ func StoreKind(ctx context.Context, locator string) (string, error) {
 			return KindVcf, nil
 		}
 	}
-	if strings.HasSuffix(lower, ".parquet") || strings.HasSuffix(lower, ManifestFile) {
+	if strings.HasSuffix(lower, ".parquet") || strings.HasSuffix(lower, VolumeManifestFile) {
 		return KindParquet, nil
 	}
-	if _, err := ReadManifestContext(ctx, locator); err == nil {
+	if _, err := ReadVolumeManifestContext(ctx, locator); err == nil {
 		return KindParquet, nil
 	}
-	// No manifest, but a calls member still identifies this as a store -- an
+	// No manifest, but a calls table still identifies this as a store -- an
 	// unfinished one. Saying so is what makes the failure diagnosable: opening
 	// it then reports "no manifest, re-convert it or inspect it", which is
 	// actionable, where calling it unrecognizable sends the reader off to check
 	// their path. Without this the common case is circular, since the manifest
 	// is both what identifies a store and the thing it is missing.
-	if memberExists(ctx, CallsPath(locator)) {
+	if tableExists(ctx, CallsPath(locator)) {
 		return KindParquet, nil
 	}
 	return "", fmt.Errorf("%w: cannot tell what kind of store %q is, it has no VCF "+
-		"suffix and no %s was found in it", ErrUnknownStoreKind, locator, ManifestFile)
+		"suffix and no %s was found in it", ErrUnknownStoreKind, locator, VolumeManifestFile)
 }
 
-// OpenStore opens whichever backend the locator names.
+// OpenVolume opens whichever backend the locator names.
 //
 // kind forces one ("vcf" or "parquet"); an empty kind infers via StoreKind.
-func OpenStore(ctx context.Context, locator, kind string) (Store, error) {
+func OpenVolume(ctx context.Context, locator, kind string) (Store, error) {
 	switch strings.ToLower(kind) {
 	case KindVcf:
 		return OpenVcfContext(ctx, locator)
 	case KindParquet:
 		return OpenParquetContext(ctx, locator)
-	case KindSet:
-		return OpenSet(ctx, locator)
+	case KindStore:
+		return OpenStore(ctx, locator)
 	case "":
 	default:
 		return nil, fmt.Errorf("unknown store kind %q (use %s or %s)", kind, KindVcf, KindParquet)
 	}
 
-	// A SET IS CHECKED FIRST, and by its own marker rather than by a field
+	// AN ARCHIVE IS CHECKED FIRST, and by its own marker rather than by a field
 	// inside a shared one.
 	//
 	// The alternative -- one manifest.json.gz carrying a kind -- is tidier and
 	// fails worse. Every reader that already exists, this package's older
 	// versions included, treats the presence of manifest.json.gz as "this is a
-	// store"; a set using that name would be opened as one, parse into a
-	// manifest describing no members, and fail somewhere further in with an
+	// volume"; an archive using that name would be opened as one, parse into a
+	// manifest describing no tables, and fail somewhere further in with an
 	// error about a missing calls file. A distinct marker means an old reader
-	// says "not a store", which is true and is the direction a failure should
+	// says "not a volume", which is true and is the direction a failure should
 	// point.
-	if IsSet(ctx, locator) {
-		return OpenSet(ctx, locator)
+	//
+	// Falling through to OpenVolume is what makes a bare volume openable as an
+	// archive of one, so a caller opens whatever a conversion produced the same
+	// way.
+	if IsStore(ctx, locator) {
+		return OpenStore(ctx, locator)
 	}
 
 	inferred, err := StoreKind(ctx, locator)
 	if err != nil {
 		return nil, err
 	}
-	return OpenStore(ctx, locator, inferred)
+	return OpenVolume(ctx, locator, inferred)
 }
 
-// KindSet names a varset: several stores, disjoint by chromosome, read as one.
-const KindSet = "varset"
+// KindStore names a varstore: several volumes, disjoint by chromosome, read as
+// one.
+const KindStore = "varstore"

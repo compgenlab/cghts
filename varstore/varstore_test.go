@@ -8,11 +8,11 @@ import (
 	"testing"
 )
 
-// A varset: several stores, disjoint by chromosome, read as one.
+// A varstore: several volumes, disjoint by chromosome, read as one.
 //
-// The tests that matter are that it answers exactly as its members do, and that
-// it REFUSES to be built from members that disagree -- because a set whose
-// members disagree answers with a different population per chromosome, and
+// The tests that matter are that it answers exactly as its volumes do, and that
+// it REFUSES to be built from volumes that disagree -- because a set whose
+// volumes disagree answers with a different population per chromosome, and
 // nothing outside it could see that.
 
 // chromStore writes a one-chromosome store with three samples.
@@ -56,27 +56,27 @@ func chromStore(t *testing.T, dir, chrom string, samples []string, minDP int32) 
 func buildSet(t *testing.T, chroms []string, samples []string) string {
 	t.Helper()
 	dir := t.TempDir()
-	var members []string
+	var volumes []string
 	for _, c := range chroms {
 		chromStore(t, dir, c, samples, 10)
-		members = append(members, c)
+		volumes = append(volumes, c)
 	}
-	man, err := BuildSet(context.Background(), dir, members, "test", "test")
+	man, err := BuildStore(context.Background(), dir, volumes, "test", "test")
 	if err != nil {
-		t.Fatalf("BuildSet: %v", err)
+		t.Fatalf("BuildStore: %v", err)
 	}
-	if err := WriteSetManifest(dir, *man); err != nil {
+	if err := WriteStoreManifest(dir, *man); err != nil {
 		t.Fatal(err)
 	}
 	return dir
 }
 
-func TestSetAnswersAsItsMembersDo(t *testing.T) {
+func TestAStoreAnswersAsItsVolumesDo(t *testing.T) {
 	samples := []string{"S1", "S2", "S3"}
 	chroms := []string{"chr1", "chr2", "chr7"}
 	dir := buildSet(t, chroms, samples)
 
-	set, err := OpenSet(context.Background(), dir)
+	set, err := OpenStore(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestSetAnswersAsItsMembersDo(t *testing.T) {
 			}
 			for _, st := range a {
 				if by[st.SampleID] != st.State {
-					t.Errorf("%s %s: member %q, set %q", l, st.SampleID, st.State, by[st.SampleID])
+					t.Errorf("%s %s: volume %q, set %q", l, st.SampleID, st.State, by[st.SampleID])
 				}
 			}
 		}
@@ -113,11 +113,11 @@ func TestSetAnswersAsItsMembersDo(t *testing.T) {
 }
 
 // The shape a set exists for: one question spanning several chromosomes,
-// answered by the members that hold them.
-func TestSetClassifyManySpansMembers(t *testing.T) {
+// answered by the volumes that hold them.
+func TestStoreClassifyManySpansVolumes(t *testing.T) {
 	samples := []string{"S1", "S2", "S3"}
 	dir := buildSet(t, []string{"chr1", "chr2", "chr7"}, samples)
-	set, err := OpenSet(context.Background(), dir)
+	set, err := OpenStore(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestSetClassifyManySpansMembers(t *testing.T) {
 	for _, chrom := range []string{"chr1", "chr2", "chr7"} {
 		loci = append(loci, Locus{Chrom: chrom, Pos: 100, Ref: "G", Alt: "A"})
 	}
-	// And one on a chromosome no member holds.
+	// And one on a chromosome no volume holds.
 	loci = append(loci, Locus{Chrom: "chrX", Pos: 100, Ref: "G", Alt: "A"})
 
 	got, err := set.ClassifyMany(loci, Gate{MinDP: 10})
@@ -155,16 +155,16 @@ func TestSetClassifyManySpansMembers(t *testing.T) {
 	}
 }
 
-// A set whose members disagree would answer with a different population per
+// A set whose volumes disagree would answer with a different population per
 // chromosome, and nothing outside it could see that. So it cannot be built.
-func TestSetRefusesDisagreeingMembers(t *testing.T) {
+func TestAStoreRefusesDisagreeingVolumes(t *testing.T) {
 	t.Run("different rosters", func(t *testing.T) {
 		dir := t.TempDir()
 		chromStore(t, dir, "chr1", []string{"S1", "S2", "S3"}, 10)
 		chromStore(t, dir, "chr2", []string{"S1", "S2"}, 10)
-		_, err := BuildSet(context.Background(), dir, []string{"chr1", "chr2"}, "t", "t")
+		_, err := BuildStore(context.Background(), dir, []string{"chr1", "chr2"}, "t", "t")
 		if err == nil {
-			t.Fatal("a set was built from members holding different samples")
+			t.Fatal("a set was built from volumes holding different samples")
 		}
 	})
 	t.Run("different depth gates", func(t *testing.T) {
@@ -172,9 +172,9 @@ func TestSetRefusesDisagreeingMembers(t *testing.T) {
 		samples := []string{"S1", "S2"}
 		chromStore(t, dir, "chr1", samples, 10)
 		chromStore(t, dir, "chr2", samples, 20)
-		_, err := BuildSet(context.Background(), dir, []string{"chr1", "chr2"}, "t", "t")
+		_, err := BuildStore(context.Background(), dir, []string{"chr1", "chr2"}, "t", "t")
 		if err == nil {
-			t.Fatal("a set was built from members converted at different depth gates; " +
+			t.Fatal("a set was built from volumes converted at different depth gates; " +
 				"they do not mean the same thing by callable")
 		}
 	})
@@ -187,18 +187,18 @@ func TestSetRefusesDisagreeingMembers(t *testing.T) {
 		w, _ := NewWriter(base, WriterOpts{Samples: samples, MinDP: 10})
 		_ = w.WriteSite(Site{Chrom: "chr1", Pos: 500, Ref: "T", Alt: "C"})
 		_ = w.Finish()
-		_, err := BuildSet(context.Background(), dir, []string{"chr1", "dup"}, "t", "t")
+		_, err := BuildStore(context.Background(), dir, []string{"chr1", "dup"}, "t", "t")
 		if err == nil {
-			t.Fatal("a set was built with two members holding chr1; a locus would have " +
+			t.Fatal("a set was built with two volumes holding chr1; a locus would have " +
 				"two answers and no rule for choosing")
 		}
 	})
 }
 
-// A member swapped in from another conversion is caught when it opens, rather
-// than requiring every manifest to be read at OpenSet -- which would undo the
-// laziness the set exists for.
-func TestSetCatchesASwappedMemberOnOpen(t *testing.T) {
+// A volume swapped in from another conversion is caught when it opens, rather
+// than requiring every manifest to be read at OpenStore -- which would undo the
+// laziness the store exists for.
+func TestAStoreCatchesASwappedVolumeOnOpen(t *testing.T) {
 	samples := []string{"S1", "S2", "S3"}
 	dir := buildSet(t, []string{"chr1", "chr2"}, samples)
 
@@ -209,35 +209,35 @@ func TestSetCatchesASwappedMemberOnOpen(t *testing.T) {
 		t.Skipf("could not stage the swap: %v", err)
 	}
 
-	set, err := OpenSet(context.Background(), dir)
+	set, err := OpenStore(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer set.Close()
 
-	// chr1 still answers: laziness means the bad member has not been touched.
+	// chr1 still answers: laziness means the bad volume has not been touched.
 	if _, err := set.Classify(Locus{Chrom: "chr1", Pos: 100, Ref: "G", Alt: "A"}, Gate{MinDP: 10}); err != nil {
 		t.Errorf("chr1 failed because chr2 is wrong: %v", err)
 	}
 	// chr2 refuses.
 	_, err = set.Classify(Locus{Chrom: "chr2", Pos: 100, Ref: "G", Alt: "A"}, Gate{MinDP: 10})
 	if err == nil {
-		t.Fatal("a member with a different roster answered; its calls would be attributed " +
+		t.Fatal("a volume with a different roster answered; its calls would be attributed " +
 			"to the wrong people")
 	}
 }
 
-// A set is opened by OpenStore like anything else, so a caller never has to ask
+// A set is opened by OpenVolume like anything else, so a caller never has to ask
 // which it has.
 func TestOpenStoreReturnsASet(t *testing.T) {
 	dir := buildSet(t, []string{"chr1", "chr2"}, []string{"S1", "S2"})
-	st, err := OpenStore(context.Background(), dir, "")
+	st, err := OpenVolume(context.Background(), dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if _, ok := st.(*VarSet); !ok {
-		t.Fatalf("OpenStore returned %T, want *VarSet", st)
+	if _, ok := st.(*VarStore); !ok {
+		t.Fatalf("OpenVolume returned %T, want *VarStore", st)
 	}
 	samples, err := st.Samples()
 	if err != nil || len(samples) != 2 {

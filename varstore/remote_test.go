@@ -109,7 +109,7 @@ func TestParquetStoreOverHTTP(t *testing.T) {
 		}
 	}
 
-	// Classify exercises all three members together.
+	// Classify exercises all three tables together.
 	lst, lerr := local.Classify(Locus{Chrom: "chr1", Pos: 5000, Ref: "A", Alt: "G"}, Gate{MinDP: 10})
 	rst, rerr := remote.Classify(Locus{Chrom: "chr1", Pos: 5000, Ref: "A", Alt: "G"}, Gate{MinDP: 10})
 	if (lerr == nil) != (rerr == nil) {
@@ -154,11 +154,11 @@ func TestParquetStoreOverS3(t *testing.T) {
 	}
 	defer local.Close()
 
-	// Upload the three members with the plain AWS CLI-equivalent: a PUT each.
+	// Upload the three tables with the plain AWS CLI-equivalent: a PUT each.
 	prefix := "varstore-test"
-	for _, m := range []string{CallsMember, SitesMember, RegionsMember} {
+	for _, m := range []string{CallsTable, SitesTable, RegionsTable} {
 		if err := putObject(ctx, bucket, prefix+"/cohort."+m+".parquet",
-			MemberPath(base, m)); err != nil {
+			TablePath(base, m)); err != nil {
 			t.Fatal(err)
 		}
 	}

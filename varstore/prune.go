@@ -355,7 +355,7 @@ func unionFilter(q Query) rowGroupFilter {
 }
 
 // eachRowGroup calls fn for every row group, without reading any rows.
-func eachRowGroup(m *member, fn func(parquet.RowGroup)) error {
+func eachRowGroup(m *table, fn func(parquet.RowGroup)) error {
 	pf, err := m.parsed()
 	if err != nil {
 		return err
@@ -397,7 +397,7 @@ func scanParquetPruned[T any](set *shardSet, keep scanFilter, fn func(T) bool) e
 
 // scanOneShard is the original single-file scan, reporting whether the caller
 // asked to stop so the loop above does not run on into the next shard.
-func scanOneShard[T any](m *member, keep rowGroupFilter, fn func(T) bool) (bool, error) {
+func scanOneShard[T any](m *table, keep rowGroupFilter, fn func(T) bool) (bool, error) {
 	pf, err := m.parsed()
 	if err != nil {
 		return false, err
@@ -469,7 +469,7 @@ func (s *shardSet) shardsMatching(keep scanFilter) []*shard {
 // scanShardsParallel visits every matching shard concurrently, giving each
 // worker its own accumulator and merging in shard order afterwards.
 //
-// EACH SHARD IS ITS OWN FILE, which is what makes this safe. A member holds an
+// EACH SHARD IS ITS OWN FILE, which is what makes this safe. A table holds an
 // io.SectionReader, and a SectionReader is not safe for concurrent use -- so the
 // unit of parallelism is the file, never rows within one. Nothing here touches
 // two goroutines to one reader.

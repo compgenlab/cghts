@@ -228,7 +228,7 @@ type Query struct {
 
 	// IncludeRef also emits the reference (0/0) calls, turning "which variants does
 	// this subject carry" into "every site interrogated for this subject". It needs
-	// the sites and regions members, so a store built with --no-callable refuses
+	// the sites and regions tables, so a store built with --no-callable refuses
 	// with ErrNotClassifiable rather than reporting unobserved samples as reference.
 	IncludeRef bool
 }
