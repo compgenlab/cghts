@@ -71,7 +71,7 @@ func TestOpenStoreInfersAndForces(t *testing.T) {
 	buildCensusStore(t, store, WriterOpts{MinDP: 10})
 	ctx := context.Background()
 
-	s, err := OpenVolume(ctx, store, "")
+	s, err := Open(ctx, store, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestOpenStoreInfersAndForces(t *testing.T) {
 	}
 	s.Close()
 
-	if _, err := OpenVolume(ctx, store, "nonsense"); err == nil {
+	if _, err := Open(ctx, store, "nonsense"); err == nil {
 		t.Error("an unknown --store kind was accepted")
 	}
 }
@@ -176,7 +176,7 @@ func TestUnfinishedStoreIsStillRecognizedAsOne(t *testing.T) {
 		t.Errorf("kind = %q, want %q", kind, KindParquet)
 	}
 
-	_, err = OpenVolume(context.Background(), base, "")
+	_, err = Open(context.Background(), base, "")
 	if err == nil {
 		t.Fatal("an unfinished store opened")
 	}

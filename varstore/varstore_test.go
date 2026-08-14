@@ -227,17 +227,17 @@ func TestAStoreCatchesASwappedVolumeOnOpen(t *testing.T) {
 	}
 }
 
-// A set is opened by OpenVolume like anything else, so a caller never has to ask
+// A set is opened by Open like anything else, so a caller never has to ask
 // which it has.
 func TestOpenStoreReturnsASet(t *testing.T) {
 	dir := buildSet(t, []string{"chr1", "chr2"}, []string{"S1", "S2"})
-	st, err := OpenVolume(context.Background(), dir, "")
+	st, err := Open(context.Background(), dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
 	if _, ok := st.(*VarStore); !ok {
-		t.Fatalf("OpenVolume returned %T, want *VarStore", st)
+		t.Fatalf("Open returned %T, want *VarStore", st)
 	}
 	samples, err := st.Samples()
 	if err != nil || len(samples) != 2 {
