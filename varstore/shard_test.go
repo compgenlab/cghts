@@ -317,3 +317,84 @@ func TestUnsplitStoreHasNoShardIndex(t *testing.T) {
 type devNull struct{}
 
 func (devNull) Write(p []byte) (int, error) { return len(p), nil }
+
+// A caller that lets a run land outside the open shard is REFUSED, in both
+// directions.
+//
+// This is the bug the differential comparison found, and it is worth a test
+// because neither mistake announces itself. A run beginning EARLIER than the
+// shard was never broken at the boundary. One beginning LATER was created after
+// the boundary passed and filed in the shard that is closing -- which is what
+// happens when a caller extends a run into the next shard's first site and only
+// then writes that site, letting the writer discover the rotation too late.
+//
+// Either way the run lands in a shard whose range does not contain it, so no
+// query for those positions ever sees it, and every locus it covered reads as
+// never assayed. On a 200-sample fixture that was 1,796 wrong states out of
+// 80,000 -- nine boundaries times two hundred people -- and nothing errored.
+func TestRunOutsideTheOpenShardIsRefused(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		run  CalledSiteRun
+	}{
+		{"begins before the shard", CalledSiteRun{
+			SampleID: "S1", Chrom: "chr1", Start: 100, End: 150, NSites: 5, MinDP: 30,
+		}},
+		{"begins after the shard", CalledSiteRun{
+			SampleID: "S1", Chrom: "chr1", Start: 9000, End: 9100, NSites: 5, MinDP: 30,
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "store")
+			w, err := NewWriter(dir, WriterOpts{
+				Samples: []string{"S1"}, MinDP: 10, ShardSites: 3,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Sites 200..400 land in the open shard; the runs above sit outside it.
+			for _, pos := range []int32{200, 300, 400, 500} {
+				if err := w.WriteSite(Site{
+					Chrom: "chr1", Pos: pos, Ref: "G", Alt: "A", AN: 2, NCalled: 1,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := w.WriteRegion(c.run); err == nil {
+				t.Fatal("a run outside the open shard was accepted; every locus it covers " +
+					"would read as never assayed and nothing would say so")
+			}
+			_ = w.Close()
+		})
+	}
+}
+
+// WouldRotate is what lets a caller get the ordering right, so it has to be
+// answerable before the site is written rather than after.
+func TestWouldRotateAnticipatesTheBoundary(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	w, err := NewWriter(dir, WriterOpts{
+		Samples: []string{"S1"}, MinDP: 10, ShardSites: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	if w.WouldRotate("chr1") {
+		t.Error("an empty writer wants to rotate before writing anything")
+	}
+	for i, pos := range []int32{100, 200} {
+		if err := w.WriteSite(Site{Chrom: "chr1", Pos: pos, Ref: "G", Alt: "A"}); err != nil {
+			t.Fatal(err)
+		}
+		if want := i == 1; w.WouldRotate("chr1") != want {
+			t.Errorf("after %d sites WouldRotate = %v, want %v", i+1, !want, want)
+		}
+	}
+	// A chromosome change rotates whatever the count.
+	if !w.WouldRotate("chr2") {
+		t.Error("a chromosome change must rotate: a shard's First and Last are compared " +
+			"without a chromosome test, which is only sound if it holds one")
+	}
+}

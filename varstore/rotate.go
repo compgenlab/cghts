@@ -35,6 +35,19 @@ func (w *Writer) noteSite(chrom string, pos int32) error {
 	return nil
 }
 
+// Rotate closes the current shard and opens the next, on request.
+//
+// A CALLER THAT HOLDS STATE SPANNING SITES MUST DRIVE THIS ITSELF, before it
+// extends that state into a site belonging to the next shard. The converter
+// extends each sample's open run to position P and only then writes site P, so
+// a rotation discovered while writing P emits a run that covers P into the
+// shard that is closing -- and P belongs to the next one. Every sample then
+// reads as never assayed at the first site of every shard.
+//
+// WouldRotate answers "is the next site a boundary" so the caller can close its
+// runs and Rotate before touching the record at all.
+func (w *Writer) Rotate() error { return w.rotate() }
+
 // rotate closes the current shard and opens the next.
 func (w *Writer) rotate() error {
 	// The caller's state first, so anything spanning sites lands in the shard it
@@ -108,4 +121,25 @@ func (w *Writer) closeShard() error {
 		})
 	}
 	return nil
+}
+
+// WouldRotate reports whether the next site at this chromosome starts a new
+// shard, so a caller can flush state that spans sites BEFORE extending it into
+// a site that no longer belongs to the open shard.
+//
+// THE ORDERING THIS EXISTS FOR, which cost a differential test to find. The
+// converter extends each sample's open run to position P and only then writes
+// site P. If the rotation is discovered while writing P, the run has already
+// been extended to P and is emitted, ending at P, into the shard that is
+// closing -- while P itself belongs to the next one. Every sample then reads as
+// NEVER ASSAYED at the first site of every shard: 1,796 of 80,000 states on a
+// 200-sample fixture, which is nine boundaries times two hundred people.
+//
+// BeforeRotate cannot fix that on its own, because by the time it fires the run
+// already reaches into the new shard. The caller has to ask first.
+func (w *Writer) WouldRotate(chrom string) bool {
+	if w.opts.ShardSites <= 0 || w.shardSites == 0 {
+		return false
+	}
+	return !SameChrom(chrom, w.shardChrom) || w.shardSites >= w.opts.ShardSites
 }
