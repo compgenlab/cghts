@@ -916,12 +916,22 @@ func (w *Writer) WriteRegion(r CalledSiteRun) error {
 	// reference. That is silent, plausible, and moves a denominator, which is
 	// exactly the failure this package is arranged against. Callers break their
 	// runs in BeforeRotate; this is what catches one that forgot.
-	if w.opts.ShardSites > 0 && w.shardSites > 0 &&
-		SameChrom(r.Chrom, w.shardChrom) && r.Start < w.shardFirst {
+	if w.opts.ShardSites > 0 && w.shardSites > 0 && SameChrom(r.Chrom, w.shardChrom) &&
+		(r.Start < w.shardFirst || r.Start > w.shardLast) {
+		// BOTH DIRECTIONS, because the two mistakes look nothing alike and both
+		// are silent. A run beginning EARLIER than the shard was never broken at
+		// the boundary. One beginning LATER was created after the boundary
+		// passed and filed in the shard that is closing -- which is what happens
+		// when a caller extends a run into the next shard's first site and only
+		// then writes that site, letting the rotation discover itself too late.
+		//
+		// Either way the run lands in a shard whose range does not contain it,
+		// so no query for those positions will ever see it and every locus it
+		// covered reads as never assayed.
 		return fmt.Errorf(
-			"run %s %s:%d-%d begins before the current shard (%s:%d-%d): break runs at shard "+
-				"boundaries with WriterOpts.BeforeRotate, or every locus it covers in an earlier "+
-				"shard will read as never assayed",
+			"run %s %s:%d-%d lies outside the open shard (%s:%d-%d): ask WouldRotate before "+
+				"extending a run into a new shard, close the runs, then Rotate -- otherwise every "+
+				"locus this run covers reads as never assayed",
 			r.SampleID, r.Chrom, r.Start, r.End, w.shardChrom, w.shardFirst, w.shardLast)
 	}
 	w.shardRows[RegionsMember]++
