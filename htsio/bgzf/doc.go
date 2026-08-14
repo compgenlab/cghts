@@ -1,7 +1,7 @@
 // Package bgzf implements reading and writing of BGZF (Blocked GNU Zip Format)
 // block compression as defined in the SAM/BAM specification.
 //
-// BGZF is a multi-member gzip format. Each member (block) holds at most 64 KiB
+// BGZF is a multi-table gzip format. Each table (block) holds at most 64 KiB
 // (MaxUncompressedSize) of uncompressed data and carries an extra "BC" subfield
 // (BSIZE) recording the total block size minus one. The total compressed block
 // size is likewise bounded by 64 KiB (MaxBlockSize). Because blocks are

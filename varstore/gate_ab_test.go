@@ -96,8 +96,8 @@ func TestMultiAllelicCarrierIsNotHetGated(t *testing.T) {
 
 func TestGTClassification(t *testing.T) {
 	for _, c := range []struct {
-		gt              string
-		het, homAlt     bool
+		gt          string
+		het, homAlt bool
 	}{
 		{"0/1", true, false},
 		{"1|0", true, false},

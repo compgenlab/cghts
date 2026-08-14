@@ -28,7 +28,7 @@ func TestStoreKind(t *testing.T) {
 
 		{"cohort/calls.parquet", KindParquet},
 		{"s3://bucket/cohort/sites.parquet", KindParquet},
-		{"s3://bucket/cohort/" + ManifestFile, KindParquet},
+		{"s3://bucket/cohort/" + VolumeManifestFile, KindParquet},
 
 		// A bare directory is resolved by finding a manifest in it.
 		{store, KindParquet},
@@ -71,16 +71,16 @@ func TestOpenStoreInfersAndForces(t *testing.T) {
 	buildCensusStore(t, store, WriterOpts{MinDP: 10})
 	ctx := context.Background()
 
-	s, err := OpenStore(ctx, store, "")
+	s, err := OpenVolume(ctx, store, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.(*ParquetStore); !ok {
-		t.Errorf("inferred backend is %T, want *ParquetStore", s)
+	if _, ok := s.(*ParquetVolume); !ok {
+		t.Errorf("inferred backend is %T, want *ParquetVolume", s)
 	}
 	s.Close()
 
-	if _, err := OpenStore(ctx, store, "nonsense"); err == nil {
+	if _, err := OpenVolume(ctx, store, "nonsense"); err == nil {
 		t.Error("an unknown --store kind was accepted")
 	}
 }
@@ -156,7 +156,7 @@ func TestUnknownKindIsDistinctFromTransportFailure(t *testing.T) {
 	}
 }
 
-// An interrupted conversion leaves members but no manifest. That has to resolve
+// An interrupted conversion leaves tables but no manifest. That has to resolve
 // as a store so opening it produces the actionable error, rather than as an
 // unrecognizable path -- the manifest is both what identifies a store and the
 // thing this one lacks, so treating its absence as "not a store" would make the
@@ -164,7 +164,7 @@ func TestUnknownKindIsDistinctFromTransportFailure(t *testing.T) {
 func TestUnfinishedStoreIsStillRecognizedAsOne(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
 	buildCensusStore(t, base, WriterOpts{MinDP: 10})
-	if err := os.Remove(ManifestPath(base)); err != nil {
+	if err := os.Remove(VolumeManifestPath(base)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -176,11 +176,11 @@ func TestUnfinishedStoreIsStillRecognizedAsOne(t *testing.T) {
 		t.Errorf("kind = %q, want %q", kind, KindParquet)
 	}
 
-	_, err = OpenStore(context.Background(), base, "")
+	_, err = OpenVolume(context.Background(), base, "")
 	if err == nil {
 		t.Fatal("an unfinished store opened")
 	}
-	if !strings.Contains(err.Error(), ManifestFile) {
+	if !strings.Contains(err.Error(), VolumeManifestFile) {
 		t.Errorf("the error does not name the missing manifest: %v", err)
 	}
 }

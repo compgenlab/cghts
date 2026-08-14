@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Splitting a member by coordinate.
+// Splitting a table by coordinate.
 //
 // It is a layout change and nothing else, so the test that matters is that a
 // split store and an unsplit one built from the same rows answer identically --
@@ -20,7 +20,10 @@ func buildShardedStore(t *testing.T, shardSites int64) string {
 	var curChrom string
 	// Open runs, held the way the converter holds them: one per sample, emitted
 	// when coverage breaks OR when a shard boundary arrives.
-	type open struct{ start, last int32; n int32 }
+	type open struct {
+		start, last int32
+		n           int32
+	}
 	runs := map[string]*open{}
 	var w *Writer
 	emit := func() error {
@@ -208,8 +211,8 @@ func TestShardsNeverSpanChromosomes(t *testing.T) {
 	}
 	defer s.Close()
 
-	m := s.Manifest()
-	shards := m.Members[SitesMember].Shards
+	m := s.VolumeManifest()
+	shards := m.Tables[SitesTable].Shards
 	if len(shards) < 2 {
 		t.Fatalf("got %d shards, want at least 2 -- the chromosome change must cut one "+
 			"even when the site count is nowhere near the limit", len(shards))
@@ -236,17 +239,17 @@ func TestShardIndexMatchesTheFiles(t *testing.T) {
 	}
 	defer s.Close()
 
-	m := s.Manifest()
-	for _, member := range []string{CallsMember, SitesMember, RegionsMember} {
-		info := m.Members[member]
+	m := s.VolumeManifest()
+	for _, table := range []string{CallsTable, SitesTable, RegionsTable} {
+		info := m.Tables[table]
 		if len(info.Shards) == 0 {
-			t.Errorf("%s was not split", member)
+			t.Errorf("%s was not split", table)
 			continue
 		}
 		var rows int64
 		for i, si := range info.Shards {
-			if si.Name != ShardFile(member, i) {
-				t.Errorf("%s shard %d named %q, want %q", member, i, si.Name, ShardFile(member, i))
+			if si.Name != ShardFile(table, i) {
+				t.Errorf("%s shard %d named %q, want %q", table, i, si.Name, ShardFile(table, i))
 			}
 			if si.Bytes <= 0 {
 				t.Errorf("%s has no recorded size", si.Name)
@@ -254,7 +257,7 @@ func TestShardIndexMatchesTheFiles(t *testing.T) {
 			rows += si.Rows
 		}
 		if rows != info.Rows {
-			t.Errorf("%s shards total %d rows, member records %d", member, rows, info.Rows)
+			t.Errorf("%s shards total %d rows, table records %d", table, rows, info.Rows)
 		}
 	}
 }
@@ -270,7 +273,7 @@ func TestRunsDoNotCrossShards(t *testing.T) {
 	defer s.Close()
 
 	bounds := map[string]ShardInfo{}
-	for _, si := range s.Manifest().Members[RegionsMember].Shards {
+	for _, si := range s.VolumeManifest().Tables[RegionsTable].Shards {
 		bounds[si.Name] = si
 	}
 	if len(bounds) < 2 {
@@ -306,9 +309,9 @@ func TestUnsplitStoreHasNoShardIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	for _, member := range []string{CallsMember, SitesMember, RegionsMember} {
-		if n := len(s.Manifest().Members[member].Shards); n != 0 {
-			t.Errorf("%s recorded %d shards in an unsplit store", member, n)
+	for _, table := range []string{CallsTable, SitesTable, RegionsTable} {
+		if n := len(s.VolumeManifest().Tables[table].Shards); n != 0 {
+			t.Errorf("%s recorded %d shards in an unsplit store", table, n)
 		}
 	}
 	fmt.Fprint(devNull{}, "")

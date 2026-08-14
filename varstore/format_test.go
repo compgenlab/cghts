@@ -9,7 +9,7 @@ import (
 //
 // The same shape as captured INFO, with the costs the other way round: a call
 // row is one sample at one ALT, so the cardinality fits better, but calls is
-// the large member so each column is expensive. The tests that matter are the
+// the large table so each column is expensive. The tests that matter are the
 // compatibility ones -- an existing reader must not notice the extra columns --
 // and the refusals, since a field that cannot be stored must say so rather than
 // arriving as a column of zeros.
@@ -98,7 +98,7 @@ func TestFormatRoundTrips(t *testing.T) {
 }
 
 // An existing reader must not notice that calls grew columns. This is the whole
-// premise of putting them in calls.parquet rather than a fourth member.
+// premise of putting them in calls.parquet rather than a fourth table.
 func TestTypedCallReaderIgnoresCapturedColumns(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "store")
 	w := formatWriter(t, dir, []FormatField{pidField})

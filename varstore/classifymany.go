@@ -33,7 +33,7 @@ import (
 //
 // The result is keyed by locus; a locus the store never interrogated maps to
 // every sample as StateNotAssayed, exactly as Classify reports it.
-func (s *ParquetStore) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleState, error) {
+func (s *ParquetVolume) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleState, error) {
 	if err := s.classifiable(); err != nil {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func (s *ParquetStore) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleSta
 	// 175ms for calls and 123ms for regions on a 500-sample store, which is
 	// 298ms of waiting for 175ms of work.
 	//
-	// Each member is a distinct set of files, and within a member each shard is
+	// Each table is a distinct set of files, and within a table each shard is
 	// a distinct file, so no two goroutines ever touch one reader. That is the
 	// rule the whole scheme rests on: an io.SectionReader is not safe for
 	// concurrent use, and the unit of parallelism is therefore the file.

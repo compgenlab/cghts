@@ -21,7 +21,7 @@ func TestTrimStoreSuffixSpellings(t *testing.T) {
 		{"/data/stores/cohort/", "/data/stores/cohort"},
 		{"/data/stores/cohort/calls.parquet", "/data/stores/cohort"},
 
-		// A member named on its own is a store in the current directory.
+		// A table named on its own is a store in the current directory.
 		{"calls.parquet", ""},
 
 		// Remote locators resolve identically, and the scheme's "//" survives.
@@ -39,7 +39,7 @@ func TestTrimStoreSuffixSpellings(t *testing.T) {
 	}
 }
 
-func TestMemberPathKeepsTheScheme(t *testing.T) {
+func TestTablePathKeepsTheScheme(t *testing.T) {
 	for _, tc := range []struct{ base, want string }{
 		{"cohort", "cohort/calls.parquet"},
 		{"cohort/", "cohort/calls.parquet"},
@@ -56,7 +56,7 @@ func TestMemberPathKeepsTheScheme(t *testing.T) {
 }
 
 // Reading a store back must work whichever way it is named, since a shell
-// completion lands on a member and a script is likely to carry the slash.
+// completion lands on a table and a script is likely to carry the slash.
 func TestStoreOpensUnderEverySpelling(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "cohort")
@@ -89,18 +89,18 @@ func TestStoreOpensUnderEverySpelling(t *testing.T) {
 	}
 }
 
-// The overwrite guard keys on the members, so a directory holding unrelated
+// The overwrite guard keys on the tables, so a directory holding unrelated
 // files is a fine target and its contents are left alone.
 func TestCheckStoreTargetIgnoresUnrelatedFiles(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
 	if err := EnsureStoreDir(base); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeFile(filepath.Join(base, "README.txt"), "not a member"); err != nil {
+	if err := writeFile(filepath.Join(base, "README.txt"), "not a table"); err != nil {
 		t.Fatal(err)
 	}
 	if err := CheckStoreTarget(base, false); err != nil {
-		t.Errorf("refused a directory holding no members: %v", err)
+		t.Errorf("refused a directory holding no tables: %v", err)
 	}
 
 	w := writeSomeRows(t, base)

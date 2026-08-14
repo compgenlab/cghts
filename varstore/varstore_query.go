@@ -8,30 +8,30 @@ import (
 	"sync"
 )
 
-// Querying a set.
+// Querying an archive.
 //
-// A locus is answered by exactly one member, so dispatch is a lookup rather
-// than a merge -- which is the whole reason a set is not a set of parts. What
+// A locus is answered by exactly one volume, so dispatch is a lookup rather
+// than a merge -- which is the whole reason volumes are not parts. What
 // is left is concurrency: a question spanning several chromosomes is several
 // independent questions, and they are asked at once.
 
-// SiteKnown reports whether the set interrogated a locus.
-func (s *VarSet) SiteKnown(l Locus) (bool, error) {
-	st, ok, err := s.member(l.Chrom)
+// SiteKnown reports whether the store interrogated a locus.
+func (s *VarStore) SiteKnown(l Locus) (bool, error) {
+	st, ok, err := s.volume(l.Chrom)
 	if err != nil || !ok {
 		return false, err
 	}
 	return st.SiteKnown(l)
 }
 
-// Classify resolves one locus, through the member that holds its chromosome.
-func (s *VarSet) Classify(l Locus, g Gate) ([]SampleState, error) {
-	st, ok, err := s.member(l.Chrom)
+// Classify resolves one locus, through the volume that holds its chromosome.
+func (s *VarStore) Classify(l Locus, g Gate) ([]SampleState, error) {
+	st, ok, err := s.volume(l.Chrom)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		// No member covers this chromosome, so nobody looked. Every sample is
+		// No volume covers this chromosome, so nobody looked. Every sample is
 		// NotAssayed -- which is an answer, not a failure.
 		out := make([]SampleState, 0, len(s.man.Samples))
 		for _, name := range s.man.Samples {
@@ -42,7 +42,7 @@ func (s *VarSet) Classify(l Locus, g Gate) ([]SampleState, error) {
 	return st.Classify(l, g)
 }
 
-// ClassifyMany resolves a whole locus set, asking every member concerned at the
+// ClassifyMany resolves a whole locus set, asking every volume concerned at the
 // same time.
 //
 // THE SHAPE THIS EXISTS FOR. A panel spanning fifteen chromosomes is fifteen
@@ -50,24 +50,24 @@ func (s *VarSet) Classify(l Locus, g Gate) ([]SampleState, error) {
 // another wastes exactly the parallelism the layout was arranged to permit --
 // especially over object storage, where each is dominated by latency rather
 // than by work.
-func (s *VarSet) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleState, error) {
+func (s *VarStore) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleState, error) {
 	out := make(map[Locus][]SampleState, len(loci))
 	if len(loci) == 0 {
 		return out, nil
 	}
 
-	// Group by member first, so each is asked once for everything it holds.
-	byMember := map[int][]Locus{}
+	// Group by volume first, so each is asked once for everything it holds.
+	byVolume := map[int][]Locus{}
 	var unheld []Locus
 	for _, l := range loci {
 		if i, ok := s.byChrom[CanonKey(l.Chrom)]; ok {
-			byMember[i] = append(byMember[i], l)
+			byVolume[i] = append(byVolume[i], l)
 			continue
 		}
 		unheld = append(unheld, l)
 	}
 
-	// A chromosome no member holds is not assayed for everyone. Answered
+	// A chromosome no volume holds is not assayed for everyone. Answered
 	// without opening anything.
 	for _, l := range unheld {
 		states := make([]SampleState, 0, len(s.man.Samples))
@@ -76,19 +76,19 @@ func (s *VarSet) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleState, er
 		}
 		out[l] = states
 	}
-	if len(byMember) == 0 {
+	if len(byVolume) == 0 {
 		return out, nil
 	}
 
-	idxs := make([]int, 0, len(byMember))
-	for i := range byMember {
+	idxs := make([]int, 0, len(byVolume))
+	for i := range byVolume {
 		idxs = append(idxs, i)
 	}
 	sort.Ints(idxs)
 
 	// Bounded, because a whole-genome panel would otherwise open twenty-five
 	// stores at once and each of those fans out across its own shards. The cap
-	// is on members; the shard fan-out inside each is capped separately.
+	// is on volumes; the shard fan-out inside each is capped separately.
 	workers := runtime.GOMAXPROCS(0)
 	if workers > len(idxs) {
 		workers = len(idxs)
@@ -104,22 +104,22 @@ func (s *VarSet) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleState, er
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			st, err := s.openMemberAt(i)
+			st, err := s.openVolumeAt(i)
 			if err != nil {
 				errs[n] = err
 				return
 			}
-			results[n], errs[n] = st.ClassifyMany(byMember[i], g)
+			results[n], errs[n] = st.ClassifyMany(byVolume[i], g)
 		}(n, i)
 	}
 	wg.Wait()
 
 	for n, err := range errs {
 		if err != nil {
-			return nil, fmt.Errorf("querying set member %s: %w", s.man.Members[idxs[n]].Name, err)
+			return nil, fmt.Errorf("querying volume %s: %w", s.man.Volumes[idxs[n]].Name, err)
 		}
 	}
-	// Merged in member order, so a result never depends on which finished first.
+	// Merged in volume order, so a result never depends on which finished first.
 	for _, r := range results {
 		for l, states := range r {
 			out[l] = states
@@ -128,10 +128,10 @@ func (s *VarSet) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleState, er
 	return out, nil
 }
 
-// Sites walks every member's catalog, in member order.
-func (s *VarSet) Sites(fn func(Site) bool) error {
-	for i := range s.man.Members {
-		st, err := s.openMemberAt(i)
+// Sites walks every volume's catalog, in volume order.
+func (s *VarStore) Sites(fn func(Site) bool) error {
+	for i := range s.man.Volumes {
+		st, err := s.openVolumeAt(i)
 		if err != nil {
 			return err
 		}
@@ -152,10 +152,10 @@ func (s *VarSet) Sites(fn func(Site) bool) error {
 	return nil
 }
 
-// Regions walks every member's callable runs, in member order.
-func (s *VarSet) Regions(fn func(CalledSiteRun) bool) error {
-	for i := range s.man.Members {
-		st, err := s.openMemberAt(i)
+// Regions walks every volume's callable runs, in volume order.
+func (s *VarStore) Regions(fn func(CalledSiteRun) bool) error {
+	for i := range s.man.Volumes {
+		st, err := s.openVolumeAt(i)
 		if err != nil {
 			return err
 		}
@@ -176,35 +176,35 @@ func (s *VarSet) Regions(fn func(CalledSiteRun) bool) error {
 	return nil
 }
 
-// Site returns one catalog entry, from the member holding its chromosome.
-func (s *VarSet) Site(l Locus) (Site, bool, error) {
-	st, ok, err := s.member(l.Chrom)
+// Site returns one catalog entry, from the volume holding its chromosome.
+func (s *VarStore) Site(l Locus) (Site, bool, error) {
+	st, ok, err := s.volume(l.Chrom)
 	if err != nil || !ok {
 		return Site{}, false, err
 	}
 	return st.Site(l)
 }
 
-// Calls streams the genotypes a query selects, member by member.
+// Calls streams the genotypes a query selects, volume by volume.
 //
 // SEQUENTIAL AND ORDERED, unlike ClassifyMany. The contract is that rows arrive
 // in the store's own order -- contig order, then position, then ALT, then
-// sample -- and a set keeps that by visiting its members in the order they were
+// sample -- and an archive keeps that by visiting its volumes in the order they were
 // declared. Racing them would produce rows faster and in an order no caller
 // could rely on, and the callers that stream are the ones writing a VCF.
 //
-// A query naming no site selector reads every member; one naming loci or spans
-// reads only the members holding those chromosomes.
-func (s *VarSet) Calls(q Query) (iter.Seq2[Call, error], error) {
-	want := s.membersFor(q)
+// A query naming no site selector reads every volume; one naming loci or spans
+// reads only the volumes holding those chromosomes.
+func (s *VarStore) Calls(q Query) (iter.Seq2[Call, error], error) {
+	want := s.volumesFor(q)
 
 	// Setup failures surface here rather than mid-iteration, so a caller learns
 	// about an unusable query before it starts reading. That means opening the
-	// members up front -- which is the one place a set is not lazy, and it is
+	// volumes up front -- which is the one place an archive is not lazy, and it is
 	// the contract that requires it.
-	stores := make([]*ParquetStore, 0, len(want))
+	stores := make([]*ParquetVolume, 0, len(want))
 	for _, i := range want {
-		st, err := s.openMemberAt(i)
+		st, err := s.openVolumeAt(i)
 		if err != nil {
 			return nil, err
 		}
@@ -231,10 +231,10 @@ func (s *VarSet) Calls(q Query) (iter.Seq2[Call, error], error) {
 	}, nil
 }
 
-// membersFor returns the members a query can touch, in declared order.
-func (s *VarSet) membersFor(q Query) []int {
+// volumesFor returns the volumes a query can touch, in declared order.
+func (s *VarStore) volumesFor(q Query) []int {
 	if len(q.Loci) == 0 && len(q.Spans) == 0 {
-		out := make([]int, len(s.man.Members))
+		out := make([]int, len(s.man.Volumes))
 		for i := range out {
 			out[i] = i
 		}

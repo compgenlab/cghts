@@ -6,11 +6,11 @@ import (
 	"strings"
 )
 
-// A member split by coordinate.
+// A table split by coordinate.
 //
 // WHY SPLIT AT ALL, when Parquet already prunes row groups by their statistics.
 // Because the statistics live in the FOOTER, at the end of the file: a locus
-// query against a whole-genome member must fetch and parse a footer describing
+// query against a whole-genome table must fetch and parse a footer describing
 // hundreds of gigabytes before it can decide to read none of it. Over object
 // storage that is a large GET and a large parse to answer "no". A shard index
 // in the manifest answers the same question having read only the manifest.
@@ -19,10 +19,10 @@ import (
 // the same idea at two scales, and shard pruning is the one that scales with
 // the genome rather than with the file.
 
-// shardSet is how a member is read: one file, or many with an index.
+// shardSet is how a table is read: one file, or many with an index.
 //
 // An unsplit store is a set of one whose range admits everything, so nothing
-// downstream branches on which it is -- the reader treats every member as split
+// downstream branches on which it is -- the reader treats every table as split
 // and single files simply never get skipped.
 type shardSet struct {
 	name   string
@@ -31,19 +31,19 @@ type shardSet struct {
 
 type shard struct {
 	info   ShardInfo
-	m      *member
+	m      *table
 	bounds bool // false when the shard has no declared range and must be read
 }
 
-// openShardSet opens a member, split or not.
+// openShardSet opens a table, split or not.
 //
-// The manifest decides. A member with no shard index is opened under its own
+// The manifest decides. A table with no shard index is opened under its own
 // name, which is every store written before splitting existed -- and its single
 // shard declares no bounds, so no filter can skip it.
-func openShardSet(ctx context.Context, base, member string, info MemberInfo) (*shardSet, error) {
-	set := &shardSet{name: member}
+func openShardSet(ctx context.Context, base, table string, info TableInfo) (*shardSet, error) {
+	set := &shardSet{name: table}
 	if len(info.Shards) == 0 {
-		m, err := openMember(ctx, MemberPath(base, member))
+		m, err := openTable(ctx, TablePath(base, table))
 		if err != nil {
 			return nil, err
 		}
@@ -51,7 +51,7 @@ func openShardSet(ctx context.Context, base, member string, info MemberInfo) (*s
 		return set, nil
 	}
 	for _, si := range info.Shards {
-		m, err := openMember(ctx, joinStore(base, si.Name))
+		m, err := openTable(ctx, joinStore(base, si.Name))
 		if err != nil {
 			set.Close()
 			return nil, fmt.Errorf("opening shard %s: %w", si.Name, err)
@@ -88,34 +88,34 @@ func (s *shardSet) rows() int64 {
 	return n
 }
 
-// single returns the lone member of an unsplit set, and nil otherwise. For the
+// single returns the lone table of an unsplit set, and nil otherwise. For the
 // few readers that genuinely want one file -- the key/value metadata on calls,
-// which a split member carries on its first shard.
-func (s *shardSet) single() *member {
+// which a split table carries on its first shard.
+func (s *shardSet) single() *table {
 	if s == nil || len(s.shards) == 0 {
 		return nil
 	}
 	return s.shards[0].m
 }
 
-// openOptionalShardSet opens a member that a store need not have.
+// openOptionalShardSet opens a table that a store need not have.
 //
 // Absence is legitimate only where the manifest recorded nothing in it, which
 // verifyAgainstManifest enforces -- so this reports presence rather than
 // deciding what it means.
-func openOptionalShardSet(ctx context.Context, base, member string, info MemberInfo) (*shardSet, bool, error) {
+func openOptionalShardSet(ctx context.Context, base, table string, info TableInfo) (*shardSet, bool, error) {
 	if len(info.Shards) > 0 {
-		set, err := openShardSet(ctx, base, member, info)
+		set, err := openShardSet(ctx, base, table, info)
 		return set, err == nil, err
 	}
-	m, present, err := openOptionalMember(ctx, MemberPath(base, member))
+	m, present, err := openOptionalTable(ctx, TablePath(base, table))
 	if err != nil || !present {
-		return &shardSet{name: member}, present, err
+		return &shardSet{name: table}, present, err
 	}
-	return &shardSet{name: member, shards: []*shard{{m: m}}}, true, nil
+	return &shardSet{name: table, shards: []*shard{{m: m}}}, true, nil
 }
 
-// split reports whether this member is stored as several coordinate shards.
+// split reports whether this table is stored as several coordinate shards.
 func (s *shardSet) split() bool {
 	return s != nil && len(s.shards) > 0 && s.shards[0].bounds
 }
