@@ -107,7 +107,10 @@ func (a *ConstantTag) Annotate(rec *vcf.VcfRecord) error {
 }
 
 // Indel flags insertions/deletions and records their lengths.
-type Indel struct{ closeNoop }
+type Indel struct {
+	namedFields
+	closeNoop
+}
 
 // NewIndel returns an Indel annotator (--indel).
 func NewIndel() *Indel { return &Indel{} }
@@ -116,11 +119,11 @@ func NewIndel() *Indel { return &Indel{} }
 // FORMAT defs, which is a bug — the values go into INFO; this package registers
 // them correctly as INFO.)
 func (a *Indel) SetupHeader(h *vcf.VcfHeader) error {
-	h.AddInfo(infoDef("CG_INSERT", "0", "Flag", "Variant is an insertion"))
-	h.AddInfo(infoDef("CG_DELETE", "0", "Flag", "Variant is an deletion"))
-	h.AddInfo(infoDef("CG_INSLEN", "1", "Integer", "Insertion length"))
-	h.AddInfo(infoDef("CG_DELLEN", "1", "Integer", "Deletion length"))
-	h.AddInfo(infoDef("CG_INDELLEN", "1", "Integer", "In-del length"))
+	h.AddInfo(infoDef(a.key(IndelInsert), "0", "Flag", "Variant is an insertion"))
+	h.AddInfo(infoDef(a.key(IndelDelete), "0", "Flag", "Variant is an deletion"))
+	h.AddInfo(infoDef(a.key(IndelInsLen), "1", "Integer", "Insertion length"))
+	h.AddInfo(infoDef(a.key(IndelDelLen), "1", "Integer", "Deletion length"))
+	h.AddInfo(infoDef(a.key(IndelIndelLen), "1", "Integer", "In-del length"))
 	return nil
 }
 
@@ -141,27 +144,30 @@ func (a *Indel) Annotate(rec *vcf.VcfRecord) error {
 		}
 	}
 	if insert {
-		rec.AddInfoFlag("CG_INSERT")
-		rec.AddInfo("CG_INSLEN", strconv.Itoa(insLen))
-		rec.AddInfo("CG_INDELLEN", strconv.Itoa(insLen))
+		rec.AddInfoFlag(a.key(IndelInsert))
+		rec.AddInfo(a.key(IndelInsLen), strconv.Itoa(insLen))
+		rec.AddInfo(a.key(IndelIndelLen), strconv.Itoa(insLen))
 	}
 	if deletion {
-		rec.AddInfoFlag("CG_DELETE")
-		rec.AddInfo("CG_DELLEN", strconv.Itoa(delLen))
-		rec.AddInfo("CG_INDELLEN", "-"+strconv.Itoa(delLen))
+		rec.AddInfoFlag(a.key(IndelDelete))
+		rec.AddInfo(a.key(IndelDelLen), strconv.Itoa(delLen))
+		rec.AddInfo(a.key(IndelIndelLen), "-"+strconv.Itoa(delLen))
 	}
 	return nil
 }
 
 // TsTv classifies SNVs as transition (TS) or transversion (TV).
-type TsTv struct{ closeNoop }
+type TsTv struct {
+	namedFields
+	closeNoop
+}
 
 // NewTsTv returns a TsTv annotator (--tstv).
 func NewTsTv() *TsTv { return &TsTv{} }
 
 // SetupHeader declares the CG_TSTV INFO field.
 func (a *TsTv) SetupHeader(h *vcf.VcfHeader) error {
-	h.AddInfo(infoDef("CG_TSTV", "1", "String", "Is the variant and transition (TS) or transversion (TV), skips all multi-variants and indels"))
+	h.AddInfo(infoDef(a.key(TsTvField), "1", "String", "Is the variant and transition (TS) or transversion (TV), skips all multi-variants and indels"))
 	return nil
 }
 
@@ -169,22 +175,25 @@ func (a *TsTv) SetupHeader(h *vcf.VcfHeader) error {
 func (a *TsTv) Annotate(rec *vcf.VcfRecord) error {
 	switch rec.CalcTsTv() {
 	case -1:
-		rec.AddInfo("CG_TSTV", "TS")
+		rec.AddInfo(a.key(TsTvField), "TS")
 	case 1:
-		rec.AddInfo("CG_TSTV", "TV")
+		rec.AddInfo(a.key(TsTvField), "TV")
 	}
 	return nil
 }
 
 // Dosage computes per-alt allele dosage from each sample's GT.
-type Dosage struct{ closeNoop }
+type Dosage struct {
+	namedFields
+	closeNoop
+}
 
 // NewDosage returns a Dosage annotator (--dosage).
 func NewDosage() *Dosage { return &Dosage{} }
 
 // SetupHeader declares the CG_DS FORMAT field.
 func (a *Dosage) SetupHeader(h *vcf.VcfHeader) error {
-	h.AddFormat(formatDef("CG_DS", "A", "Integer", "Convert GT to dosage value (0, 1, 2)"))
+	h.AddFormat(formatDef(a.key(DosageField), "A", "Integer", "Convert GT to dosage value (0, 1, 2)"))
 	return nil
 }
 
@@ -198,7 +207,7 @@ func (a *Dosage) Annotate(rec *vcf.VcfRecord) error {
 		}
 		gt, ok := s.Get("GT")
 		if !ok {
-			if err := rec.AddFormat(i, "CG_DS", "."); err != nil {
+			if err := rec.AddFormat(i, a.key(DosageField), "."); err != nil {
 				return err
 			}
 			continue
@@ -215,7 +224,7 @@ func (a *Dosage) Annotate(rec *vcf.VcfRecord) error {
 			}
 			outs = append(outs, strconv.Itoa(ds))
 		}
-		if err := rec.AddFormat(i, "CG_DS", strings.Join(outs, ",")); err != nil {
+		if err := rec.AddFormat(i, a.key(DosageField), strings.Join(outs, ",")); err != nil {
 			return err
 		}
 	}
