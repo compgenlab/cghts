@@ -8,6 +8,7 @@ import (
 
 	"github.com/compgenlab/cghts/iosource"
 	"github.com/parquet-go/parquet-go"
+	"sync"
 )
 
 // member is one file of a store — calls, sites or regions — held open for the
@@ -27,6 +28,12 @@ type member struct {
 	name string // locator, for error messages
 	src  iosource.ByteSource
 
+	// once guards file and parseErr. A member is read concurrently once shards
+	// are scanned in parallel, and the lazy parse below is the only mutable
+	// state on the read path.
+	once     sync.Once
+	parseErr error
+
 	// file is the parsed footer, kept because parsing it is the expensive half
 	// of holding the member open and it does not change for the life of the
 	// store. Populated lazily by parsed(); a store is opened for many queries
@@ -40,16 +47,17 @@ type member struct {
 // parsed its own: ParquetStore parsed the calls footer at open and discarded it,
 // scanParquetPruned parsed one per scan and then handed the raw ReaderAt to
 // NewGenericReader, which parsed a second. Remotely each parse is a request.
+// parsed returns the member's footer, parsing it once.
+//
+// ONCE, AND SAFELY. This was a bare check-then-assign, which is a data race the
+// moment two goroutines read the same member -- and shards exist precisely so
+// that several can be read at the same time. Two racing parses would also both
+// pay for the footer, which over object storage is a request each.
 func (m *member) parsed() (*parquet.File, error) {
-	if m.file != nil {
-		return m.file, nil
-	}
-	f, err := parquet.OpenFile(m.ra, m.size)
-	if err != nil {
-		return nil, err
-	}
-	m.file = f
-	return f, nil
+	m.once.Do(func() {
+		m.file, m.parseErr = parquet.OpenFile(m.ra, m.size)
+	})
+	return m.file, m.parseErr
 }
 
 // openMember opens a store member from any locator: a filesystem path, an
