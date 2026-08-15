@@ -2,6 +2,8 @@ package annotate
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/compgenlab/cghts/bed"
@@ -9,8 +11,37 @@ import (
 	"github.com/compgenlab/cghts/vcf"
 )
 
-// GtfOptions configures a [GtfAnnotator]. The GTF file is read fully into memory
-// (a gene model with an interval index); it may be gzip/bgzip-compressed.
+// GeneModel is the query surface a [GtfAnnotator] needs from a GTF.
+//
+// Both of the gtf package's sources satisfy it — the whole-file
+// [gtf.AnnotationSource] and the tabix-backed [gtf.IndexedAnnotationSource] —
+// which is what lets the annotator hold either. That mattered: loading a GTF
+// fully into memory is fine for one small file and is not fine for a human
+// GENCODE, and a caller annotating a whole genome against two of them ran out
+// of memory. The choice belongs here rather than in each caller, and a caller
+// that worked around it by writing its own annotator ended up with a second
+// implementation of the region logic.
+type GeneModel interface {
+	FindGenes(ref string, start, end int) []*gtf.Gene
+	FindGenicRegionForPos(ref string, pos int, strand bed.Strand, geneID string) gtf.GenicRegion
+	RefNames() []string
+	HasRef(ref string) bool
+}
+
+// biotypeProvider is implemented by a gene model that can say up front whether
+// its GTF carries biotypes.
+//
+// Only the whole-file model can: it has read everything. The indexed one has
+// read nothing until it is queried, and scanning the file to find out would cost
+// exactly what indexing it saved.
+type biotypeProvider interface {
+	Provides(key string) bool
+}
+
+// GtfOptions configures a [GtfAnnotator].
+//
+// By default the GTF is queried through its tabix index when one sits beside it
+// and read fully into memory when none does — see NewGtfAnnotator.
 type GtfOptions struct {
 	Prefix       string   // INFO key prefix; defaults to "GTF_"
 
@@ -20,6 +51,19 @@ type GtfOptions struct {
 	Names FieldNames
 
 	Filename     string   // GTF file (optionally .gz)
+
+	// Source, when set, is used instead of opening Filename — so the gene model
+	// can be one the caller already built, indexed or not, or one served from
+	// somewhere that is not a local file. Filename is then only a label,
+	// recorded as the annotation's provenance in the header.
+	//
+	// Ownership transfers: Close releases it if it holds anything.
+	Source GeneModel
+
+	// InMemory forces the whole-file gene model even when an index is present.
+	// The indexed reader is not safe for concurrent use, so a caller sharing one
+	// annotator across goroutines wants this; everything else wants the default.
+	InMemory bool
 	RequiredTags []string // keep only features carrying every tag (the --gtf-tag filter)
 
 	// AutoConvert matches contig names across UCSC/Ensembl/NCBI naming (human
@@ -48,15 +92,23 @@ type GtfAnnotator struct {
 	base
 	opts   GtfOptions
 	prefix string
-	src    *gtf.AnnotationSource
+	src    GeneModel
 	conv   *vcf.ContigConverter // non-nil when contig-name matching is enabled
 }
 
-// NewGtfAnnotator loads the GTF into memory and returns the annotator.
+// NewGtfAnnotator opens the GTF's gene model and returns the annotator.
+//
+// The tabix index is preferred when one sits beside the file, because it bounds
+// memory to the genes actually queried; without one the whole GTF is read in,
+// which for a human annotation set is over a gigabyte. Index it with a GFF-preset
+// tabix index to get the cheap path — bgzip the GTF and `tabix -p gff` it.
 func NewGtfAnnotator(opts GtfOptions) (*GtfAnnotator, error) {
-	src, err := gtf.NewAnnotationSource(opts.Filename, opts.RequiredTags)
-	if err != nil {
-		return nil, fmt.Errorf("annotate: %w", err)
+	src := opts.Source
+	if src == nil {
+		var err error
+		if src, err = openGeneModel(opts); err != nil {
+			return nil, fmt.Errorf("annotate: %w", err)
+		}
 	}
 	prefix := opts.Prefix
 	if prefix == "" {
@@ -83,13 +135,25 @@ func (a *GtfAnnotator) SetupHeader(h *vcf.VcfHeader) error {
 	h.AddInfo(infoDefSrc(a.key(GtfGeneSymbol), ".", "String", "Gene name", a.opts.Filename))
 	h.AddInfo(infoDefSrc(a.key(GtfGeneID), ".", "String", "Gene ID", a.opts.Filename))
 	h.AddInfo(infoDefSrc(a.key(GtfStrand), ".", "String", "Gene strand", a.opts.Filename))
-	if a.src.Provides("biotype") {
+	if a.providesBiotype() {
 		h.AddInfo(infoDefSrc(a.key(GtfBiotype), ".", "String", "Gene biotype", a.opts.Filename))
 	}
 	h.AddInfo(infoDefSrc(a.key(GtfRegion), ".", "String", "Genic region", a.opts.Filename))
 	h.AddInfo(infoDefSrc(a.key(GtfCoding), ".", "String", "Coding gene name", a.opts.Filename))
 	h.AddInfo(infoDefSrc(a.key(GtfNoncoding), ".", "String", "Non-coding gene name", a.opts.Filename))
 	return nil
+}
+
+// providesBiotype reports whether the BIOTYPE field should be declared.
+//
+// True when the model cannot say, which is the safe direction: a declared field
+// that is never written is a header line nobody reads, while a field written
+// without one is a record that a strict parser is entitled to reject.
+func (a *GtfAnnotator) providesBiotype() bool {
+	if p, ok := a.src.(biotypeProvider); ok {
+		return p.Provides("biotype")
+	}
+	return true
 }
 
 // SetFieldNames chooses the INFO key each logical field is written under.
@@ -165,4 +229,38 @@ func (a *GtfAnnotator) Annotate(rec *vcf.VcfRecord) error {
 }
 
 // Close is a no-op: the gene model lives in memory.
-func (a *GtfAnnotator) Close() error { return nil }
+func (a *GtfAnnotator) Close() error {
+	// The indexed model holds a tabix reader; the in-memory one holds nothing.
+	if c, ok := a.src.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
+// openGeneModel chooses how to read the GTF: through its index when it has one,
+// wholly into memory when it does not.
+//
+// Falling back rather than failing, because an unindexed GTF is a working GTF —
+// it just costs memory proportional to the file instead of to the query. A small
+// annotation set is entirely reasonable to load, and refusing one because it has
+// no .tbi would break every caller that has been passing plain files.
+func openGeneModel(opts GtfOptions) (GeneModel, error) {
+	if !opts.InMemory && hasTabixIndex(opts.Filename) {
+		return gtf.NewIndexedAnnotationSource(opts.Filename, opts.RequiredTags)
+	}
+	return gtf.NewAnnotationSource(opts.Filename, opts.RequiredTags)
+}
+
+// hasTabixIndex reports whether a tabix index sits beside the file.
+//
+// Checked by looking rather than by trying and falling back: opening a bgzipped
+// GTF without an index succeeds and then fails on the first query, which would
+// surface as "no genes found" rather than as a missing index.
+func hasTabixIndex(path string) bool {
+	for _, ext := range []string{".tbi", ".csi"} {
+		if st, err := os.Stat(path + ext); err == nil && !st.IsDir() {
+			return true
+		}
+	}
+	return false
+}
