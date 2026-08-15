@@ -60,6 +60,16 @@ type GtfOptions struct {
 	// Ownership transfers: Close releases it if it holds anything.
 	Source GeneModel
 
+	// Fields selects which logical fields to emit, from the GtfGeneSymbol/
+	// GtfGeneID/… constants. Empty emits all of them, which is what a caller
+	// asking for "the GTF annotations" means.
+	//
+	// Selecting matters because these seven are one annotator's output but not
+	// one annotation: a caller whose configuration names two of them should get
+	// two INFO fields, not seven with five it never asked for cluttering every
+	// record of a whole-genome VCF.
+	Fields []string
+
 	// InMemory forces the whole-file gene model even when an index is present.
 	// The indexed reader is not safe for concurrent use, so a caller sharing one
 	// annotator across goroutines wants this; everything else wants the default.
@@ -132,16 +142,37 @@ func (a *GtfAnnotator) EnableContigMatching() {
 // actually supplies biotypes; CG_CODING/CG_NONCODING are always declared (they
 // are written per-record when an overlapping gene of that kind exists).
 func (a *GtfAnnotator) SetupHeader(h *vcf.VcfHeader) error {
-	h.AddInfo(infoDefSrc(a.key(GtfGeneSymbol), ".", "String", "Gene name", a.opts.Filename))
-	h.AddInfo(infoDefSrc(a.key(GtfGeneID), ".", "String", "Gene ID", a.opts.Filename))
-	h.AddInfo(infoDefSrc(a.key(GtfStrand), ".", "String", "Gene strand", a.opts.Filename))
-	if a.providesBiotype() {
-		h.AddInfo(infoDefSrc(a.key(GtfBiotype), ".", "String", "Gene biotype", a.opts.Filename))
+	for _, f := range []struct{ logical, desc string }{
+		{GtfGeneSymbol, "Gene name"},
+		{GtfGeneID, "Gene ID"},
+		{GtfStrand, "Gene strand"},
+		{GtfBiotype, "Gene biotype"},
+		{GtfRegion, "Genic region"},
+		{GtfCoding, "Coding gene name"},
+		{GtfNoncoding, "Non-coding gene name"},
+	} {
+		if !a.emits(f.logical) {
+			continue
+		}
+		if f.logical == GtfBiotype && !a.providesBiotype() {
+			continue
+		}
+		h.AddInfo(infoDefSrc(a.key(f.logical), ".", "String", f.desc, a.opts.Filename))
 	}
-	h.AddInfo(infoDefSrc(a.key(GtfRegion), ".", "String", "Genic region", a.opts.Filename))
-	h.AddInfo(infoDefSrc(a.key(GtfCoding), ".", "String", "Coding gene name", a.opts.Filename))
-	h.AddInfo(infoDefSrc(a.key(GtfNoncoding), ".", "String", "Non-coding gene name", a.opts.Filename))
 	return nil
+}
+
+// emits reports whether a logical field is one this annotator writes.
+func (a *GtfAnnotator) emits(logical string) bool {
+	if len(a.opts.Fields) == 0 {
+		return true
+	}
+	for _, f := range a.opts.Fields {
+		if strings.EqualFold(f, logical) {
+			return true
+		}
+	}
+	return false
 }
 
 // providesBiotype reports whether the BIOTYPE field should be declared.
@@ -212,19 +243,15 @@ func (a *GtfAnnotator) Annotate(rec *vcf.VcfRecord) error {
 		}
 	}
 
-	rec.AddInfo(a.key(GtfGeneSymbol), strings.Join(names, ","))
-	rec.AddInfo(a.key(GtfGeneID), strings.Join(ids, ","))
-	rec.AddInfo(a.key(GtfStrand), strings.Join(strands, ","))
+	a.write(rec, GtfGeneSymbol, names)
+	a.write(rec, GtfGeneID, ids)
+	a.write(rec, GtfStrand, strands)
 	if hasBiotype {
-		rec.AddInfo(a.key(GtfBiotype), strings.Join(biotypes, ","))
+		a.write(rec, GtfBiotype, biotypes)
 	}
-	rec.AddInfo(a.key(GtfRegion), strings.Join(regions, ","))
-	if len(coding) > 0 {
-		rec.AddInfo(a.key(GtfCoding), strings.Join(coding, ","))
-	}
-	if len(noncoding) > 0 {
-		rec.AddInfo(a.key(GtfNoncoding), strings.Join(noncoding, ","))
-	}
+	a.write(rec, GtfRegion, regions)
+	a.write(rec, GtfCoding, coding)
+	a.write(rec, GtfNoncoding, noncoding)
 	return nil
 }
 
@@ -263,4 +290,14 @@ func hasTabixIndex(path string) bool {
 		}
 	}
 	return false
+}
+
+// write adds one field, if it is one this annotator emits and there is anything
+// to say. Overlapping genes are comma-joined in parallel across the fields, so
+// the nth value of each belongs to the nth gene.
+func (a *GtfAnnotator) write(rec *vcf.VcfRecord, logical string, vals []string) {
+	if len(vals) == 0 || !a.emits(logical) {
+		return
+	}
+	rec.AddInfo(a.key(logical), strings.Join(vals, ","))
 }

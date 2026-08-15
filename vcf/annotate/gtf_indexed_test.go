@@ -110,3 +110,67 @@ func TestBothGeneModelsAnnotateTheSame(t *testing.T) {
 		}
 	}
 }
+
+// A caller gets the fields it selected and no others.
+//
+// The seven are one annotator's output but not one annotation. A configuration
+// naming two of them should produce two INFO fields, not seven with five nobody
+// asked for on every record of a whole-genome VCF — which is the other reason a
+// caller went and wrote its own GTF annotator instead of using this one.
+func TestOnlyTheSelectedGtfFieldsAreWritten(t *testing.T) {
+	a, err := NewGtfAnnotator(GtfOptions{
+		Filename: writeAnnGTF(t),
+		Fields:   []string{GtfGeneSymbol, GtfRegion},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	h, recs := bedRecs(t, "chr1\t170\t.\tA\tG\t.\tPASS\t.\tGT\t0/1")
+	if err := a.SetupHeader(h); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Annotate(recs[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{"GTF_GENE", "GTF_REGION"} {
+		if _, ok := info(t, recs[0], want); !ok {
+			t.Errorf("%s was selected but not written", want)
+		}
+		if _, ok := h.InfoDef(want); !ok {
+			t.Errorf("%s was selected but not declared", want)
+		}
+	}
+	for _, unwanted := range []string{"GTF_GENEID", "GTF_STRAND", "GTF_BIOTYPE", "GTF_CODING", "GTF_NONCODING"} {
+		if _, ok := info(t, recs[0], unwanted); ok {
+			t.Errorf("%s was written though it was not selected", unwanted)
+		}
+		if _, ok := h.InfoDef(unwanted); ok {
+			t.Errorf("%s was declared though it was not selected", unwanted)
+		}
+	}
+}
+
+// Selecting nothing means all of them, which is what "the GTF annotations"
+// means to a caller that has not asked for a subset.
+func TestNoSelectionMeansEveryGtfField(t *testing.T) {
+	a, err := NewGtfAnnotator(GtfOptions{Filename: writeAnnGTF(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	h, recs := bedRecs(t, "chr1\t170\t.\tA\tG\t.\tPASS\t.\tGT\t0/1")
+	if err := a.SetupHeader(h); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Annotate(recs[0]); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"GTF_GENE", "GTF_GENEID", "GTF_STRAND", "GTF_REGION"} {
+		if _, ok := info(t, recs[0], want); !ok {
+			t.Errorf("%s missing when nothing was selected", want)
+		}
+	}
+}
