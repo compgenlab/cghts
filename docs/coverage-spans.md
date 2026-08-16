@@ -151,55 +151,108 @@ block-derived Ref from a clean region beats a real no-call from a hard one.
   as calls and regions are. A coverage table from another conversion is the same
   class of error `TableInfo.Rows` already exists to catch.
 
-## Open, and needs a measurement
+## Measured
 
-**Blocks per sample is the one number that could change the design**, and it is
-unmeasured. Estimates so far:
+### A gVCF passed through is not affordable
 
-| | intervals per sample |
-|---|---|
-| today's banded catalog runs | ~1.4M *(measured, synthetic fixture)* |
-| GIAB high-confidence BED, NA12878 | 649k *(measured)* |
-| GATK gVCF blocks | ~1–5M *(literature, unmeasured)* |
+One low-pass WGS gVCF, chr22, GATK-called:
 
-### The target is 150,000 samples in batches of 10,000
+```
+ref_blocks  4,593,720    mean length 10.3 bp    79% under 10 bp
+→ ~90,400 blocks/Mb → ~280M blocks per sample genome-wide
+```
 
-At the ~8 bytes/row measured for the regions table:
+| | rows | at 8 B/row |
+|---|---|---|
+| one 10k batch | 2.8e12 | **22 TB** |
+| all 150k | 42e12 | **336 TB** |
 
-| blocks/sample | per 10k batch | 150k total | size |
-|---|---|---|---|
-| 649k *(GIAB BED, measured)* | 6.5e9 rows | 97e9 rows | **0.78 TB** |
-| 1M *(gVCF, coarse)* | 10e9 | 150e9 | **1.20 TB** |
-| 5M *(gVCF, fine)* | 50e9 | 750e9 | **6.00 TB** |
+The cause is in the header: `##GVCFBlock0-1`, `1-2`, `2-3` … **every GQ value is
+its own band**. That is GATK's default `--gvcf-gq-bands`, a pipeline setting
+rather than a depth effect, so it carries over to 30x data unchanged.
 
-For scale, `calls` at 150,000 WGS samples is roughly 675e9 rows, about 4 TB. So
-coverage is a **fifth** of the store at the bottom of the range and **larger than
-the genotypes themselves** at the top. That spread is entirely how finely the
-source banded, and it is the difference between a comfortable design and one that
-needs rethinking.
+Depth does lengthen blocks — GQ pins near 99 across easy sequence at 30x — but
+passthrough needs a **400x** improvement to become viable. A generous 50x from
+higher coverage still leaves 6.7 TB, larger than the calls table; 100x leaves it
+comparable. **No plausible depth improvement rescues it.** The measurement was
+taken on low-pass data and the conclusion survives that caveat by two orders of
+magnitude.
 
-**Passing gVCF boundaries through is settled and right on fidelity grounds** — it
-is the source's own claim, and re-banding is a re-interpretation nobody asked for.
-But at 150,000 samples it is also the decision with a 5x storage range attached,
-so `--coverage-bands` is not a theoretical escape hatch: it may well be the
-operational default once the number is known. Measure before assuming either way.
+This is the SVCR paper's *"the granularity of reference block GQ bins has a large
+impact on the average length of reference blocks"*, with a number on it.
 
-**One chromosome of one real gVCF answers it.**
+### Fragmentation is a property of the construction rule, not of the genome
 
-### Fifteen batches makes the pessimism much worse, and the fix much more valuable
+Two per-sample interval sets for the SAME sample, NA12878, from different
+pipelines:
 
-The cross-batch arithmetic scales badly in the direction that hurts. With two
-batches, a variant seen in one leaves half the cohort unevaluable. With fifteen,
-it leaves **fourteen fifteenths — 93%** of 150,000 people `NotAssayed` at a
-variant that 140,000 of them were perfectly well sequenced at.
+| | intervals | bases | median len | under 10 bp |
+|---|---|---|---|---|
+| Platinum Genomes ConfidentRegions (~50x) | 6,112,726 | 2.60 Gb | 19 | 42% |
+| GIAB v4.2.1 high-confidence | 648,870 | 2.51 Gb | 1,871 | 0% |
 
-That is the case for this work. It is not a fidelity nicety at this scale; without
-it a fifteen-batch cohort cannot answer a rare-variant question about itself.
+**Near-identical territory, 9.4x different fragmentation.** The count is decided
+by how the mask was built, not by the biology underneath it.
 
-It also settles an argument left open elsewhere: fifteen batches means fifteen
-parts, so the sample axis really is partitioned, and `Roll`'s serial loop over
-parts is a genuine fifteen-way parallelism opportunity rather than the
-one-iteration no-op it would be for a single callset.
+### A small merge tolerance collapses it, cheaply
+
+Merging Platinum Genomes intervals separated by less than a gap:
+
+| merge gap | intervals | 150k rows | at 8 B/row | over-claimed |
+|---|---|---|---|---|
+| 0 | 6,112,726 | 917e9 | 7.34 TB | — |
+| **10 bp** | **726,687** | **109e9** | **0.87 TB** | **9 Mb (0.35%)** |
+| 50 bp | 326,992 | 49e9 | 0.39 TB | 18 Mb |
+| 100 bp | 235,851 | 35e9 | 0.28 TB | 25 Mb |
+| 1 kb | 52,110 | 8e9 | 0.06 TB | 87 Mb (2.8%) |
+
+A 10 bp tolerance is an **8.4x reduction for 0.35% over-claim** — and it lands at
+726,687, within 12% of GIAB's independently-constructed 648,870. Two unrelated
+routes arriving at ~700k is the strongest evidence here that **~700k blocks per
+sample is the natural size of a smoothed coverage mask for 30-50x WGS**, whatever
+produced it.
+
+That is **0.8-0.9 TB across 150,000 samples**, about a fifth of the calls table.
+Affordable.
+
+## What this changes
+
+**Band on DP at conversion. Default on.** The earlier decision to pass gVCF
+boundaries through was made on fidelity grounds and is overturned by 400x. It is
+not a painful reversal: the granularity being discarded is on GQ, an axis this
+system already decided not to gate on because it is incomparable across callers
+and saturates at 99. Merging adjacent blocks within a DP class discards nothing
+the query path can see.
+
+`--coverage-passthrough` stays available for targeted and exome work, where block
+counts are small and fidelity is cheap.
+
+**A gap tolerance is needed as well as depth bands, and it changes the claim.**
+Fragmentation comes from short excursions, not from real coverage structure —
+which is why 10 bp buys 8.4x. But merging across a gap asserts coverage where the
+source reported none, so `SpansBlocks` can no longer mean "every base". It means:
+
+> covered at `MinDP` or above, with no uncovered run longer than `MaxGap` bases.
+
+That is precise, checkable, and must be **recorded in the manifest** beside
+`DepthBands`, because a store whose blocks tolerate 1 kb gaps does not mean the
+same thing by "covered" as one that tolerates 10 bp — the same reasoning that put
+`MinDP` and `DepthBands` there. A roll-up spanning parts with different
+tolerances has to see that they differ.
+
+**Starting point for the defaults:** `--depth-bands 10,20,50`, matching the
+callable runs so both tables speak one language, and a 10 bp gap tolerance, which
+is where the measured curve turns.
+
+## Still open
+
+- **The above is measured on confidence masks, not depth masks.** A mosdepth-style
+  quantized depth mask should start smoother than Platinum Genomes did, so 700k is
+  a ceiling rather than an estimate. Worth confirming against one real 30x
+  coverage track before the defaults are fixed in the converter.
+- Whether the gap tolerance should be a converter parameter or a query-time one.
+  Baking it is cheaper and matches `MinDP`; leaving it at query time would let one
+  store answer strictly or loosely. Baked is the current assumption.
 
 ## Not in scope
 
