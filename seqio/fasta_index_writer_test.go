@@ -4,15 +4,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"runtime/debug"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/compgenlab/cghts/htsio/bgzf"
 )
@@ -209,98 +208,196 @@ func TestBuildFastaIndexRejectsRaggedLines(t *testing.T) {
 // the only input anyone cares about: a human genome is ~3 GB uncompressed, and
 // the worker was OOM-killed indexing GRCh38.
 //
-// The fixture is small next to a genome but large next to the working set, so
-// the assertion is about the *ratio*: peak heap must stay a small fraction of
-// the uncompressed size, not track it.
-func TestBuildFastaIndexDoesNotBufferTheFile(t *testing.T) {
+// HOW THIS IS MEASURED IS THE WHOLE DIFFICULTY, and three earlier versions of it
+// failed correct code. Reading the heap after the call measured how recently a
+// GC had run. Sampling from a goroutine during the call measured how much
+// garbage had piled up between cycles, because HeapAlloc counts what the
+// collector has not reached yet. Collecting aggressively with SetGCPercent
+// narrowed that and did not close it: an aggressive GC target still needs CPU to
+// meet, so on a loaded machine the same correct code read 4 MB idle and 15 MB
+// busy, and tripped a 15 MB threshold. The instrument was at fault every time.
+//
+// So the probe now runs INSIDE Read, synchronously, on the implementation's own
+// goroutine. Nothing else is allocating at that instant, so a forced collection
+// followed by a reading gives the true live set. A busy machine makes this
+// slower and cannot make it wrong, which is what the previous versions lacked.
+//
+// Making the reader the instrument also means these test indexFasta and the bgzf
+// block indexer directly, rather than through the path BuildFastaIndex opens for
+// itself. Both take an io.Reader, and both are where a buffering regression
+// would actually land.
+
+// probeReader samples the live heap on every Read of the stream beneath it.
+type probeReader struct {
+	r     io.Reader
+	base  uint64
+	peak  int64
+	reads int
+}
+
+func (p *probeReader) Read(b []byte) (int, error) {
+	// Synchronous, on the caller's goroutine: the implementation is between
+	// allocations here, so a forced collection settles the heap to exactly what
+	// is live. This is the difference between measuring the program and
+	// measuring the scheduler.
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	if grew := int64(m.HeapAlloc) - int64(p.base); grew > p.peak {
+		p.peak = grew
+	}
+	p.reads++
+	return p.r.Read(b)
+}
+
+func newProbe(r io.Reader) *probeReader {
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return &probeReader{r: r, base: m.HeapAlloc}
+}
+
+// hugeFasta returns a body large enough that buffering it is unmistakable.
+// Distinct from bigFasta, which is a small three-sequence fixture.
+//
+// THE BASES ARE PSEUDO-RANDOM, not a repeated motif, and that is not
+// decoration. A repeated motif compresses 61 MB down to 0.18 MB, which the
+// block indexer's 1 MB buffer then swallows in a single Read -- so the probe
+// samples once, before anything has been decoded, and reports a heap of nearly
+// nothing however the implementation behaves. Incompressible input keeps the
+// compressed stream large enough to be read in many pieces, which is what makes
+// the measurement mean something. Seeded, so the fixture is identical run to
+// run.
+func hugeFasta(lines int) string {
+	rng := rand.New(rand.NewSource(1))
+	const bases = "ACGT"
+	var b strings.Builder
+	b.Grow(lines*61 + 16)
+	b.WriteString(">chr1 big\n")
+	// Bulk random, then two bits per base: rng.Intn per base costs more than
+	// everything else in the test put together.
+	line := make([]byte, 60)
+	for i := 0; i < lines; i++ {
+		rng.Read(line)
+		for j := range line {
+			line[j] = bases[line[j]&3]
+		}
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// liveCeiling is what a streaming implementation may hold.
+//
+// indexFasta reads through a fixed 1 MB bufio and the block indexer through
+// another, so the working set is a couple of megabytes plus one decompressed
+// block, whatever the input size. What is retained beyond that is O(sequences)
+// and O(blocks), never O(bytes). 8 MB leaves room for allocator slack and still
+// sits an order of magnitude under the 61 MB a buffering implementation needs.
+const liveCeiling = 8 << 20
+
+func TestIndexFastaDoesNotBufferTheStream(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates a multi-megabyte fixture")
+	}
+	body := hugeFasta(1_000_000)
+	p := newProbe(strings.NewReader(body))
+
+	entries, err := indexFasta(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("indexed %d sequences, want 1", len(entries))
+	}
+	// A fixture read in one gulp would prove nothing about streaming.
+	if p.reads < 8 {
+		t.Fatalf("only %d reads, so the probe never sampled mid-stream", p.reads)
+	}
+	if p.peak > liveCeiling {
+		t.Errorf("live heap reached %d bytes indexing a %d-byte stream -- this is buffering it, "+
+			"which OOMs on a real genome", p.peak, len(body))
+	}
+	t.Logf("peak live %.1f MB over %d reads of a %.1f MB stream",
+		float64(p.peak)/1e6, p.reads, float64(len(body))/1e6)
+}
+
+func TestBlockIndexingDoesNotBufferTheStream(t *testing.T) {
 	if testing.Short() {
 		t.Skip("allocates a multi-megabyte fixture")
 	}
 	dir := t.TempDir()
 	gz := filepath.Join(dir, "big.fa.gz")
-
-	// ~64 MB uncompressed across many blocks.
-	var b strings.Builder
-	line := strings.Repeat("ACGT", 15)
-	b.WriteString(">chr1 big\n")
-	for i := 0; i < 1_000_000; i++ {
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
-	body := b.String()
+	body := hugeFasta(300_000)
 	bgzipTo(t, gz, body)
 
-	// PEAK during the call, not the heap after it.
-	//
-	// Two things were wrong with measuring afterwards. HeapAlloc is live heap
-	// PLUS garbage the collector has not reached, and there was no GC before
-	// the second reading -- so what it measured was partly how recently a GC
-	// cycle had run. Under a full-suite run, with other packages competing for
-	// memory, that reached 33 MB against a 15 MB threshold and failed a
-	// correct implementation.
-	//
-	// The property is about the peak anyway: the bug this guards against was an
-	// OOM *during* indexing, which a reading taken afterwards has already
-	// survived. A buffering implementation holds the file live at its widest
-	// point, whatever the collector does later.
-	// AND the peak has to be of the LIVE set, which took one more thing.
-	// HeapAlloc counts garbage the collector has not reached yet, so sampling it
-	// during the call measured how much rubbish piled up between GC cycles -- a
-	// correct streaming implementation that allocates and drops a buffer per
-	// block accumulates tens of megabytes of dead bytes without ever holding two
-	// of them at once. That is why this still failed about one run in three
-	// after the reading was moved.
-	//
-	// Collecting aggressively for the duration pins HeapAlloc near the live set,
-	// which is the quantity the failure message actually claims to be about. It
-	// makes the call slower, which costs nothing: none of this is timed.
-	restore := debug.SetGCPercent(1)
-	defer debug.SetGCPercent(restore)
+	f, err := os.Open(gz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
 
-	sampling := make(chan struct{})
+	// The probe sits UNDER the block indexer, so it samples while blocks are
+	// decoded and their boundaries accumulated -- which is where the original
+	// bug lived.
+	p := newProbe(f)
+	ir := bgzf.NewIndexingReader(p)
+	entries, err := indexFasta(ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("indexed %d sequences, want 1", len(entries))
+	}
+	if p.reads < 4 {
+		t.Fatalf("only %d reads, so the probe never sampled mid-stream", p.reads)
+	}
+	if p.peak > liveCeiling {
+		t.Errorf("live heap reached %d bytes indexing a %d-byte stream -- this is buffering it, "+
+			"which OOMs on a real genome", p.peak, len(body))
+	}
+	if n := len(ir.Blocks()); n == 0 {
+		t.Fatal("no blocks recorded, so the fixture is not bgzf")
+	}
+	t.Logf("peak live %.1f MB over %d reads, %d blocks recorded",
+		float64(p.peak)/1e6, p.reads, len(ir.Blocks()))
+}
+
+// And nothing is retained once BuildFastaIndex returns: an index holding onto
+// the blocks would keep a genome resident for as long as the caller kept it.
+//
+// This reading IS safe from outside, because it is taken after the call with
+// nothing else running -- two forced collections settle it exactly.
+func TestBuildFastaIndexRetainsNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates a multi-megabyte fixture")
+	}
+	dir := t.TempDir()
+	gz := filepath.Join(dir, "big.fa.gz")
+	body := hugeFasta(300_000)
+	bgzipTo(t, gz, body)
+
 	runtime.GC()
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
 
-	var peak int64
-	sampled := make(chan struct{})
-	go func() {
-		defer close(sampled)
-		var m runtime.MemStats
-		for {
-			select {
-			case <-sampling:
-				return
-			case <-time.After(2 * time.Millisecond):
-			}
-			runtime.ReadMemStats(&m)
-			if int64(m.HeapAlloc) > atomic.LoadInt64(&peak) {
-				atomic.StoreInt64(&peak, int64(m.HeapAlloc))
-			}
-		}
-	}()
-
-	_, err := BuildFastaIndex(gz)
-	close(sampling)
-	<-sampled
+	entries, err := BuildFastaIndex(gz)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	uncompressed := int64(len(body))
-	if grew := atomic.LoadInt64(&peak) - int64(before.HeapAlloc); grew > uncompressed/4 {
-		t.Errorf("peak heap grew %d bytes indexing a %d-byte file -- this is buffering "+
-			"the stream, which OOMs on a real genome", grew, uncompressed)
+	if len(entries) != 1 {
+		t.Fatalf("indexed %d sequences, want 1", len(entries))
 	}
 
-	// And nothing is retained once it returns: an index holding onto the blocks
-	// would keep a genome resident for as long as the caller kept the index.
 	runtime.GC()
 	runtime.GC()
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
+	uncompressed := int64(len(body))
 	if held := int64(after.HeapAlloc) - int64(before.HeapAlloc); held > uncompressed/100 {
 		t.Errorf("the index still holds %d bytes of a %d-byte file after it was built",
 			held, uncompressed)
 	}
+	runtime.KeepAlive(entries)
 }
