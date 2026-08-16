@@ -43,14 +43,14 @@ type biotypeProvider interface {
 // By default the GTF is queried through its tabix index when one sits beside it
 // and read fully into memory when none does — see NewGtfAnnotator.
 type GtfOptions struct {
-	Prefix       string   // INFO key prefix; defaults to "GTF_"
+	Prefix string // INFO key prefix; defaults to "GTF_"
 
 	// Names overrides the INFO key each logical field is written under, keyed by
 	// the GtfGeneSymbol/GtfGeneID/… constants. A named field ignores Prefix —
 	// the caller has given the whole key, not a suffix to decorate.
 	Names FieldNames
 
-	Filename     string   // GTF file (optionally .gz)
+	Filename string // GTF file (optionally .gz)
 
 	// Source, when set, is used instead of opening Filename — so the gene model
 	// can be one the caller already built, indexed or not, or one served from
@@ -73,7 +73,7 @@ type GtfOptions struct {
 	// InMemory forces the whole-file gene model even when an index is present.
 	// The indexed reader is not safe for concurrent use, so a caller sharing one
 	// annotator across goroutines wants this; everything else wants the default.
-	InMemory bool
+	InMemory     bool
 	RequiredTags []string // keep only features carrying every tag (the --gtf-tag filter)
 
 	// AutoConvert matches contig names across UCSC/Ensembl/NCBI naming (human
