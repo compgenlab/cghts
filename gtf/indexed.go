@@ -302,29 +302,47 @@ func (s *IndexedAnnotationSource) Provides(key string) bool {
 	return false
 }
 
-// probeLimit bounds the sample. Large enough that a GTF carrying biotypes
-// certainly shows one, small enough to be a couple of bgzf blocks.
-const probeLimit = 500
+// probeLines bounds the sample, in lines read rather than gene rows found.
+//
+// Lines, because that is what the read costs. A budget spent on findings does
+// not bound anything: a file whose rows mostly lack a gene_id would be read
+// until enough gene rows turned up, which could be all of it.
+//
+// A thousand is a couple of bgzf blocks and several hundred gene rows in any
+// ordinary GTF — far past the point where a file carrying biotypes would have
+// shown one.
+const probeLines = 1000
 
 // probe samples the file once, recording which optional attributes it carries.
+//
+// The budget is spent across contigs, not per contig, so a GTF whose first
+// contigs hold nothing parseable cannot make this read the whole file a
+// thousand lines at a time.
 func (s *IndexedAnnotationSource) probe() {
 	if s.probed {
 		return
 	}
 	s.probed = true
-	// Unknown until proven otherwise, so an empty file reports both present —
-	// see Provides on why that is the safe direction.
+	// Unknown until proven otherwise, so a file this cannot read reports both
+	// present — see Provides on why that is the safe direction.
 	s.hasBioType, s.hasStatus = true, true
 
+	lines, genes := 0, 0
+	bio, status := false, false
 	for _, ref := range s.tr.RefNames() {
+		if lines >= probeLines {
+			break
+		}
 		seq, err := s.tr.Query(ref, 0, math.MaxInt32)
 		if err != nil {
 			continue
 		}
-		n, bio, status := 0, false, false
 		for rec, qErr := range seq {
 			if qErr != nil {
 				return // cannot sample; leave the unknown answer in place
+			}
+			if lines++; lines > probeLines {
+				break
 			}
 			cols := strings.Split(rec.Line, "\t")
 			if len(cols) < 9 {
@@ -333,26 +351,29 @@ func (s *IndexedAnnotationSource) probe() {
 			a := parseAttributes(cols[8])
 			if a.geneID == "" {
 				// Not a gene row as far as anything else here is concerned —
-				// overlappingSpans skips these too. Counting one as a sample
+				// overlappingSpans skips these too. Counting one as a finding
 				// would let a file of nothing but malformed rows report that it
 				// carries no biotypes, which is a different claim from "cannot
 				// tell".
 				continue
 			}
+			genes++
 			if a.bioType != "" {
 				bio = true
 			}
 			if a.status != "" {
 				status = true
 			}
-			if n++; n >= probeLimit || (bio && status) {
-				break
+			if bio && status {
+				break // nothing left to learn
 			}
 		}
-		if n == 0 {
-			continue // this contig had nothing; try the next
+		if bio && status {
+			break
 		}
-		s.hasBioType, s.hasStatus = bio, status
-		return
 	}
+	if genes == 0 {
+		return // nothing to go on; the unknown answer stands
+	}
+	s.hasBioType, s.hasStatus = bio, status
 }
