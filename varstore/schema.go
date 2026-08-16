@@ -203,6 +203,60 @@ type CalledSiteRun struct {
 	MinDP int32 `parquet:"min_dp"`
 }
 
+// CoverageBlock is a positive claim about every base in a span.
+//
+// WHAT IT IS FOR. regions records runs of CATALOG SITES, which is all a
+// joint-called pVCF supports: it says a sample was called at the sites inside
+// an interval and claims nothing about the bases between them. That is honest
+// and it is pessimistic in two ways that only surface later.
+//
+// Across batches, two callsets joint-called separately have different catalogs,
+// so a variant carried by three people in one is simply absent from the other's
+// catalog -- and every sample in that second batch reads as NotAssayed rather
+// than reference, halving a denominator. Across fifteen batches it leaves
+// fourteen fifteenths of a cohort unevaluable at any batch-specific variant.
+//
+// Across time it is worse. The catalog is frozen at conversion, so a variant
+// discovered next year is permanently unanswerable for everything already
+// converted, and reconverting recovers nothing because the pVCF never held it.
+// A coverage block is the only thing that can answer it, and the only moment to
+// capture one is at conversion from a source that still has it -- a gVCF, or a
+// per-sample callable BED.
+//
+// THE CLAIM IS BOUNDED BY MaxGap. A block built by merging across small
+// uncovered stretches does not mean "every base"; it means "covered at MinDP or
+// above, with no uncovered run longer than the manifest's MaxGap". That
+// tolerance is what makes the table affordable -- merging a real per-sample mask
+// across 10bp collapsed it 8.4x for 0.35% over-claim -- and it is recorded in
+// ManifestParams for the same reason MinDP is: two stores with different
+// tolerances do not mean the same thing by "covered".
+type CoverageBlock struct {
+	SampleID string `parquet:"sample_id,dict"`
+	Chrom    string `parquet:"chrom,dict"`
+
+	// Start and End bound the covered span, inclusive, in the source's own
+	// coordinates -- the same convention CalledSiteRun uses.
+	Start int32 `parquet:"start"`
+	End   int32 `parquet:"end"`
+
+	// MinDP is the floor the source vouches for across the whole span, a gVCF's
+	// MIN_DP. A reference call inferred from this block rests on it, so it is
+	// the field the gate compares against, exactly as for a callable run.
+	MinDP int32 `parquet:"min_dp"`
+
+	// GQ as the source stated it, or Missing.
+	//
+	// RECORDED, NOT GATED ON. It cannot be recovered later and costs nothing
+	// here, which is the same reasoning that captures INFO fields. But nothing
+	// should gate on it: GQ is not comparable across callers, saturates at 99,
+	// and a gate resting on it would mean different things in two parts of one
+	// release -- which is the failure the depth gate is arranged to avoid.
+	GQ int32 `parquet:"gq"`
+}
+
+// CoveragePath returns the file holding a store's coverage blocks.
+func CoveragePath(base string) string { return TablePath(base, CoverageTable) }
+
 // The tables of a store. A store IS a directory, and they sit inside it under
 // fixed names:
 //
@@ -225,6 +279,10 @@ const (
 	CallsTable   = "calls"
 	SitesTable   = "sites"
 	RegionsTable = "regions"
+
+	// CoverageTable is OPTIONAL, and its absence means "nobody said" rather
+	// than "covered nowhere". See CoverageBlock.
+	CoverageTable = "coverage"
 )
 
 // TableFile returns the file name one table of a store is stored under,
