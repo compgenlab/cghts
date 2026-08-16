@@ -742,6 +742,7 @@ func (w *Writer) manifest() (VolumeManifest, error) {
 			SpanSemantics: w.opts.Spans,
 			DepthBands:    w.opts.DepthBands,
 			MaxGap:        w.opts.MaxGap,
+			Coverage:      w.opts.Coverage,
 			Info:          w.opts.Info,
 			Format:        w.opts.Format,
 		},
