@@ -165,6 +165,65 @@ func (s *VarStore) Samples() ([]string, error) { return s.man.Samples, nil }
 // StoreManifest returns the archive's own manifest.
 func (s *VarStore) StoreManifest() *StoreManifest { return s.man }
 
+// The capability surface an archive shares with a single volume.
+//
+// WITHOUT THESE AN ARCHIVE LOOKS EMPTY, and silently. Callers ask a store what
+// it captured through interface assertions -- `interface{ InfoFields() []InfoField }`
+// and friends -- because the Store interface deliberately does not carry them.
+// An archive that lacked the methods failed every assertion and answered "this
+// store captured nothing", which is indistinguishable from a conversion that
+// really did capture nothing. A registration reading it would record no INFO
+// fields for a store holding R2 and TYPED, and every later question about how a
+// site was arrived at would be refused for the wrong reason.
+//
+// They come from the archive's own manifest rather than from a volume, because
+// BuildStore copies the first volume's Params up and agrees() holds every other
+// volume to them. So this answers without opening anything, and cannot disagree
+// with the volumes it fronts.
+
+// InfoFields reports the INFO fields captured into the sites catalog.
+func (s *VarStore) InfoFields() []InfoField { return s.man.Params.Info }
+
+// FormatFields reports the FORMAT fields captured onto the calls.
+func (s *VarStore) FormatFields() []FormatField { return s.man.Params.Format }
+
+// SpanSemantics reports what this archive's run intervals may claim.
+func (s *VarStore) SpanSemantics() SpanSemantics { return s.man.Params.SpanSemantics }
+
+// HasCoverage reports whether this archive carries genomic block spans, and so
+// whether it can answer about positions absent from the sites catalog.
+func (s *VarStore) HasCoverage() bool { return s.man.Params.Coverage }
+
+// MaxGap is the largest uncovered stretch this archive's coverage blocks were
+// permitted to span.
+func (s *VarStore) MaxGap() int32 { return s.man.Params.MaxGap }
+
+// SitesInfo walks every volume's catalog, yielding each site's stated
+// provenance. Volumes are visited in the order they were declared, which is the
+// order Sites uses, so a caller sees one archive-wide pass.
+func (s *VarStore) SitesInfo(fn func(Site, InfoRow) bool) error {
+	for i := range s.man.Volumes {
+		st, err := s.openVolumeAt(i)
+		if err != nil {
+			return err
+		}
+		stop := false
+		if err := st.SitesInfo(func(site Site, info InfoRow) bool {
+			if !fn(site, info) {
+				stop = true
+				return false
+			}
+			return true
+		}); err != nil {
+			return err
+		}
+		if stop {
+			return nil
+		}
+	}
+	return nil
+}
+
 // Close releases every volume that was opened.
 func (s *VarStore) Close() error {
 	s.mu.Lock()
@@ -255,6 +314,20 @@ func (s *VarStore) agrees(m VolumeInfo, st *ParquetVolume) error {
 				"volume %s was converted at --min-dp %d but the store declares %d; "+
 					"they do not mean the same thing by callable",
 				m.Name, mm.Params.MinDP, s.man.Params.MinDP)
+		}
+		if !sameInfo(mm.Params.Info, s.man.Params.Info) {
+			return fmt.Errorf(
+				"volume %s captured INFO %s but the store declares %s; the archive answers "+
+					"for one set of captured fields, and a volume holding another would report "+
+					"a site as unmeasured only because nobody asked it that question",
+				m.Name, infoNames(mm.Params.Info), infoNames(s.man.Params.Info))
+		}
+		if mm.Params.Coverage != s.man.Params.Coverage {
+			return fmt.Errorf(
+				"volume %s %s coverage blocks but the store declares %s; a partly covered "+
+					"archive would answer off-catalog for some chromosomes and not others, "+
+					"which moves a denominator by which chromosome was asked about",
+				m.Name, hasWord(mm.Params.Coverage), hasWord(s.man.Params.Coverage))
 		}
 		if !sameBands(mm.Params.DepthBands, s.man.Params.DepthBands) {
 			return fmt.Errorf(
@@ -449,4 +522,40 @@ func agreeWith(man StoreManifest, locator string, samples []string, sm *VolumeMa
 			locator, sm.Params.DepthBands, man.Params.DepthBands)
 	}
 	return nil
+}
+
+// sameInfo reports whether two captures name the same fields, in any order.
+func sameInfo(a, b []InfoField) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := map[string]string{}
+	for _, f := range a {
+		seen[f.Name] = f.Column
+	}
+	for _, f := range b {
+		if col, ok := seen[f.Name]; !ok || col != f.Column {
+			return false
+		}
+	}
+	return true
+}
+
+func infoNames(fs []InfoField) string {
+	if len(fs) == 0 {
+		return "nothing"
+	}
+	out := make([]string, 0, len(fs))
+	for _, f := range fs {
+		out = append(out, f.Name)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
+
+func hasWord(b bool) string {
+	if b {
+		return "holds"
+	}
+	return "holds no"
 }

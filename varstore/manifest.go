@@ -97,6 +97,14 @@ type ManifestParams struct {
 	// a roll-up spanning both has no other way to see.
 	MaxGap int32 `json:"max_gap,omitempty"`
 
+	// Coverage records whether this store carries genomic block spans, so a
+	// reader knows whether it can answer OFF the sites catalog without opening
+	// the table to find out. Parallel to NoCallable, and for the same reason: it
+	// is a claim about what the store can answer rather than about how it is
+	// encoded, and an archive must be able to state it for all its volumes at
+	// once.
+	Coverage bool `json:"coverage,omitempty"`
+
 	// Format are the FORMAT fields captured onto the ALT calls, if any. The
 	// same reasoning as Info: absence and a zero read alike from a typed
 	// reader, and only this can tell them apart.
