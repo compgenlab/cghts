@@ -2,6 +2,9 @@
 
 ## The problem
 
+The target is 150,000 samples in batches of 10,000, each batch joint-called on
+its own.
+
 A varstore is built from a joint-called cohort VCF, and its `regions` table records
 runs of **catalog sites** a sample was called at. `SpanSemantics` says so outright:
 the interval marks catalog sites, and *nothing is claimed about the bases in between*.
@@ -150,8 +153,8 @@ block-derived Ref from a clean region beats a real no-call from a hard one.
 
 ## Open, and needs a measurement
 
-**Row count per sample is the one number that could change the design**, and it is
-unmeasured. Estimates so far, all the same order of magnitude:
+**Blocks per sample is the one number that could change the design**, and it is
+unmeasured. Estimates so far:
 
 | | intervals per sample |
 |---|---|
@@ -159,12 +162,44 @@ unmeasured. Estimates so far, all the same order of magnitude:
 | GIAB high-confidence BED, NA12878 | 649k *(measured)* |
 | GATK gVCF blocks | ~1–5M *(literature, unmeasured)* |
 
-At the ~8 bytes/row measured for the regions table, 1–5M blocks is 8–40 MB per
-sample, so 80–400 GB across 10,000. The bottom of that range is comfortable and
-the top is not, and the difference is entirely how finely the source banded.
+### The target is 150,000 samples in batches of 10,000
 
-**Measure a real gVCF before fixing any default.** One chromosome of one sample
-answers it.
+At the ~8 bytes/row measured for the regions table:
+
+| blocks/sample | per 10k batch | 150k total | size |
+|---|---|---|---|
+| 649k *(GIAB BED, measured)* | 6.5e9 rows | 97e9 rows | **0.78 TB** |
+| 1M *(gVCF, coarse)* | 10e9 | 150e9 | **1.20 TB** |
+| 5M *(gVCF, fine)* | 50e9 | 750e9 | **6.00 TB** |
+
+For scale, `calls` at 150,000 WGS samples is roughly 675e9 rows, about 4 TB. So
+coverage is a **fifth** of the store at the bottom of the range and **larger than
+the genotypes themselves** at the top. That spread is entirely how finely the
+source banded, and it is the difference between a comfortable design and one that
+needs rethinking.
+
+**Passing gVCF boundaries through is settled and right on fidelity grounds** — it
+is the source's own claim, and re-banding is a re-interpretation nobody asked for.
+But at 150,000 samples it is also the decision with a 5x storage range attached,
+so `--coverage-bands` is not a theoretical escape hatch: it may well be the
+operational default once the number is known. Measure before assuming either way.
+
+**One chromosome of one real gVCF answers it.**
+
+### Fifteen batches makes the pessimism much worse, and the fix much more valuable
+
+The cross-batch arithmetic scales badly in the direction that hurts. With two
+batches, a variant seen in one leaves half the cohort unevaluable. With fifteen,
+it leaves **fourteen fifteenths — 93%** of 150,000 people `NotAssayed` at a
+variant that 140,000 of them were perfectly well sequenced at.
+
+That is the case for this work. It is not a fidelity nicety at this scale; without
+it a fifteen-batch cohort cannot answer a rare-variant question about itself.
+
+It also settles an argument left open elsewhere: fifteen batches means fifteen
+parts, so the sample axis really is partitioned, and `Roll`'s serial loop over
+parts is a genuine fifteen-way parallelism opportunity rather than the
+one-iteration no-op it would be for a single callset.
 
 ## Not in scope
 
