@@ -69,7 +69,7 @@ func (w *Writer) rotate() error {
 
 // closeShard flushes and finalises the current shard, recording what it holds.
 func (w *Writer) closeShard() error {
-	for _, fn := range []func() error{w.flushCalls, w.flushSites, w.flushRegions} {
+	for _, fn := range []func() error{w.flushCalls, w.flushSites, w.flushRegions, w.flushCoverage} {
 		if err := fn(); err != nil {
 			return err
 		}
@@ -95,17 +95,29 @@ func (w *Writer) closeShard() error {
 		closers = append(closers, w.sites)
 	}
 	closers = append(closers, w.regions)
+	if w.coverage != nil {
+		closers = append(closers, w.coverage)
+	}
 	for _, c := range closers {
 		if err := c.Close(); err != nil {
 			return err
 		}
 	}
-	// The sinks for this shard, which are the last three opened. Marked so the
+	// The sinks for this shard, which are the last ones opened. Marked so the
 	// final closeFiles does not close them a second time -- which is an error,
 	// and one the writer would report as a failed conversion.
+	//
+	// COUNTED, NOT HARDCODED. This was a literal three, and a store carrying the
+	// optional coverage table opens four per shard -- leaving coverage's sink
+	// unclosed, so its parquet footer was never written and the table read back
+	// as a truncated file.
+	perShard := 3
+	if w.opts.Coverage {
+		perShard = 4
+	}
 	n := len(w.tables)
-	if n >= 3 {
-		for i := n - 3; i < n; i++ {
+	if n >= perShard {
+		for i := n - perShard; i < n; i++ {
 			if w.tables[i].closed {
 				continue
 			}
@@ -125,7 +137,11 @@ func (w *Writer) closeShard() error {
 	if w.shardSites == 0 {
 		return nil
 	}
-	for _, tbl := range []string{CallsTable, SitesTable, RegionsTable} {
+	shardTables := []string{CallsTable, SitesTable, RegionsTable}
+	if w.opts.Coverage {
+		shardTables = append(shardTables, CoverageTable)
+	}
+	for _, tbl := range shardTables {
 		w.shards[tbl] = append(w.shards[tbl], ShardInfo{
 			Name:  ShardFile(tbl, w.shardIdx),
 			Chrom: w.shardChrom,

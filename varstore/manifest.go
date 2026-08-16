@@ -86,6 +86,17 @@ type ManifestParams struct {
 	// has no other way to find out.
 	DepthBands []int32 `json:"depth_bands,omitempty"`
 
+	// MaxGap is the largest uncovered stretch a coverage block was permitted to
+	// span, when this store carries one. Zero means the blocks are the source's
+	// own, unmerged -- or that there are none.
+	//
+	// A BLOCK'S CLAIM IS ONLY AS STRONG AS THIS. Merging across small gaps is
+	// what makes the table affordable, and it weakens "every base in this span
+	// was covered" to "no uncovered run longer than MaxGap". Two stores built
+	// with different tolerances do not mean the same thing by "covered", which
+	// a roll-up spanning both has no other way to see.
+	MaxGap int32 `json:"max_gap,omitempty"`
+
 	// Format are the FORMAT fields captured onto the ALT calls, if any. The
 	// same reasoning as Info: absence and a zero read alike from a typed
 	// reader, and only this can tell them apart.

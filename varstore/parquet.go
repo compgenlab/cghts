@@ -213,7 +213,21 @@ type WriterOpts struct {
 	MinDP        int32
 	NoCallable   bool
 	Program      string
-	Command      string
+
+	// Coverage opens the optional coverage table, for genomic block spans that
+	// answer OFF the sites catalog. Off by default: a store carrying an empty
+	// one asserts "covered nowhere", where an absent one asserts nothing.
+	Coverage bool
+
+	// MaxGap is the largest uncovered stretch a coverage block was permitted to
+	// span when it was built, recorded so a reader knows what "covered" meant
+	// here. Zero means the blocks are the source's own, unmerged.
+	//
+	// Recorded for the same reason MinDP is: two stores built with different
+	// tolerances do not mean the same thing by "covered", and a roll-up
+	// spanning both has to be able to see that they differ.
+	MaxGap  int32
+	Command string
 
 	// ShardSites splits each table every N sites, so a locus query reads one
 	// small file rather than pruning row groups inside a large one. Zero writes
@@ -280,9 +294,10 @@ type WriterOpts struct {
 // Writer builds the three files of a Parquet store. Rows are buffered and
 // flushed in batches so memory stays bounded no matter how large the input is.
 type Writer struct {
-	calls   *parquet.GenericWriter[Call]
-	sites   *parquet.GenericWriter[Site]
-	regions *parquet.GenericWriter[CalledSiteRun]
+	calls    *parquet.GenericWriter[Call]
+	sites    *parquet.GenericWriter[Site]
+	regions  *parquet.GenericWriter[CalledSiteRun]
+	coverage *parquet.GenericWriter[CoverageBlock]
 
 	// The dynamic sites writer, used only when INFO fields are captured. Exactly
 	// one of sites and sitesAny is ever non-nil.
@@ -295,9 +310,10 @@ type Writer struct {
 	callRows   []any
 	fmtScratch []infoSlots
 
-	callBuf   []Call
-	siteBuf   []Site
-	regionBuf []CalledSiteRun
+	callBuf     []Call
+	siteBuf     []Site
+	regionBuf   []CalledSiteRun
+	coverageBuf []CoverageBlock
 
 	// Rows for the dynamic path, allocated once and refilled. A whole-genome
 	// catalog is tens of millions of sites and a map per row would be the
@@ -346,9 +362,10 @@ type Writer struct {
 	chroms   []ChromCensus
 	chromIdx map[string]int
 
-	NCalls   int64
-	NSites   int64
-	NRegions int64
+	NCalls    int64
+	NSites    int64
+	NRegions  int64
+	NCoverage int64
 }
 
 // census returns the running tally for chrom, creating it on first sight.
@@ -554,6 +571,22 @@ func (w *Writer) openShard() error {
 			parquet.Ascending("chrom"), parquet.Ascending("start"))),
 		parquet.BloomFilters(parquet.SplitBlockFilter(10, "sample_id")))...)
 
+	// OPENED ONLY WHEN ASKED FOR, so an absent coverage table means "nobody
+	// said" rather than "covered nowhere". Creating an empty one by default
+	// would assert the second, which is the claim that turns an unknown into a
+	// wrong answer -- every off-catalog position would read as never covered
+	// for every sample, which is exactly what the table exists to fix.
+	if w.opts.Coverage {
+		cf, err := open(w.tableName(CoverageTable))
+		if err != nil {
+			return err
+		}
+		w.coverage = parquet.NewGenericWriter[CoverageBlock](cf, append(append([]parquet.WriterOption{}, opts...),
+			parquet.SortingWriterConfig(parquet.SortingColumns(
+				parquet.Ascending("chrom"), parquet.Ascending("start"))),
+			parquet.BloomFilters(parquet.SplitBlockFilter(10, "sample_id")))...)
+	}
+
 	w.shardSites = 0
 	w.shardChrom = ""
 	w.shardRows = map[string]int64{}
@@ -649,11 +682,19 @@ func (w *Writer) Finish() error {
 // rather than accumulated, so they describe the files rather than the intent.
 func (w *Writer) manifest() (VolumeManifest, error) {
 	tables := map[string]TableInfo{}
-	for table, rows := range map[string]int64{
+	counted := map[string]int64{
 		CallsTable:   w.NCalls,
 		SitesTable:   w.NSites,
 		RegionsTable: w.NRegions,
-	} {
+	}
+	// Listed only when the store actually carries one. A coverage entry with
+	// zero rows would read as "covered nowhere" to every later query, where no
+	// entry at all reads as "nobody said" -- and only the second is true of a
+	// conversion that was never given a gVCF.
+	if w.opts.Coverage {
+		counted[CoverageTable] = w.NCoverage
+	}
+	for table, rows := range counted {
 		// A SPLIT MEMBER IS SIZED SHARD BY SHARD, and each shard's size is read
 		// back from the sink rather than accumulated -- the manifest describes
 		// the files that exist, not the rows the writer believes it wrote, which
@@ -700,6 +741,7 @@ func (w *Writer) manifest() (VolumeManifest, error) {
 			RowGroupSize:  w.opts.RowGroupSize,
 			SpanSemantics: w.opts.Spans,
 			DepthBands:    w.opts.DepthBands,
+			MaxGap:        w.opts.MaxGap,
 			Info:          w.opts.Info,
 			Format:        w.opts.Format,
 		},
@@ -1096,6 +1138,43 @@ func (w *Writer) flushRegions() error {
 	return nil
 }
 
+// WriteCoverage buffers one coverage block.
+//
+// Refused unless the store was opened with Coverage set, because a block
+// arriving at a store that will not record one is a caller who believes they
+// are capturing something they are not -- and the loss is unrecoverable, since
+// the gVCF that could have answered is not read again.
+func (w *Writer) WriteCoverage(b CoverageBlock) error {
+	if !w.opts.Coverage {
+		return fmt.Errorf(
+			"this store was not opened to hold coverage blocks; set WriterOpts.Coverage, "+
+				"or the span %s %s:%d-%d is discarded and cannot be recovered without the source",
+			b.SampleID, b.Chrom, b.Start, b.End)
+	}
+	if b.End < b.Start {
+		return fmt.Errorf("coverage block %s %s:%d-%d ends before it starts",
+			b.SampleID, b.Chrom, b.Start, b.End)
+	}
+	w.shardRows[CoverageTable]++
+	w.coverageBuf = append(w.coverageBuf, b)
+	w.NCoverage++
+	if len(w.coverageBuf) >= batchSize {
+		return w.flushCoverage()
+	}
+	return nil
+}
+
+func (w *Writer) flushCoverage() error {
+	if w.coverage == nil || len(w.coverageBuf) == 0 {
+		return nil
+	}
+	if _, err := w.coverage.Write(w.coverageBuf); err != nil {
+		return fmt.Errorf("writing coverage: %w", err)
+	}
+	w.coverageBuf = w.coverageBuf[:0]
+	return nil
+}
+
 // Close flushes and finalizes all three files.
 //
 // It stops at the first failure instead of pressing on. Continuing would finish
@@ -1187,14 +1266,42 @@ type ParquetVolume struct {
 	hasRefSpans bool
 	sites       *shardSet
 	regions     *shardSet
+	coverage    *shardSet
 	samples     []string
 	hasSites    bool
 	hasRegions  bool
+
+	// hasCoverage distinguishes a store that was given genomic block spans from
+	// one that was not, which is the difference between "not covered there" and
+	// "nobody said". Only the first may be reported as an answer.
+	hasCoverage bool
 	noCallable  bool
 	spans       SpanSemantics
 	minDP       int32
 	meta        map[string]string
 	manifest    *VolumeManifest
+}
+
+// HasCoverage reports whether this store carries genomic block spans, and so
+// whether it can answer about positions absent from the sites catalog.
+func (s *ParquetVolume) HasCoverage() bool { return s.hasCoverage }
+
+// MaxGap is the largest uncovered stretch this store's coverage blocks were
+// permitted to span. Zero when there are none, or when they are unmerged.
+func (s *ParquetVolume) MaxGap() int32 {
+	if s.manifest == nil {
+		return 0
+	}
+	return s.manifest.Params.MaxGap
+}
+
+// Coverage streams the coverage blocks, calling fn for each until it returns
+// false. Reports nothing at all for a store that carries none.
+func (s *ParquetVolume) Coverage(fn func(CoverageBlock) bool) error {
+	if !s.hasCoverage {
+		return nil
+	}
+	return scanParquet(s.coverage, fn)
 }
 
 // SpanSemantics reports what this store's run intervals may claim. A store
@@ -1213,6 +1320,7 @@ type Provenance struct {
 	MinDP      int32
 	NoCallable bool
 	Spans      SpanSemantics
+
 	NumSamples int
 
 	// Meta is the caller-supplied metadata recorded at conversion, read back
@@ -1339,6 +1447,18 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetVolume, error
 		return nil, err
 	}
 	s.regions, s.hasRegions = regions, hasRegions
+
+	// OPTIONAL, and absent is the common case: only a conversion given a gVCF
+	// or a callable mask has one. Absent means nothing was claimed off the
+	// catalog, never that nothing was covered.
+	coverage, hasCoverage, err := openOptionalShardSet(ctx, base, CoverageTable, man.Tables[CoverageTable])
+	if err != nil {
+		calls.Close()
+		sites.Close()
+		regions.Close()
+		return nil, err
+	}
+	s.coverage, s.hasCoverage = coverage, hasCoverage
 	s.manifest = man
 
 	if err := verifyAgainstManifest(man, pf, calls, sites, regions); err != nil {
