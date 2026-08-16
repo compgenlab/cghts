@@ -120,7 +120,7 @@ func (a *VcfAnnotation) Annotate(rec *vcf.VcfRecord) error {
 		return err
 	}
 
-	var vals []string                        // position match: a list for the locus
+	var vals []string                         // position match: a list for the locus
 	byAlt := make([][]string, len(rec.Alt())) // exact match: one bucket per ALT
 	for src, err := range seq {
 		if err != nil {
@@ -189,12 +189,12 @@ func (a *VcfAnnotation) Close() error { return a.reader.Close() }
 // VcfFieldOptions is one field rule within a [VcfAnnotationGroup]: the same per-field
 // knobs as [VcfOptions] minus the shared source file and contig-matching.
 type VcfFieldOptions struct {
-	Name     string // INFO key to add (or "@ID" to copy the ID column)
-	Field    string // source INFO field to copy; "" = presence flag; "@ID" = copy the source ID as the value
-	Exact    bool   // require REF and an ALT allele to match (forced for @ID)
-	Passing  bool   // only consider source records that pass filters
-	Unique   bool   // de-duplicate (sorted) when multiple values match
-	NoHeader bool   // do not add a ##INFO def
+	Name     string   // INFO key to add (or "@ID" to copy the ID column)
+	Field    string   // source INFO field to copy; "" = presence flag; "@ID" = copy the source ID as the value
+	Exact    bool     // require REF and an ALT allele to match (forced for @ID)
+	Passing  bool     // only consider source records that pass filters
+	Unique   bool     // de-duplicate (sorted) when multiple values match
+	NoHeader bool     // do not add a ##INFO def
 	Type     InfoType // declared type of the copied value; empty = String
 }
 
@@ -314,8 +314,8 @@ func (g *VcfAnnotationGroup) Annotate(rec *vcf.VcfRecord) error {
 	}
 
 	nAlt := len(rec.Alt())
-	vals := make([][]string, len(g.rules))     // position match: a list per rule
-	byAlt := make([][][]string, len(g.rules))  // exact match: one bucket per ALT
+	vals := make([][]string, len(g.rules))    // position match: a list per rule
+	byAlt := make([][][]string, len(g.rules)) // exact match: one bucket per ALT
 	for i := range g.rules {
 		if g.rules[i].exact {
 			byAlt[i] = make([][]string, nAlt)

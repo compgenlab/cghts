@@ -10,12 +10,18 @@ import (
 	"github.com/compgenlab/cghts/htsio/tabix"
 )
 
-// writeIndexedGTF writes the same fixture bgzipped with a tabix index beside it.
+// writeIndexedGTF writes the shared fixture bgzipped with a tabix index beside it.
 func writeIndexedGTF(t *testing.T) string {
+	t.Helper()
+	return writeIndexedFrom(t, annGTF)
+}
+
+// writeIndexedFrom indexes arbitrary GTF text, so a test can supply its own.
+func writeIndexedFrom(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ann.gtf.gz")
 	w := tabix.NewWriter(path, tabix.NewWriterOpts().Columns(1, 4, 5).Meta('#').AutoIndex())
-	for _, line := range strings.Split(strings.TrimRight(annGTF, "\n"), "\n") {
+	for _, line := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
 		if line == "" {
 			continue
 		}
@@ -171,6 +177,54 @@ func TestNoSelectionMeansEveryGtfField(t *testing.T) {
 	for _, want := range []string{"GTF_GENE", "GTF_GENEID", "GTF_STRAND", "GTF_REGION"} {
 		if _, ok := info(t, recs[0], want); !ok {
 			t.Errorf("%s missing when nothing was selected", want)
+		}
+	}
+}
+
+// The biotype field is declared when the GTF carries one and not when it does
+// not — the same answer from either gene model.
+//
+// Until the indexed model could answer, the annotator assumed yes, so every
+// indexed GTF got a header line for a field that might never be written. Both
+// models sample or know now, so both headers describe the file in front of them.
+func TestTheBiotypeFieldFollowsTheFile(t *testing.T) {
+	// The shared fixture carries gene_type; this one carries nothing optional.
+	const bare = "chr1\tt\texon\t101\t200\t.\t+\t.\t" +
+		`gene_id "GeneA"; gene_name "GeneA"; transcript_id "TA";` + "\n" +
+		"chr1\tt\tCDS\t101\t200\t.\t+\t0\t" +
+		`gene_id "GeneA"; gene_name "GeneA"; transcript_id "TA";` + "\n"
+	bareDir := t.TempDir()
+	barePlain := filepath.Join(bareDir, "bare.gtf")
+	if err := os.WriteFile(barePlain, []byte(bare), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bareIndexed := writeIndexedFrom(t, bare)
+
+	for _, tc := range []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"in-memory, carries biotypes", writeAnnGTF(t), true},
+		{"indexed, carries biotypes", writeIndexedGTF(t), true},
+		{"in-memory, carries none", barePlain, false},
+		{"indexed, carries none", bareIndexed, false},
+	} {
+		a, err := NewGtfAnnotator(GtfOptions{Filename: tc.path})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		h, _ := bedRecs(t, "chr1\t170\t.\tA\tG\t.\tPASS\t.\tGT\t0/1")
+		if err := a.SetupHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		a.Close()
+		if _, ok := h.InfoDef("GTF_BIOTYPE"); ok != tc.want {
+			t.Errorf("%s: biotype declared = %v, want %v", tc.name, ok, tc.want)
+		}
+		// Not vacuous: the fields it does carry are declared either way.
+		if _, ok := h.InfoDef("GTF_GENE"); !ok {
+			t.Errorf("%s: the header is empty, so this proves nothing", tc.name)
 		}
 	}
 }

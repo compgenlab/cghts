@@ -3,6 +3,7 @@ package gtf
 import (
 	"container/list"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,12 @@ type IndexedAnnotationSource struct {
 
 	ll    *list.List // MRU at front; values are *geneCacheEntry
 	cache map[geneKey]*list.Element
+
+	// What a sample of the file says it carries, and whether it has been taken.
+	// See Provides.
+	probed     bool
+	hasBioType bool
+	hasStatus  bool
 }
 
 type geneKey struct{ ref, geneID string }
@@ -261,4 +268,112 @@ func spanOf(cols []string) (int, int, bool) {
 		return 0, 0, false
 	}
 	return start - 1, end, true // 1-based inclusive → 0-based half-open
+}
+
+// Provides reports whether the GTF supplies a given annotation field, matching
+// [AnnotationSource.Provides].
+//
+// The whole-file model knows because it has read everything. This one has read
+// nothing until it is queried, which is the point of it — so for the two fields
+// that vary between GTFs it samples the file instead: a bounded read of the
+// first records it can find, checking whether they carry the attribute.
+//
+// A sample rather than a scan because the answer is a property of the file's
+// attribute schema, not of any record. A GTF is emitted by one pipeline with one
+// set of attributes, so gene_biotype is on every gene row or on none; reading a
+// few hundred settles it, and reading the rest would cost exactly what the index
+// was for.
+//
+// Unknown resolves to true. When the sample finds no records at all — an empty
+// GTF, or one whose first contig has none — the honest answer is "cannot tell",
+// and declaring a field that is never written costs a header line nobody reads
+// while writing one never declared is a record a strict parser may reject.
+func (s *IndexedAnnotationSource) Provides(key string) bool {
+	switch key {
+	case "gene_id", "gene_name", "start", "end", "strand":
+		return true
+	case "biotype":
+		s.probe()
+		return s.hasBioType
+	case "status":
+		s.probe()
+		return s.hasStatus
+	}
+	return false
+}
+
+// probeLines bounds the sample, in lines read rather than gene rows found.
+//
+// Lines, because that is what the read costs. A budget spent on findings does
+// not bound anything: a file whose rows mostly lack a gene_id would be read
+// until enough gene rows turned up, which could be all of it.
+//
+// A thousand is a couple of bgzf blocks and several hundred gene rows in any
+// ordinary GTF — far past the point where a file carrying biotypes would have
+// shown one.
+const probeLines = 1000
+
+// probe samples the file once, recording which optional attributes it carries.
+//
+// The budget is spent across contigs, not per contig, so a GTF whose first
+// contigs hold nothing parseable cannot make this read the whole file a
+// thousand lines at a time.
+func (s *IndexedAnnotationSource) probe() {
+	if s.probed {
+		return
+	}
+	s.probed = true
+	// Unknown until proven otherwise, so a file this cannot read reports both
+	// present — see Provides on why that is the safe direction.
+	s.hasBioType, s.hasStatus = true, true
+
+	lines, genes := 0, 0
+	bio, status := false, false
+	for _, ref := range s.tr.RefNames() {
+		if lines >= probeLines {
+			break
+		}
+		seq, err := s.tr.Query(ref, 0, math.MaxInt32)
+		if err != nil {
+			continue
+		}
+		for rec, qErr := range seq {
+			if qErr != nil {
+				return // cannot sample; leave the unknown answer in place
+			}
+			if lines++; lines > probeLines {
+				break
+			}
+			cols := strings.Split(rec.Line, "\t")
+			if len(cols) < 9 {
+				continue
+			}
+			a := parseAttributes(cols[8])
+			if a.geneID == "" {
+				// Not a gene row as far as anything else here is concerned —
+				// overlappingSpans skips these too. Counting one as a finding
+				// would let a file of nothing but malformed rows report that it
+				// carries no biotypes, which is a different claim from "cannot
+				// tell".
+				continue
+			}
+			genes++
+			if a.bioType != "" {
+				bio = true
+			}
+			if a.status != "" {
+				status = true
+			}
+			if bio && status {
+				break // nothing left to learn
+			}
+		}
+		if bio && status {
+			break
+		}
+	}
+	if genes == 0 {
+		return // nothing to go on; the unknown answer stands
+	}
+	s.hasBioType, s.hasStatus = bio, status
 }
