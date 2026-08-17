@@ -1452,7 +1452,25 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetVolume, error
 	// OPTIONAL, and absent is the common case: only a conversion given a gVCF
 	// or a callable mask has one. Absent means nothing was claimed off the
 	// catalog, never that nothing was covered.
-	coverage, hasCoverage, err := openOptionalShardSet(ctx, base, CoverageTable, man.Tables[CoverageTable])
+	// ASKED OF THE MANIFEST FIRST, and not probed for.
+	//
+	// Every other table is probed because every store has one; coverage is the
+	// first that is genuinely absent from almost all of them, which is what
+	// exposed the difference. Probing cost a round trip per open on every store
+	// that has none -- and worse, it FAILED: iosource is documented to wrap a
+	// remote 404 in fs.ErrNotExist and does not on the HEAD path, so the
+	// absence came back as an error and every existing store stopped opening.
+	//
+	// The manifest is the authority on which tables a store has, which is why
+	// it lists coverage only when one was written. Believing it is both correct
+	// and free.
+	var coverage *shardSet
+	var hasCoverage bool
+	if _, listed := man.Tables[CoverageTable]; listed {
+		coverage, hasCoverage, err = openOptionalShardSet(ctx, base, CoverageTable, man.Tables[CoverageTable])
+	} else {
+		coverage = &shardSet{name: CoverageTable}
+	}
 	if err != nil {
 		calls.Close()
 		sites.Close()
