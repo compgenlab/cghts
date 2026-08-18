@@ -16,7 +16,7 @@
 // because it is the same client.
 //
 // WHAT THIS COSTS, and it is worth knowing before pointing a long conversion at
-// it: a member is uploaded in parts and does not exist until its last part
+// it: a table is uploaded in parts and does not exist until its last part
 // lands. A run that dies without abandoning its uploads leaves those parts
 // invisible to a bucket listing and billed until something removes them. The
 // writer abandons them on every failure it can see; set a lifecycle rule with
@@ -41,7 +41,7 @@ func init() {
 	})
 }
 
-// Sink writes a store's members to one S3 prefix.
+// Sink writes a store's tables to one S3 prefix.
 type Sink struct {
 	ctx    context.Context
 	client *s3.Client
@@ -89,10 +89,10 @@ func (s *Sink) Stat(name string) (int64, bool, error) {
 
 func (s *Sink) Describe() string { return s.base }
 
-// Abort abandons a member's upload.
+// Abort abandons a table's upload.
 //
 // This is what makes the Sink an [varstore.Aborter], and why the writer asks
-// for one: on an object store there is no half-written member to delete, only
+// for one: on an object store there is no half-written table to delete, only
 // an upload in progress. Deleting would remove nothing and leave the parts.
 func (s *Sink) Abort(name string) error {
 	s.mu.Lock()

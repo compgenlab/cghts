@@ -90,7 +90,7 @@ func TestInfoRoundTrips(t *testing.T) {
 // An existing reader must not notice that the file grew columns.
 //
 // This is the whole premise of putting captured INFO in sites.parquet rather
-// than in a sidecar member, so if it ever stops holding, the design is wrong
+// than in a sidecar table, so if it ever stops holding, the design is wrong
 // rather than the test.
 func TestTypedSiteReaderIgnoresCapturedColumns(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "store")

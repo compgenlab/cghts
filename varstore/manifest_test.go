@@ -54,15 +54,15 @@ func TestManifestRecordsWhatWasWritten(t *testing.T) {
 		Contigs: []string{"##contig=<ID=chr1>", "##contig=<ID=chr2>"},
 	})
 
-	m, err := ReadManifest(base)
+	m, err := ReadVolumeManifest(base)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !m.Complete {
 		t.Error("Complete is false on a finished store")
 	}
-	if m.FormatVersion != ManifestVersion {
-		t.Errorf("FormatVersion = %d, want %d", m.FormatVersion, ManifestVersion)
+	if m.FormatVersion != VolumeManifestVersion {
+		t.Errorf("FormatVersion = %d, want %d", m.FormatVersion, VolumeManifestVersion)
 	}
 	if m.Created.IsZero() {
 		t.Error("Created is zero")
@@ -94,13 +94,13 @@ func TestManifestRecordsWhatWasWritten(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{CallsMember, SitesMember, RegionsMember} {
-		info, ok := m.Members[name]
+	for _, name := range []string{CallsTable, SitesTable, RegionsTable} {
+		info, ok := m.Tables[name]
 		if !ok {
-			t.Errorf("no member entry for %s", name)
+			t.Errorf("no table entry for %s", name)
 			continue
 		}
-		st, err := os.Stat(MemberPath(base, name))
+		st, err := os.Stat(TablePath(base, name))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -111,21 +111,21 @@ func TestManifestRecordsWhatWasWritten(t *testing.T) {
 }
 
 // A store is readable only once a conversion says it finished. Everything else
-// about the members can look perfect while the run covered a fraction of its
+// about the tables can look perfect while the run covered a fraction of its
 // input, and that store answers "not assayed" for the rest -- which is exactly
 // what a correct store says about a position the source never reported.
 func TestOpenRefusesAStoreWithNoManifest(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
 	buildCensusStore(t, base, WriterOpts{MinDP: 10})
 
-	if err := os.Remove(ManifestPath(base)); err != nil {
+	if err := os.Remove(VolumeManifestPath(base)); err != nil {
 		t.Fatal(err)
 	}
 	_, err := OpenParquet(base)
 	if err == nil {
 		t.Fatal("a store with no manifest opened")
 	}
-	if !strings.Contains(err.Error(), ManifestFile) {
+	if !strings.Contains(err.Error(), VolumeManifestFile) {
 		t.Errorf("error does not name the manifest: %v", err)
 	}
 }
@@ -134,12 +134,12 @@ func TestOpenRefusesAnIncompleteManifest(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
 	buildCensusStore(t, base, WriterOpts{MinDP: 10})
 
-	m, err := ReadManifest(base)
+	m, err := ReadVolumeManifest(base)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.Complete = false
-	if err := WriteManifest(base, *m); err != nil {
+	if err := WriteVolumeManifest(base, *m); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := OpenParquet(base); err == nil {
@@ -151,12 +151,12 @@ func TestOpenRefusesAFutureManifestVersion(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
 	buildCensusStore(t, base, WriterOpts{MinDP: 10})
 
-	m, err := ReadManifest(base)
+	m, err := ReadVolumeManifest(base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.FormatVersion = ManifestVersion + 1
-	if err := WriteManifest(base, *m); err != nil {
+	m.FormatVersion = VolumeManifestVersion + 1
+	if err := WriteVolumeManifest(base, *m); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := OpenParquet(base); err == nil {
@@ -164,10 +164,10 @@ func TestOpenRefusesAFutureManifestVersion(t *testing.T) {
 	}
 }
 
-// The row-count check is what catches a member that is well-formed but belongs
+// The row-count check is what catches a table that is well-formed but belongs
 // to a different conversion. Sites and regions carry no metadata of their own,
-// so without the manifest nothing links a member to the store around it.
-func TestOpenRefusesAMemberFromAnotherStore(t *testing.T) {
+// so without the manifest nothing links a table to the store around it.
+func TestOpenRefusesATableFromAnotherVolume(t *testing.T) {
 	dir := t.TempDir()
 	mine := filepath.Join(dir, "mine")
 	theirs := filepath.Join(dir, "theirs")
@@ -195,7 +195,7 @@ func TestOpenRefusesAMemberFromAnotherStore(t *testing.T) {
 
 	_, err = OpenParquet(mine)
 	if err == nil {
-		t.Fatal("a store opened with a sites member from a different conversion")
+		t.Fatal("a store opened with a sites table from a different conversion")
 	}
 	if !strings.Contains(err.Error(), "does not belong") {
 		t.Errorf("error does not explain the mismatch: %v", err)
@@ -204,11 +204,11 @@ func TestOpenRefusesAMemberFromAnotherStore(t *testing.T) {
 
 // A conversion under way must never carry the previous run's completion marker,
 // or a --force retry that dies leaves a manifest vouching for half-written
-// members.
+// tables.
 func TestNewWriterClearsAStaleManifest(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
 	buildCensusStore(t, base, WriterOpts{MinDP: 10})
-	if _, err := os.Stat(ManifestPath(base)); err != nil {
+	if _, err := os.Stat(VolumeManifestPath(base)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -216,7 +216,7 @@ func TestNewWriterClearsAStaleManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(ManifestPath(base)); !os.IsNotExist(err) {
+	if _, err := os.Stat(VolumeManifestPath(base)); !os.IsNotExist(err) {
 		t.Error("the previous manifest survived into a new conversion")
 	}
 	if _, err := OpenParquet(base); err == nil {

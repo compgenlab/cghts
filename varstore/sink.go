@@ -12,11 +12,11 @@ import (
 	"sync"
 )
 
-// Where a store's members are written.
+// Where a store's tables are written.
 //
 // A store is four files that only mean anything together, and until now they
 // could only be local ones. Nothing about the format required that: Parquet
-// emits row groups forward and writes its footer last, so a member needs an
+// emits row groups forward and writes its footer last, so a table needs an
 // io.Writer and never seeks. The filesystem was simply what the writer happened
 // to be spelled in.
 //
@@ -31,31 +31,31 @@ import (
 //
 // WHY THE SINK OWNS REMOVAL as well as creation: aborting a conversion has to
 // undo what it made, and undoing differs by more than the call used. Locally a
-// half-written member is a file to unlink. On an object store nothing is
-// visible until the upload completes, so there is no half-written member to
+// half-written table is a file to unlink. On an object store nothing is
+// visible until the upload completes, so there is no half-written table to
 // remove and abandoning is what has to happen instead. A caller cannot pick
 // correctly between those, so it does not choose.
 
-// Sink creates and removes the members of one store.
+// Sink creates and removes the tables of one store.
 //
-// Names are member file names -- "calls.parquet", "manifest.json.gz" -- not
+// Names are table file names -- "calls.parquet", "manifest.json.gz" -- not
 // paths. Where the store lives is the sink's business, which is what lets the
 // writer be written once.
 type Sink interface {
-	// Create returns a writer for one member, replacing any previous content.
+	// Create returns a writer for one table, replacing any previous content.
 	Create(name string) (io.WriteCloser, error)
 
-	// Remove deletes a member. A member that is not there is not an error.
+	// Remove deletes a table. A table that is not there is not an error.
 	Remove(name string) error
 
-	// Stat reports a member's size, and whether it exists.
+	// Stat reports a table's size, and whether it exists.
 	Stat(name string) (size int64, ok bool, err error)
 
 	// Describe names the destination for an error message.
 	Describe() string
 }
 
-// Aborter is a Sink whose members are not visible until they are finished, and
+// Aborter is a Sink whose tables are not visible until they are finished, and
 // which therefore abandons rather than deletes.
 //
 // Implemented by object-store sinks. The writer prefers it when tearing down a
@@ -156,7 +156,7 @@ func (f fileSink) Create(name string) (io.WriteCloser, error) {
 	if err := os.MkdirAll(f.dir, 0o755); err != nil {
 		return nil, err
 	}
-	// A split member's name carries a directory -- "calls/00007.parquet" -- and
+	// A split table's name carries a directory -- "calls/00007.parquet" -- and
 	// on an object store that is just a key with a slash in it. On a filesystem
 	// it is a directory that has to exist first, which is the one place the two
 	// kinds of sink genuinely differ.
