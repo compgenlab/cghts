@@ -1,7 +1,7 @@
 // Package varstore holds the on-disk schema for a sparse genotype store and a
 // uniform way to query genotypes regardless of which format backs them.
 //
-// A Parquet store is a directory. All three members are required: the calls file
+// A Parquet store is a directory. All three tables are required: the calls file
 // alone cannot distinguish a confidently-called reference genotype from a
 // position that was never assayed, which is the distinction Classify exists to
 // make.
@@ -11,8 +11,8 @@
 //	  sites.parquet     one row per interrogated site, sample-independent
 //	  regions.parquet   runs of catalog sites at which a sample was called
 //
-// The members are only meaningful together, so the store is one thing to copy,
-// move and delete. A trailing separator on the base is optional, and a member
+// The tables are only meaningful together, so the store is one thing to copy,
+// move and delete. A trailing separator on the base is optional, and a table
 // path is accepted anywhere a store name is: all of "cohort", "cohort/" and
 // "cohort/calls.parquet" name the same store.
 //
@@ -203,7 +203,61 @@ type CalledSiteRun struct {
 	MinDP int32 `parquet:"min_dp"`
 }
 
-// The members of a store. A store IS a directory, and they sit inside it under
+// CoverageBlock is a positive claim about every base in a span.
+//
+// WHAT IT IS FOR. regions records runs of CATALOG SITES, which is all a
+// joint-called pVCF supports: it says a sample was called at the sites inside
+// an interval and claims nothing about the bases between them. That is honest
+// and it is pessimistic in two ways that only surface later.
+//
+// Across batches, two callsets joint-called separately have different catalogs,
+// so a variant carried by three people in one is simply absent from the other's
+// catalog -- and every sample in that second batch reads as NotAssayed rather
+// than reference, halving a denominator. Across fifteen batches it leaves
+// fourteen fifteenths of a cohort unevaluable at any batch-specific variant.
+//
+// Across time it is worse. The catalog is frozen at conversion, so a variant
+// discovered next year is permanently unanswerable for everything already
+// converted, and reconverting recovers nothing because the pVCF never held it.
+// A coverage block is the only thing that can answer it, and the only moment to
+// capture one is at conversion from a source that still has it -- a gVCF, or a
+// per-sample callable BED.
+//
+// THE CLAIM IS BOUNDED BY MaxGap. A block built by merging across small
+// uncovered stretches does not mean "every base"; it means "covered at MinDP or
+// above, with no uncovered run longer than the manifest's MaxGap". That
+// tolerance is what makes the table affordable -- merging a real per-sample mask
+// across 10bp collapsed it 8.4x for 0.35% over-claim -- and it is recorded in
+// ManifestParams for the same reason MinDP is: two stores with different
+// tolerances do not mean the same thing by "covered".
+type CoverageBlock struct {
+	SampleID string `parquet:"sample_id,dict"`
+	Chrom    string `parquet:"chrom,dict"`
+
+	// Start and End bound the covered span, inclusive, in the source's own
+	// coordinates -- the same convention CalledSiteRun uses.
+	Start int32 `parquet:"start"`
+	End   int32 `parquet:"end"`
+
+	// MinDP is the floor the source vouches for across the whole span, a gVCF's
+	// MIN_DP. A reference call inferred from this block rests on it, so it is
+	// the field the gate compares against, exactly as for a callable run.
+	MinDP int32 `parquet:"min_dp"`
+
+	// GQ as the source stated it, or Missing.
+	//
+	// RECORDED, NOT GATED ON. It cannot be recovered later and costs nothing
+	// here, which is the same reasoning that captures INFO fields. But nothing
+	// should gate on it: GQ is not comparable across callers, saturates at 99,
+	// and a gate resting on it would mean different things in two parts of one
+	// release -- which is the failure the depth gate is arranged to avoid.
+	GQ int32 `parquet:"gq"`
+}
+
+// CoveragePath returns the file holding a store's coverage blocks.
+func CoveragePath(base string) string { return TablePath(base, CoverageTable) }
+
+// The tables of a store. A store IS a directory, and they sit inside it under
 // fixed names:
 //
 //	cohort/
@@ -215,26 +269,30 @@ type CalledSiteRun struct {
 // "cohort" and "cohort/" name the same store.
 //
 // There used to be a second, filename-prefix form ("cohort.calls.parquet"), and
-// dropping it removed more than it cost. The members are only meaningful
+// dropping it removed more than it cost. The tables are only meaningful
 // together, so a store wants to be one thing to copy, move and delete; a fixed
 // directory is also how every table format built on Parquet ships, so external
-// readers can be pointed straight at a member. And path resolution collapses:
+// readers can be pointed straight at a table. And path resolution collapses:
 // there is no longer a base that might be a prefix or might be a directory, no
-// separator-sensitive MemberPath, and no need to guess which was meant.
+// separator-sensitive TablePath, and no need to guess which was meant.
 const (
-	CallsMember   = "calls"
-	SitesMember   = "sites"
-	RegionsMember = "regions"
+	CallsTable   = "calls"
+	SitesTable   = "sites"
+	RegionsTable = "regions"
+
+	// CoverageTable is OPTIONAL, and its absence means "nobody said" rather
+	// than "covered nowhere". See CoverageBlock.
+	CoverageTable = "coverage"
 )
 
-// MemberFile returns the file name one member of a store is stored under,
+// TableFile returns the file name one table of a store is stored under,
 // without a directory. What a Sink is addressed by: where the store lives is
-// the sink's business, and the member is the same name wherever it goes.
-func MemberFile(member string) string { return member + ".parquet" }
+// the sink's business, and the table is the same name wherever it goes.
+func TableFile(table string) string { return table + ".parquet" }
 
-// MemberPath returns the file holding one member of the store at base.
-func MemberPath(base, member string) string {
-	return joinStore(base, member+".parquet")
+// TablePath returns the file holding one table of the store at base.
+func TablePath(base, table string) string {
+	return joinStore(base, table+".parquet")
 }
 
 // joinStore appends a name to a store directory.
@@ -270,24 +328,24 @@ func trimStoreDir(base string) string {
 }
 
 // CallsPath returns the calls file for a store base name.
-func CallsPath(base string) string { return MemberPath(base, CallsMember) }
+func CallsPath(base string) string { return TablePath(base, CallsTable) }
 
 // SitesPath returns the sites file for a store base name.
-func SitesPath(base string) string { return MemberPath(base, SitesMember) }
+func SitesPath(base string) string { return TablePath(base, SitesTable) }
 
 // RegionsPath returns the callable-regions file for a store base name.
-func RegionsPath(base string) string { return MemberPath(base, RegionsMember) }
+func RegionsPath(base string) string { return TablePath(base, RegionsTable) }
 
 // EnsureStoreDir creates the directory a store lives in.
 //
 // LOCAL PATHS ONLY, and a remote base is an error rather than a no-op: on an
 // s3:// locator this used to reach MkdirAll and create a local directory
 // literally named "s3:". Callers that may be handed either should go through a
-// Sink, which creates whatever its destination needs when a member is created
+// Sink, which creates whatever its destination needs when a table is created
 // -- there is nothing to make in advance on an object store.
 //
 // Note that it is not undone if the conversion later fails, so an abandoned run
-// can leave an empty directory behind. That is harmless -- ExistingMembers finds
+// can leave an empty directory behind. That is harmless -- ExistingTables finds
 // nothing in it, so the retry is not blocked -- but it does mean the presence of
 // a directory says nothing about whether a store is there.
 func EnsureStoreDir(base string) error {
@@ -299,43 +357,43 @@ func EnsureStoreDir(base string) error {
 	return os.MkdirAll(trimStoreDir(base), 0o755)
 }
 
-// MemberFiles are the members a store is made of, manifest included, in the
+// TableFiles are the tables a store is made of, manifest included, in the
 // order a conversion writes them.
 //
-// The manifest counts as a member here because a conversion writes one and
+// The manifest counts as a table here because a conversion writes one and
 // removes one: leaving it out of an overwrite check would let a re-run orphan a
-// marker vouching for members it replaced.
-func MemberFiles() []string {
+// marker vouching for tables it replaced.
+func TableFiles() []string {
 	return []string{
-		MemberFile(CallsMember), MemberFile(SitesMember),
-		MemberFile(RegionsMember), ManifestFile,
+		TableFile(CallsTable), TableFile(SitesTable),
+		TableFile(RegionsTable), VolumeManifestFile,
 	}
 }
 
-// ExistingMembers lists which member files already exist at base, the manifest
+// ExistingTables lists which table files already exist at base, the manifest
 // included: it is written by a conversion and removed by one, so leaving it out
-// would let a re-run silently orphan a marker vouching for members it replaced.
+// would let a re-run silently orphan a marker vouching for tables it replaced.
 //
-// LOCAL PATHS ONLY. Use ExistingMembersIn for a base that may be remote -- this
+// LOCAL PATHS ONLY. Use ExistingTablesIn for a base that may be remote -- this
 // one answers "none" for every locator it cannot stat, which is the wrong
 // answer in the one direction that matters.
-func ExistingMembers(base string) []string {
+func ExistingTables(base string) []string {
 	var found []string
-	for _, m := range []string{CallsMember, SitesMember, RegionsMember} {
-		if p := MemberPath(base, m); fileExists(p) {
+	for _, m := range []string{CallsTable, SitesTable, RegionsTable} {
+		if p := TablePath(base, m); fileExists(p) {
 			found = append(found, p)
 		}
 	}
-	if p := ManifestPath(base); fileExists(p) {
+	if p := VolumeManifestPath(base); fileExists(p) {
 		found = append(found, p)
 	}
 	return found
 }
 
-// ExistingMembersIn lists the members already present in a sink, by locator.
-func ExistingMembersIn(sink Sink) ([]string, error) {
+// ExistingTablesIn lists the tables already present in a sink, by locator.
+func ExistingTablesIn(sink Sink) ([]string, error) {
 	var found []string
-	for _, name := range MemberFiles() {
+	for _, name := range TableFiles() {
 		size, ok, err := sink.Stat(name)
 		_ = size
 		if err != nil {
@@ -355,7 +413,7 @@ func CheckStoreTarget(base string, force bool) error {
 	// THROUGH A SINK, so the check means the same thing wherever the store is
 	// going. It used to stat local paths, which against a remote base found
 	// nothing and waved through exactly the overwrite it exists to prevent --
-	// silently, because the members it looks for cannot be seen with os.Stat.
+	// silently, because the tables it looks for cannot be seen with os.Stat.
 	sink, err := OpenSink(base)
 	if err != nil {
 		return err
@@ -372,7 +430,7 @@ func CheckStoreTargetIn(sink Sink, force bool) error {
 	if force {
 		return nil
 	}
-	existing, err := ExistingMembersIn(sink)
+	existing, err := ExistingTablesIn(sink)
 	if err != nil {
 		return err
 	}
@@ -383,16 +441,16 @@ func CheckStoreTargetIn(sink Sink, force bool) error {
 	return nil
 }
 
-// ShardFile returns the file name one shard of a split member is stored under,
+// ShardFile returns the file name one shard of a split table is stored under,
 // relative to the store: "calls/00007.parquet".
 //
-// A DIRECTORY PER MEMBER rather than a directory per shard, because the members
+// A DIRECTORY PER MEMBER rather than a directory per shard, because the tables
 // are read independently -- a locus lookup touches calls and regions and may
 // never open sites -- and because it keeps the unsplit layout recognisable:
 // `calls.parquet` becomes `calls/`, which reads as the same thing having grown.
 //
 // Zero-padded so a plain listing sorts into coordinate order, which is how
 // anybody debugging one will first look at it.
-func ShardFile(member string, i int) string {
-	return fmt.Sprintf("%s/%05d.parquet", member, i)
+func ShardFile(table string, i int) string {
+	return fmt.Sprintf("%s/%05d.parquet", table, i)
 }

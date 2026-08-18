@@ -69,17 +69,17 @@ func (w *Writer) rotate() error {
 
 // closeShard flushes and finalises the current shard, recording what it holds.
 func (w *Writer) closeShard() error {
-	for _, fn := range []func() error{w.flushCalls, w.flushSites, w.flushRegions} {
+	for _, fn := range []func() error{w.flushCalls, w.flushSites, w.flushRegions, w.flushCoverage} {
 		if err := fn(); err != nil {
 			return err
 		}
 	}
 	// Exactly one of the two sites writers is live; see openShard.
 	// CALLS, THEN SITES, THEN REGIONS, and the order is load-bearing rather
-	// than arbitrary. A parquet footer is written by Close, so a member that
-	// closes is a member that looks finished -- and if calls fails, a finalised
+	// than arbitrary. A parquet footer is written by Close, so a table that
+	// closes is a table that looks finished -- and if calls fails, a finalised
 	// regions would leave a set that reads as complete while calls is short.
-	// Closing in the order the members are written means a failure stops the
+	// Closing in the order the tables are written means a failure stops the
 	// ones after it.
 	//
 	// Exactly one writer of each pair is live; see openShard.
@@ -95,24 +95,36 @@ func (w *Writer) closeShard() error {
 		closers = append(closers, w.sites)
 	}
 	closers = append(closers, w.regions)
+	if w.coverage != nil {
+		closers = append(closers, w.coverage)
+	}
 	for _, c := range closers {
 		if err := c.Close(); err != nil {
 			return err
 		}
 	}
-	// The sinks for this shard, which are the last three opened. Marked so the
+	// The sinks for this shard, which are the last ones opened. Marked so the
 	// final closeFiles does not close them a second time -- which is an error,
 	// and one the writer would report as a failed conversion.
-	n := len(w.members)
-	if n >= 3 {
-		for i := n - 3; i < n; i++ {
-			if w.members[i].closed {
+	//
+	// COUNTED, NOT HARDCODED. This was a literal three, and a store carrying the
+	// optional coverage table opens four per shard -- leaving coverage's sink
+	// unclosed, so its parquet footer was never written and the table read back
+	// as a truncated file.
+	perShard := 3
+	if w.opts.Coverage {
+		perShard = 4
+	}
+	n := len(w.tables)
+	if n >= perShard {
+		for i := n - perShard; i < n; i++ {
+			if w.tables[i].closed {
 				continue
 			}
-			if err := w.members[i].sw.Close(); err != nil {
+			if err := w.tables[i].sw.Close(); err != nil {
 				return err
 			}
-			w.members[i].closed = true
+			w.tables[i].closed = true
 		}
 	}
 	if w.opts.ShardSites <= 0 {
@@ -125,13 +137,17 @@ func (w *Writer) closeShard() error {
 	if w.shardSites == 0 {
 		return nil
 	}
-	for _, member := range []string{CallsMember, SitesMember, RegionsMember} {
-		w.shards[member] = append(w.shards[member], ShardInfo{
-			Name:  ShardFile(member, w.shardIdx),
+	shardTables := []string{CallsTable, SitesTable, RegionsTable}
+	if w.opts.Coverage {
+		shardTables = append(shardTables, CoverageTable)
+	}
+	for _, tbl := range shardTables {
+		w.shards[tbl] = append(w.shards[tbl], ShardInfo{
+			Name:  ShardFile(tbl, w.shardIdx),
 			Chrom: w.shardChrom,
 			First: w.shardFirst,
 			Last:  w.shardLast,
-			Rows:  w.shardRows[member],
+			Rows:  w.shardRows[tbl],
 		})
 	}
 	return nil

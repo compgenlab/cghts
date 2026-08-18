@@ -108,7 +108,7 @@ var ReservedMetaKeys = []string{
 // and is recorded verbatim -- the writer cannot know whether "GRCh38" is true,
 // and normalizing it would turn a caller's assertion into the library's. A key
 // is an identifier that has to survive a round trip through a parquet metadata
-// key and a JSON object member, and be greppable afterwards, so it is held to
+// key and a JSON object table, and be greppable afterwards, so it is held to
 // lowercase [a-z0-9_-]. The dot is excluded specifically: MetaPrefix already
 // uses it as a separator, and a key containing one would read back ambiguously.
 func ValidMetaKey(k string) bool {
@@ -202,7 +202,7 @@ func CodecFor(name string) (compress.Codec, error) {
 
 // WriterOpts configures a Parquet store writer.
 type WriterOpts struct {
-	// Sink is where the members are written. Nil means "work it out from the
+	// Sink is where the tables are written. Nil means "work it out from the
 	// base", which is what every caller wants; it is settable so a test can
 	// supply one without a filesystem or a bucket.
 	Sink Sink
@@ -213,15 +213,29 @@ type WriterOpts struct {
 	MinDP        int32
 	NoCallable   bool
 	Program      string
-	Command      string
 
-	// ShardSites splits each member every N sites, so a locus query reads one
+	// Coverage opens the optional coverage table, for genomic block spans that
+	// answer OFF the sites catalog. Off by default: a store carrying an empty
+	// one asserts "covered nowhere", where an absent one asserts nothing.
+	Coverage bool
+
+	// MaxGap is the largest uncovered stretch a coverage block was permitted to
+	// span when it was built, recorded so a reader knows what "covered" meant
+	// here. Zero means the blocks are the source's own, unmerged.
+	//
+	// Recorded for the same reason MinDP is: two stores built with different
+	// tolerances do not mean the same thing by "covered", and a roll-up
+	// spanning both has to be able to see that they differ.
+	MaxGap  int32
+	Command string
+
+	// ShardSites splits each table every N sites, so a locus query reads one
 	// small file rather than pruning row groups inside a large one. Zero writes
 	// the store unsplit, which is what every store before this is.
 	//
 	// The win is not the pruning -- Parquet already prunes row groups -- it is
 	// that the statistics doing the pruning live in the FOOTER, so deciding not
-	// to read a whole-genome member still costs fetching and parsing a footer
+	// to read a whole-genome table still costs fetching and parsing a footer
 	// describing it. A shard index in the manifest decides the same thing having
 	// read only the manifest.
 	ShardSites int64
@@ -244,7 +258,7 @@ type WriterOpts struct {
 	// Format are FORMAT fields to capture onto the ALT calls, each as its own
 	// typed column in calls.parquet.
 	//
-	// Empty by default and deliberately so: calls is the large member, so a
+	// Empty by default and deliberately so: calls is the large table, so a
 	// column here costs roughly a hundred times what the same column costs on
 	// the sites catalog. See format.go.
 	Format []FormatField
@@ -280,9 +294,10 @@ type WriterOpts struct {
 // Writer builds the three files of a Parquet store. Rows are buffered and
 // flushed in batches so memory stays bounded no matter how large the input is.
 type Writer struct {
-	calls   *parquet.GenericWriter[Call]
-	sites   *parquet.GenericWriter[Site]
-	regions *parquet.GenericWriter[CalledSiteRun]
+	calls    *parquet.GenericWriter[Call]
+	sites    *parquet.GenericWriter[Site]
+	regions  *parquet.GenericWriter[CalledSiteRun]
+	coverage *parquet.GenericWriter[CoverageBlock]
 
 	// The dynamic sites writer, used only when INFO fields are captured. Exactly
 	// one of sites and sitesAny is ever non-nil.
@@ -295,20 +310,21 @@ type Writer struct {
 	callRows   []any
 	fmtScratch []infoSlots
 
-	callBuf   []Call
-	siteBuf   []Site
-	regionBuf []CalledSiteRun
+	callBuf     []Call
+	siteBuf     []Site
+	regionBuf   []CalledSiteRun
+	coverageBuf []CoverageBlock
 
 	// Rows for the dynamic path, allocated once and refilled. A whole-genome
 	// catalog is tens of millions of sites and a map per row would be the
 	// dominant cost of writing one.
 	siteRows []any
 
-	// Sharding: the coordinate ranges each member is split into.
+	// Sharding: the coordinate ranges each table is split into.
 	//
 	// A shard is cut every ShardSites sites and at every chromosome change,
 	// which is what keeps First and Last comparable without a chromosome test.
-	// The three members are cut TOGETHER on the same site boundaries, so shard
+	// The three tables are cut TOGETHER on the same site boundaries, so shard
 	// k of calls, sites and regions cover the same interval and a locus query
 	// reads the k'th of each rather than reconciling two partitionings.
 	shardIdx   int
@@ -328,11 +344,11 @@ type Writer struct {
 	// that correct without an allocation per value.
 	infoScratch []infoSlots
 
-	// The members being written, in creation order, with the names they will
+	// The tables being written, in creation order, with the names they will
 	// have. Held so Close can finish them and abort can undo them -- and named
-	// rather than handled, because a remote member has no file to name itself.
-	sink    Sink
-	members []memberSink
+	// rather than handled, because a remote table has no file to name itself.
+	sink   Sink
+	tables []tableSink
 
 	// base and opts are kept so Finish can describe the store without the
 	// caller having to hand back what it already passed to NewWriter.
@@ -346,9 +362,10 @@ type Writer struct {
 	chroms   []ChromCensus
 	chromIdx map[string]int
 
-	NCalls   int64
-	NSites   int64
-	NRegions int64
+	NCalls    int64
+	NSites    int64
+	NRegions  int64
+	NCoverage int64
 }
 
 // census returns the running tally for chrom, creating it on first sight.
@@ -381,10 +398,10 @@ func (w *Writer) census(chrom string, pos int32) *ChromCensus {
 
 const batchSize = 8192
 
-// memberSink is one store member being written: the writer it is fed through
-// and the file name it will have. Named around the sink because `member` and
-// `openMember` both already mean something on the reading side.
-type memberSink struct {
+// tableSink is one store table being written: the writer it is fed through
+// and the file name it will have. Named around the sink because `table` and
+// `openTable` both already mean something on the reading side.
+type tableSink struct {
 	name string
 	sw   io.WriteCloser
 
@@ -395,7 +412,7 @@ type memberSink struct {
 	closed bool
 }
 
-// NewWriter creates the store directory at base and the member files inside it.
+// NewWriter creates the store directory at base and the table files inside it.
 //
 // The directory is created here rather than left to the caller because a store
 // *is* its directory: there is no longer a spelling of base that means anything
@@ -436,11 +453,11 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 			return nil, err
 		}
 	}
-	// Remove any manifest before touching the members. From here until Finish
+	// Remove any manifest before touching the tables. From here until Finish
 	// the store is under construction and must not carry a completion marker --
 	// otherwise a --force re-run that dies partway would leave the previous
-	// run's manifest vouching for this run's half-written members.
-	if err := sink.Remove(ManifestFile); err != nil {
+	// run's manifest vouching for this run's half-written tables.
+	if err := sink.Remove(VolumeManifestFile); err != nil {
 		return nil, fmt.Errorf("clearing previous manifest: %w", err)
 	}
 	w := &Writer{base: base, opts: o, sink: sink}
@@ -454,16 +471,16 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	return w, nil
 }
 
-// memberName is where a member's rows go: its own file when unsplit, or the
+// tableName is where a table's rows go: its own file when unsplit, or the
 // current shard's file when split.
-func (w *Writer) memberName(member string) string {
+func (w *Writer) tableName(table string) string {
 	if w.opts.ShardSites <= 0 {
-		return MemberFile(member)
+		return TableFile(table)
 	}
-	return ShardFile(member, w.shardIdx)
+	return ShardFile(table, w.shardIdx)
 }
 
-// openShard creates the three member writers for the current shard.
+// openShard creates the three table writers for the current shard.
 //
 // Called once for an unsplit store and once per shard for a split one, so the
 // two paths cannot drift: a split store's first shard is written by exactly the
@@ -476,7 +493,7 @@ func (w *Writer) openShard() error {
 			_ = w.abort()
 			return nil, err
 		}
-		w.members = append(w.members, memberSink{name: name, sw: f})
+		w.tables = append(w.tables, tableSink{name: name, sw: f})
 		return f, nil
 	}
 
@@ -496,7 +513,7 @@ func (w *Writer) openShard() error {
 	callOpts := append(append([]parquet.WriterOption{}, sortedByLocus...),
 		parquet.BloomFilters(parquet.SplitBlockFilter(10, "sample_id")))
 
-	cf, err := open(w.memberName(CallsMember))
+	cf, err := open(w.tableName(CallsTable))
 	if err != nil {
 		return err
 	}
@@ -530,7 +547,7 @@ func (w *Writer) openShard() error {
 		w.setCallMeta(MetaNoCall, "1")
 	}
 
-	sf, err := open(w.memberName(SitesMember))
+	sf, err := open(w.tableName(SitesTable))
 	if err != nil {
 		return err
 	}
@@ -545,7 +562,7 @@ func (w *Writer) openShard() error {
 		w.sitesAny = nil
 	}
 
-	rf, err := open(w.memberName(RegionsMember))
+	rf, err := open(w.tableName(RegionsTable))
 	if err != nil {
 		return err
 	}
@@ -553,6 +570,22 @@ func (w *Writer) openShard() error {
 		parquet.SortingWriterConfig(parquet.SortingColumns(
 			parquet.Ascending("chrom"), parquet.Ascending("start"))),
 		parquet.BloomFilters(parquet.SplitBlockFilter(10, "sample_id")))...)
+
+	// OPENED ONLY WHEN ASKED FOR, so an absent coverage table means "nobody
+	// said" rather than "covered nowhere". Creating an empty one by default
+	// would assert the second, which is the claim that turns an unknown into a
+	// wrong answer -- every off-catalog position would read as never covered
+	// for every sample, which is exactly what the table exists to fix.
+	if w.opts.Coverage {
+		cf, err := open(w.tableName(CoverageTable))
+		if err != nil {
+			return err
+		}
+		w.coverage = parquet.NewGenericWriter[CoverageBlock](cf, append(append([]parquet.WriterOption{}, opts...),
+			parquet.SortingWriterConfig(parquet.SortingColumns(
+				parquet.Ascending("chrom"), parquet.Ascending("start"))),
+			parquet.BloomFilters(parquet.SplitBlockFilter(10, "sample_id")))...)
+	}
 
 	w.shardSites = 0
 	w.shardChrom = ""
@@ -573,16 +606,16 @@ func (w *Writer) abort() error {
 	var errs []error
 	// The manifest is written last and cleared first, so it should not be here.
 	// A --force re-run over a previous store is the case where a stale one could
-	// survive, and a completion marker sitting beside discarded members is the
+	// survive, and a completion marker sitting beside discarded tables is the
 	// worst outcome available.
-	if err := w.sink.Remove(ManifestFile); err != nil {
-		errs = append(errs, fmt.Errorf("removing %s: %w", ManifestFile, err))
+	if err := w.sink.Remove(VolumeManifestFile); err != nil {
+		errs = append(errs, fmt.Errorf("removing %s: %w", VolumeManifestFile, err))
 	}
 	aborter, remote := w.sink.(Aborter)
-	for _, m := range w.members {
-		// ABANDON where a member only becomes visible when it is finished, and
+	for _, m := range w.tables {
+		// ABANDON where a table only becomes visible when it is finished, and
 		// UNLINK where it is visible as it is written. On an object store there
-		// is no half-written member to delete -- what exists is an upload in
+		// is no half-written table to delete -- what exists is an upload in
 		// progress, and Remove would delete nothing while leaving its parts
 		// behind, invisible to a listing and billed.
 		if remote {
@@ -598,13 +631,13 @@ func (w *Writer) abort() error {
 			errs = append(errs, fmt.Errorf("removing %s: %w", m.name, err))
 		}
 	}
-	w.members = nil
+	w.tables = nil
 	return errors.Join(errs...)
 }
 
 // Discard abandons a conversion, leaving nothing behind.
 //
-// A failure partway through must not leave the members on disk. They would look
+// A failure partway through must not leave the tables on disk. They would look
 // like a store, they would be truncated or incomplete, and -- because
 // conversion refuses to overwrite an existing store -- their presence would
 // block the retry.
@@ -618,15 +651,15 @@ func (w *Writer) Discard() error {
 	return w.abort()
 }
 
-// Finish closes the members and then writes the manifest that marks the store
+// Finish closes the tables and then writes the manifest that marks the store
 // complete and readable.
 //
 // This is the ordinary way to end a conversion; Close alone leaves a store
 // without a manifest, which readers refuse. The order is the whole point: every
-// member is finalized first, and only a run that got that far writes the marker
+// table is finalized first, and only a run that got that far writes the marker
 // saying so.
 // A failure after Close discards the store rather than leaving it. By then the
-// three members carry valid footers, so what is on disk looks exactly like a
+// three tables carry valid footers, so what is on disk looks exactly like a
 // finished conversion minus its marker -- and a reader has no way to tell that
 // from an interrupted one. It would be refused at open forever, with no way to
 // retry that the overwrite guard did not also have to be talked past. Better to
@@ -645,49 +678,57 @@ func (w *Writer) Finish() error {
 	return nil
 }
 
-// manifest describes the store as written. Member sizes are read back from disk
+// manifest describes the store as written. Table sizes are read back from disk
 // rather than accumulated, so they describe the files rather than the intent.
-func (w *Writer) manifest() (Manifest, error) {
-	members := map[string]MemberInfo{}
-	for member, rows := range map[string]int64{
-		CallsMember:   w.NCalls,
-		SitesMember:   w.NSites,
-		RegionsMember: w.NRegions,
-	} {
+func (w *Writer) manifest() (VolumeManifest, error) {
+	tables := map[string]TableInfo{}
+	counted := map[string]int64{
+		CallsTable:   w.NCalls,
+		SitesTable:   w.NSites,
+		RegionsTable: w.NRegions,
+	}
+	// Listed only when the store actually carries one. A coverage entry with
+	// zero rows would read as "covered nowhere" to every later query, where no
+	// entry at all reads as "nobody said" -- and only the second is true of a
+	// conversion that was never given a gVCF.
+	if w.opts.Coverage {
+		counted[CoverageTable] = w.NCoverage
+	}
+	for table, rows := range counted {
 		// A SPLIT MEMBER IS SIZED SHARD BY SHARD, and each shard's size is read
 		// back from the sink rather than accumulated -- the manifest describes
 		// the files that exist, not the rows the writer believes it wrote, which
-		// is what makes it able to catch a member that does not belong.
-		if shards := w.shards[member]; len(shards) > 0 {
+		// is what makes it able to catch a table that does not belong.
+		if shards := w.shards[table]; len(shards) > 0 {
 			var total int64
 			sized := make([]ShardInfo, 0, len(shards))
 			for _, si := range shards {
 				size, ok, err := w.sink.Stat(si.Name)
 				if err != nil {
-					return Manifest{}, fmt.Errorf("sizing %s: %w", si.Name, err)
+					return VolumeManifest{}, fmt.Errorf("sizing %s: %w", si.Name, err)
 				}
 				if !ok {
-					return Manifest{}, fmt.Errorf("%s is missing from %s", si.Name, w.sink.Describe())
+					return VolumeManifest{}, fmt.Errorf("%s is missing from %s", si.Name, w.sink.Describe())
 				}
 				si.Bytes = size
 				total += size
 				sized = append(sized, si)
 			}
-			members[member] = MemberInfo{Rows: rows, Bytes: total, Shards: sized}
+			tables[table] = TableInfo{Rows: rows, Bytes: total, Shards: sized}
 			continue
 		}
 
-		size, ok, err := w.sink.Stat(MemberFile(member))
+		size, ok, err := w.sink.Stat(TableFile(table))
 		if err != nil {
-			return Manifest{}, fmt.Errorf("sizing %s member: %w", member, err)
+			return VolumeManifest{}, fmt.Errorf("sizing %s table: %w", table, err)
 		}
 		if !ok {
-			return Manifest{}, fmt.Errorf("the %s member is missing from %s", member, w.sink.Describe())
+			return VolumeManifest{}, fmt.Errorf("the %s table is missing from %s", table, w.sink.Describe())
 		}
-		members[member] = MemberInfo{Rows: rows, Bytes: size}
+		tables[table] = TableInfo{Rows: rows, Bytes: size}
 	}
-	return Manifest{
-		FormatVersion: ManifestVersion,
+	return VolumeManifest{
+		FormatVersion: VolumeManifestVersion,
 		Complete:      true,
 		Created:       time.Now().UTC(),
 		Program:       w.opts.Program,
@@ -700,6 +741,8 @@ func (w *Writer) manifest() (Manifest, error) {
 			RowGroupSize:  w.opts.RowGroupSize,
 			SpanSemantics: w.opts.Spans,
 			DepthBands:    w.opts.DepthBands,
+			MaxGap:        w.opts.MaxGap,
+			Coverage:      w.opts.Coverage,
 			Info:          w.opts.Info,
 			Format:        w.opts.Format,
 		},
@@ -710,7 +753,7 @@ func (w *Writer) manifest() (Manifest, error) {
 			Sites:   w.NSites,
 			Regions: w.NRegions,
 		},
-		Members:         members,
+		Tables:          tables,
 		Chromosomes:     w.chroms,
 		ContigsDeclared: w.opts.Contigs,
 	}, nil
@@ -728,7 +771,7 @@ func (w *Writer) WriteCall(c Call) error {
 // columns are optional so that "this sample had no PID here" and "its PID is 0"
 // stay different claims. The map may be reused between calls.
 func (w *Writer) WriteCallFormat(c Call, values map[string]any) error {
-	w.shardRows[CallsMember]++
+	w.shardRows[CallsTable]++
 	c.RefEnd = defaultRefEnd(c.Pos, c.Ref, c.RefEnd)
 	w.census(c.Chrom, c.Pos).Calls++
 	w.NCalls++
@@ -821,7 +864,7 @@ func (w *Writer) WriteSiteInfo(s Site, info map[string]any) error {
 	}
 	w.census(s.Chrom, s.Pos).Sites++
 	w.NSites++
-	w.shardRows[SitesMember]++
+	w.shardRows[SitesTable]++
 
 	if w.sitesAny == nil {
 		// Captured nothing: values, if any were offered, have nowhere to go.
@@ -1032,7 +1075,7 @@ func (w *Writer) WriteRegion(r CalledSiteRun) error {
 				"locus this run covers reads as never assayed",
 			r.SampleID, r.Chrom, r.Start, r.End, w.shardChrom, w.shardFirst, w.shardLast)
 	}
-	w.shardRows[RegionsMember]++
+	w.shardRows[RegionsTable]++
 	w.regionBuf = append(w.regionBuf, r)
 	w.NRegions++
 	if len(w.regionBuf) >= batchSize {
@@ -1096,18 +1139,55 @@ func (w *Writer) flushRegions() error {
 	return nil
 }
 
+// WriteCoverage buffers one coverage block.
+//
+// Refused unless the store was opened with Coverage set, because a block
+// arriving at a store that will not record one is a caller who believes they
+// are capturing something they are not -- and the loss is unrecoverable, since
+// the gVCF that could have answered is not read again.
+func (w *Writer) WriteCoverage(b CoverageBlock) error {
+	if !w.opts.Coverage {
+		return fmt.Errorf(
+			"this store was not opened to hold coverage blocks; set WriterOpts.Coverage, "+
+				"or the span %s %s:%d-%d is discarded and cannot be recovered without the source",
+			b.SampleID, b.Chrom, b.Start, b.End)
+	}
+	if b.End < b.Start {
+		return fmt.Errorf("coverage block %s %s:%d-%d ends before it starts",
+			b.SampleID, b.Chrom, b.Start, b.End)
+	}
+	w.shardRows[CoverageTable]++
+	w.coverageBuf = append(w.coverageBuf, b)
+	w.NCoverage++
+	if len(w.coverageBuf) >= batchSize {
+		return w.flushCoverage()
+	}
+	return nil
+}
+
+func (w *Writer) flushCoverage() error {
+	if w.coverage == nil || len(w.coverageBuf) == 0 {
+		return nil
+	}
+	if _, err := w.coverage.Write(w.coverageBuf); err != nil {
+		return fmt.Errorf("writing coverage: %w", err)
+	}
+	w.coverageBuf = w.coverageBuf[:0]
+	return nil
+}
+
 // Close flushes and finalizes all three files.
 //
 // It stops at the first failure instead of pressing on. Continuing would finish
-// the other members, and a parquet footer is written precisely by the Close that
+// the other tables, and a parquet footer is written precisely by the Close that
 // would then run -- so a failed flush used to yield three structurally valid
 // files of which one was silently short by up to a batch. Three well-formed
-// members that disagree is the one outcome a reader cannot detect, so the write
+// tables that disagree is the one outcome a reader cannot detect, so the write
 // stops as soon as it cannot be completed honestly.
 //
 // A non-nil error means nothing on disk should be trusted; the caller is
 // expected to Discard. The file handles are released either way, since leaking
-// them helps nobody, but the members are left in place for Discard to remove.
+// them helps nobody, but the tables are left in place for Discard to remove.
 func (w *Writer) Close() error {
 	// The last shard is closed the same way every other one was, so its bounds
 	// and row counts are recorded by the same code -- a final shard described
@@ -1122,14 +1202,14 @@ func (w *Writer) Close() error {
 // closeFiles releases the underlying handles without removing anything.
 func (w *Writer) closeFiles() error {
 	var errs []error
-	for i := range w.members {
-		if w.members[i].closed {
+	for i := range w.tables {
+		if w.tables[i].closed {
 			continue
 		}
-		if err := w.members[i].sw.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("finishing %s: %w", w.members[i].name, err))
+		if err := w.tables[i].sw.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("finishing %s: %w", w.tables[i].name, err))
 		}
-		w.members[i].closed = true
+		w.tables[i].closed = true
 	}
 	return errors.Join(errs...)
 }
@@ -1140,8 +1220,8 @@ func scanParquet[T any](set *shardSet, fn func(T) bool) error {
 	return scanParquetPruned(set, scanFilter{shard: keepAllShards, rowGroup: keepAll}, fn)
 }
 
-// scanWholeMember streams one file, for callers holding a member directly.
-func scanWholeMember[T any](m *member, fn func(T) bool) error {
+// scanWholeTable streams one file, for callers holding a table directly.
+func scanWholeTable[T any](m *table, fn func(T) bool) error {
 	pf, err := m.parsed()
 	if err != nil {
 		return err
@@ -1180,27 +1260,55 @@ func hasColumn(pf *parquet.File, name string) bool {
 	return false
 }
 
-// ParquetStore is a Store backed by the three-file Parquet set.
-type ParquetStore struct {
+// ParquetVolume is a Store backed by the three-file Parquet set.
+type ParquetVolume struct {
 	base        string
 	calls       *shardSet
 	hasRefSpans bool
 	sites       *shardSet
 	regions     *shardSet
+	coverage    *shardSet
 	samples     []string
 	hasSites    bool
 	hasRegions  bool
+
+	// hasCoverage distinguishes a store that was given genomic block spans from
+	// one that was not, which is the difference between "not covered there" and
+	// "nobody said". Only the first may be reported as an answer.
+	hasCoverage bool
 	noCallable  bool
 	spans       SpanSemantics
 	minDP       int32
 	meta        map[string]string
-	manifest    *Manifest
+	manifest    *VolumeManifest
+}
+
+// HasCoverage reports whether this store carries genomic block spans, and so
+// whether it can answer about positions absent from the sites catalog.
+func (s *ParquetVolume) HasCoverage() bool { return s.hasCoverage }
+
+// MaxGap is the largest uncovered stretch this store's coverage blocks were
+// permitted to span. Zero when there are none, or when they are unmerged.
+func (s *ParquetVolume) MaxGap() int32 {
+	if s.manifest == nil {
+		return 0
+	}
+	return s.manifest.Params.MaxGap
+}
+
+// Coverage streams the coverage blocks, calling fn for each until it returns
+// false. Reports nothing at all for a store that carries none.
+func (s *ParquetVolume) Coverage(fn func(CoverageBlock) bool) error {
+	if !s.hasCoverage {
+		return nil
+	}
+	return scanParquet(s.coverage, fn)
 }
 
 // SpanSemantics reports what this store's run intervals may claim. A store
 // written from a plain VCF reports SpansSites, confining answers to the sites
 // catalog.
-func (s *ParquetStore) SpanSemantics() SpanSemantics { return s.spans }
+func (s *ParquetVolume) SpanSemantics() SpanSemantics { return s.spans }
 
 // Provenance is what a store records about how it was built. It matters at
 // query time chiefly because of MinDP: a store baked that threshold into its
@@ -1213,6 +1321,7 @@ type Provenance struct {
 	MinDP      int32
 	NoCallable bool
 	Spans      SpanSemantics
+
 	NumSamples int
 
 	// Meta is the caller-supplied metadata recorded at conversion, read back
@@ -1223,7 +1332,7 @@ type Provenance struct {
 }
 
 // Provenance returns the conversion metadata recorded in the calls file.
-func (s *ParquetStore) Provenance() Provenance {
+func (s *ParquetVolume) Provenance() Provenance {
 	return Provenance{
 		Source:     s.meta[MetaSource],
 		Program:    s.meta[MetaProgram],
@@ -1239,7 +1348,7 @@ func (s *ParquetStore) Provenance() Provenance {
 // metaFields recovers the caller-supplied metadata from the calls file's
 // key/value metadata by stripping MetaPrefix. Returns nil rather than an empty
 // map when none was recorded, so a caller can tell "not stated" from "empty".
-func (s *ParquetStore) metaFields() map[string]string {
+func (s *ParquetVolume) metaFields() map[string]string {
 	var out map[string]string
 	for k, v := range s.meta {
 		key, ok := strings.CutPrefix(k, MetaPrefix)
@@ -1256,7 +1365,7 @@ func (s *ParquetStore) metaFields() map[string]string {
 
 // OpenParquet opens a Parquet store. base may be given either as the base name
 // or as the path to any one of the three files.
-func OpenParquet(base string) (*ParquetStore, error) {
+func OpenParquet(base string) (*ParquetVolume, error) {
 	return OpenParquetContext(context.Background(), base)
 }
 
@@ -1268,19 +1377,19 @@ func OpenParquet(base string) (*ParquetStore, error) {
 // against a remote store skips the pruned groups without transferring them at
 // all — the same mechanism that makes it fast locally makes it cheap remotely.
 //
-// The members stay open for the life of the store, so Close matters more than
+// The tables stay open for the life of the store, so Close matters more than
 // it used to: it now releases them rather than being a no-op.
-func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error) {
+func OpenParquetContext(ctx context.Context, base string) (*ParquetVolume, error) {
 	base = TrimStoreSuffix(base)
 	man, err := requireManifest(ctx, base)
 	if err != nil {
 		return nil, err
 	}
-	calls, err := openShardSet(ctx, base, CallsMember, man.Members[CallsMember])
+	calls, err := openShardSet(ctx, base, CallsTable, man.Tables[CallsTable])
 	if err != nil {
 		return nil, fmt.Errorf("opening parquet store %s: %w", base, err)
 	}
-	// The key/value metadata lives on the first shard: a split member writes it
+	// The key/value metadata lives on the first shard: a split table writes it
 	// once rather than repeating it, and every shard of one store agrees about
 	// what the store is.
 	first := calls.single()
@@ -1289,7 +1398,7 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error)
 		calls.Close()
 		return nil, fmt.Errorf("reading %s: %w", first.name, err)
 	}
-	s := &ParquetStore{base: base, calls: calls, meta: map[string]string{}}
+	s := &ParquetVolume{base: base, calls: calls, meta: map[string]string{}}
 	for _, k := range []string{MetaSource, MetaProgram, MetaCommand, MetaMinDP, MetaContigs} {
 		if v, ok := pf.Lookup(k); ok {
 			s.meta[k] = v
@@ -1322,23 +1431,53 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error)
 	// merely a slower one, which is why HasRefSpans is exported for callers to
 	// report.
 	s.hasRefSpans = hasColumn(pf, "ref_end")
-	// The optional members. Absence is legitimate only where the manifest
+	// The optional tables. Absence is legitimate only where the manifest
 	// recorded nothing in them, which verifyAgainstManifest below enforces;
 	// note that the writer creates all three regardless, so --no-callable
-	// produces a present, zero-row regions member rather than a missing one.
-	sites, hasSites, err := openOptionalShardSet(ctx, base, SitesMember, man.Members[SitesMember])
+	// produces a present, zero-row regions table rather than a missing one.
+	sites, hasSites, err := openOptionalShardSet(ctx, base, SitesTable, man.Tables[SitesTable])
 	if err != nil {
 		calls.Close()
 		return nil, err
 	}
 	s.sites, s.hasSites = sites, hasSites
-	regions, hasRegions, err := openOptionalShardSet(ctx, base, RegionsMember, man.Members[RegionsMember])
+	regions, hasRegions, err := openOptionalShardSet(ctx, base, RegionsTable, man.Tables[RegionsTable])
 	if err != nil {
 		calls.Close()
 		sites.Close()
 		return nil, err
 	}
 	s.regions, s.hasRegions = regions, hasRegions
+
+	// OPTIONAL, and absent is the common case: only a conversion given a gVCF
+	// or a callable mask has one. Absent means nothing was claimed off the
+	// catalog, never that nothing was covered.
+	// ASKED OF THE MANIFEST FIRST, and not probed for.
+	//
+	// Every other table is probed because every store has one; coverage is the
+	// first that is genuinely absent from almost all of them, which is what
+	// exposed the difference. Probing cost a round trip per open on every store
+	// that has none -- and worse, it FAILED: iosource is documented to wrap a
+	// remote 404 in fs.ErrNotExist and does not on the HEAD path, so the
+	// absence came back as an error and every existing store stopped opening.
+	//
+	// The manifest is the authority on which tables a store has, which is why
+	// it lists coverage only when one was written. Believing it is both correct
+	// and free.
+	var coverage *shardSet
+	var hasCoverage bool
+	if _, listed := man.Tables[CoverageTable]; listed {
+		coverage, hasCoverage, err = openOptionalShardSet(ctx, base, CoverageTable, man.Tables[CoverageTable])
+	} else {
+		coverage = &shardSet{name: CoverageTable}
+	}
+	if err != nil {
+		calls.Close()
+		sites.Close()
+		regions.Close()
+		return nil, err
+	}
+	s.coverage, s.hasCoverage = coverage, hasCoverage
 	s.manifest = man
 
 	if err := verifyAgainstManifest(man, pf, calls, sites, regions); err != nil {
@@ -1352,41 +1491,41 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetStore, error)
 //
 // A store with no manifest was not finished -- or predates them -- and either
 // way nothing here can tell how much of the intended input it holds. The
-// members would open and answer queries perfectly well; that is the problem.
+// tables would open and answer queries perfectly well; that is the problem.
 // An unfinished store reports "not assayed" for everything it never got to,
 // which is indistinguishable from the honest answer for a position the source
 // genuinely never reported.
-func requireManifest(ctx context.Context, base string) (*Manifest, error) {
-	man, err := ReadManifestContext(ctx, base)
+func requireManifest(ctx context.Context, base string) (*VolumeManifest, error) {
+	man, err := ReadVolumeManifestContext(ctx, base)
 	if err != nil {
 		return nil, fmt.Errorf("%s has no readable %s, so it cannot be shown to be "+
 			"a complete store: %w\n\tit is from an interrupted conversion, or predates "+
 			"manifests; re-convert it, or inspect it with vcf-varsummary",
-			base, ManifestFile, err)
+			base, VolumeManifestFile, err)
 	}
 	if !man.Complete {
 		return nil, fmt.Errorf("%s is marked incomplete by its %s; re-convert it",
-			base, ManifestFile)
+			base, VolumeManifestFile)
 	}
-	if man.FormatVersion > ManifestVersion {
+	if man.FormatVersion > VolumeManifestVersion {
 		return nil, fmt.Errorf("%s was written by a newer cgkit (manifest format %d, "+
 			"this build understands %d); upgrade to read it",
-			base, man.FormatVersion, ManifestVersion)
+			base, man.FormatVersion, VolumeManifestVersion)
 	}
 	return man, nil
 }
 
-// verifyAgainstManifest checks each member against the row count recorded for
+// verifyAgainstManifest checks each table against the row count recorded for
 // it when the store was written.
 //
-// The footers say each member was finished; the manifest says which members
-// finishing this store produced. Comparing them is what catches a member that
+// The footers say each table was finished; the manifest says which tables
+// finishing this store produced. Comparing them is what catches a table that
 // is well-formed but does not belong -- one copied in from another conversion,
 // or left over from a run whose replacement died. Nothing else can see that,
 // because sites and regions carry no metadata of their own.
 //
 // It costs nothing: every count here is footer metadata that was already read.
-func verifyAgainstManifest(man *Manifest, callsFile *parquet.File, calls, sites, regions *shardSet) error {
+func verifyAgainstManifest(man *VolumeManifest, callsFile *parquet.File, calls, sites, regions *shardSet) error {
 	type check struct {
 		name string
 		file *parquet.File
@@ -1395,20 +1534,20 @@ func verifyAgainstManifest(man *Manifest, callsFile *parquet.File, calls, sites,
 	for _, c := range []check{
 		// The parsed file is the FIRST SHARD when calls are split, so it is
 		// passed alongside the set rather than instead of it -- checking it
-		// against the member's total would compare one shard's rows with all of
+		// against the table's total would compare one shard's rows with all of
 		// them, which is how this first failed.
-		{CallsMember, callsFile, calls},
-		{SitesMember, nil, sites},
-		{RegionsMember, nil, regions},
+		{CallsTable, callsFile, calls},
+		{SitesTable, nil, sites},
+		{RegionsTable, nil, regions},
 	} {
-		want, recorded := man.Members[c.name]
+		want, recorded := man.Tables[c.name]
 		if !recorded {
-			continue // a manifest that never described this member claims nothing
+			continue // a manifest that never described this table claims nothing
 		}
 
 		// A SPLIT MEMBER IS COUNTED ACROSS ITS SHARDS, and every shard's own
 		// footer is checked against the count the index recorded for it. That
-		// is strictly stronger than the whole-member total: a store missing one
+		// is strictly stronger than the whole-table total: a store missing one
 		// shard and gaining rows in another would still total correctly.
 		if c.set != nil && c.set.split() {
 			c.file = nil
@@ -1450,18 +1589,18 @@ func verifyAgainstManifest(man *Manifest, callsFile *parquet.File, calls, sites,
 		}
 		if got := c.file.NumRows(); got != want.Rows {
 			return fmt.Errorf("%s.parquet holds %d rows but the manifest records %d; "+
-				"this member does not belong to this store, or the store is damaged",
+				"this table does not belong to this store, or the store is damaged",
 				c.name, got, want.Rows)
 		}
 	}
 	return nil
 }
 
-// openOptionalMember opens a member a store may legitimately lack, and verifies
+// openOptionalTable opens a table a store may legitimately lack, and verifies
 // that what it finds is a readable parquet file.
 //
 // The two outcomes have to stay distinct. Absence is normal: a --no-callable
-// store records no callable runs. A member that is *present but unreadable* is
+// store records no callable runs. A table that is *present but unreadable* is
 // not, and until this checked, the two were indistinguishable -- the open error
 // was discarded either way, so a truncated or half-written sites file read
 // exactly like a deliberate omission and the store went on to answer queries as
@@ -1470,18 +1609,18 @@ func verifyAgainstManifest(man *Manifest, callsFile *parquet.File, calls, sites,
 // Parsing the footer here is what makes the check meaningful, and it is nearly
 // free: it is footer metadata, not a data scan, and every query would have
 // parsed it anyway. A parquet footer is written only by the writer's Close, so
-// a member that parses is a member that was finished.
+// a table that parses is a table that was finished.
 //
 // One limit worth naming: for a remote locator "absent" and "unreachable" are
 // not cleanly separable here, because a 404 surfaces as a failed size probe
-// rather than as fs.ErrNotExist. Such a member is treated as absent, which is
+// rather than as fs.ErrNotExist. Such a table is treated as absent, which is
 // the pre-existing behaviour. The manifest is what makes this exact, since it
-// records which members the conversion actually wrote.
-func openOptionalMember(ctx context.Context, locator string) (*member, bool, error) {
-	m, err := openMember(ctx, locator)
+// records which tables the conversion actually wrote.
+func openOptionalTable(ctx context.Context, locator string) (*table, bool, error) {
+	m, err := openTable(ctx, locator)
 	if err != nil {
 		// Absent is an answer; anything else is a failure. This used to discard
-		// every error alike, so a member that existed but could not be read --
+		// every error alike, so a table that existed but could not be read --
 		// bad permissions, an I/O error, a symlink loop -- was reported as one
 		// that was never written, and the store opened with a quietly missing
 		// half. Remote absence reads the same way as local now: iosource wraps
@@ -1502,10 +1641,10 @@ func openOptionalMember(ctx context.Context, locator string) (*member, bool, err
 //
 //	cohort                    the store
 //	cohort/                   the same store; the separator is optional
-//	cohort/calls.parquet      a member of it
+//	cohort/calls.parquet      a table of it
 //	cohort/manifest.json.gz   likewise
 //
-// Pointing at a member is worth accepting because tab completion lands there,
+// Pointing at a table is worth accepting because tab completion lands there,
 // and because a locator naming a file is unambiguous in a way a bare directory
 // name is not. The manifest spelling is what makes `stores/*/manifest.json.gz`
 // a useful glob: the shell filters to the completed stores without opening
@@ -1517,20 +1656,20 @@ func openOptionalMember(ctx context.Context, locator string) (*member, bool, err
 // os.Stat simply failed and the path fell through unchanged.
 func TrimStoreSuffix(p string) string {
 	for _, name := range []string{
-		CallsMember + ".parquet", SitesMember + ".parquet", RegionsMember + ".parquet",
-		ManifestFile,
+		CallsTable + ".parquet", SitesTable + ".parquet", RegionsTable + ".parquet",
+		VolumeManifestFile,
 	} {
-		if base, ok := cutMemberSuffix(p, name); ok {
+		if base, ok := cutTableSuffix(p, name); ok {
 			return base
 		}
 	}
 	return trimStoreDir(p)
 }
 
-// cutMemberSuffix removes a trailing "/name" (or the platform separator) from p,
-// reporting whether it was there. A bare "name" with no separator is a member of
+// cutTableSuffix removes a trailing "/name" (or the platform separator) from p,
+// reporting whether it was there. A bare "name" with no separator is a table of
 // the current directory, whose store base is "".
-func cutMemberSuffix(p, name string) (string, bool) {
+func cutTableSuffix(p, name string) (string, bool) {
 	if p == name {
 		return "", true
 	}
@@ -1550,7 +1689,7 @@ func fileExists(p string) bool {
 // Contigs returns the source's ##contig header lines, or nothing for a store
 // written before they were recorded. A caller exporting to VCF should emit these
 // rather than synthesizing lines from the loci it happens to have seen.
-func (s *ParquetStore) Contigs() []string {
+func (s *ParquetVolume) Contigs() []string {
 	v := s.meta[MetaContigs]
 	if v == "" {
 		return nil
@@ -1559,7 +1698,7 @@ func (s *ParquetStore) Contigs() []string {
 }
 
 // Samples returns the roster recorded at conversion time.
-func (s *ParquetStore) Samples() ([]string, error) {
+func (s *ParquetVolume) Samples() ([]string, error) {
 	if len(s.samples) == 0 {
 		return nil, fmt.Errorf("%s records no sample list", CallsPath(s.base))
 	}
@@ -1567,7 +1706,7 @@ func (s *ParquetStore) Samples() ([]string, error) {
 }
 
 // Calls streams the genotypes a query selects, in the store's own order.
-func (s *ParquetStore) Calls(q Query) (iter.Seq2[Call, error], error) {
+func (s *ParquetVolume) Calls(q Query) (iter.Seq2[Call, error], error) {
 	// Fail before iterating: a caller asking for reference calls from a store that
 	// cannot reconstruct them should learn so now, not receive a silently
 	// ALT-only stream.
@@ -1618,7 +1757,7 @@ func (s *ParquetStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 }
 
 // callsWithRef assembles ALT and reference calls for a query, in store order.
-func (s *ParquetStore) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
+func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
 	roster, err := s.Samples()
 	if err != nil {
 		return nil, err
@@ -1751,7 +1890,7 @@ func (s *ParquetStore) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
 // bracket it. Those intervals only mark catalog sites; the bases between them
 // were never reported, and treating a run as coverage would invent reference
 // observations. Only a gVCF-derived store (SpansBlocks) could answer here.
-func (s *ParquetStore) Classify(l Locus, g Gate) ([]SampleState, error) {
+func (s *ParquetVolume) Classify(l Locus, g Gate) ([]SampleState, error) {
 	if err := s.classifiable(); err != nil {
 		return nil, err
 	}
@@ -1821,7 +1960,7 @@ func (s *ParquetStore) Classify(l Locus, g Gate) ([]SampleState, error) {
 // classifiable reports whether the store carries the evidence needed to tell a
 // reference call apart from a position that was never assayed. Every query that
 // would otherwise have to guess goes through this first.
-func (s *ParquetStore) classifiable() error {
+func (s *ParquetVolume) classifiable() error {
 	if !s.hasSites {
 		return fmt.Errorf("%w: %s is missing", ErrNotClassifiable, SitesPath(s.base))
 	}
@@ -1862,7 +2001,7 @@ func (r runsBySample) covers(sample, chrom string, pos int32) bool {
 //
 // The query only prunes row groups here; runs surviving that are kept whatever
 // their extent, since a run beginning before a span may still reach into it.
-func (s *ParquetStore) runsFor(samples []string, p *plan) (runsBySample, error) {
+func (s *ParquetVolume) runsFor(samples []string, p *plan) (runsBySample, error) {
 	want := make(map[string]bool, len(samples))
 	for _, name := range samples {
 		want[name] = true
@@ -1891,7 +2030,7 @@ func (s *ParquetStore) runsFor(samples []string, p *plan) (runsBySample, error) 
 }
 
 // Sites streams the catalog, calling fn per site. fn returns false to stop.
-func (s *ParquetStore) Sites(fn func(Site) bool) error {
+func (s *ParquetVolume) Sites(fn func(Site) bool) error {
 	if !s.hasSites {
 		return fmt.Errorf("%s is missing", SitesPath(s.base))
 	}
@@ -1903,7 +2042,7 @@ func (s *ParquetStore) Sites(fn func(Site) bool) error {
 // The counterpart to Sites, and the way a consumer inspects what a reference
 // call rests on: a run carries the span, the site count and -- since depth
 // banding -- the lowest depth vouched for across the whole of it.
-func (s *ParquetStore) Regions(fn func(CalledSiteRun) bool) error {
+func (s *ParquetVolume) Regions(fn func(CalledSiteRun) bool) error {
 	if !s.hasRegions {
 		return fmt.Errorf("%s is missing", RegionsPath(s.base))
 	}
@@ -1916,7 +2055,7 @@ func (s *ParquetStore) Regions(fn func(CalledSiteRun) bool) error {
 // From the manifest rather than the schema, for the same reason InfoFields is:
 // the schema says which columns exist, the manifest says what they MEAN -- which
 // VCF key each came from, its declared type, and its Number.
-func (s *ParquetStore) FormatFields() []FormatField {
+func (s *ParquetVolume) FormatFields() []FormatField {
 	if s.manifest == nil {
 		return nil
 	}
@@ -1929,7 +2068,7 @@ func (s *ParquetStore) FormatFields() []FormatField {
 // The FormatRow is only valid for the duration of the call -- it views the
 // scan's reusable buffer -- so copy what you keep. A store that captured
 // nothing walks normally with an empty row, so a caller need not branch.
-func (s *ParquetStore) CallsFormat(fn func(Call, FormatRow) bool) error {
+func (s *ParquetVolume) CallsFormat(fn func(Call, FormatRow) bool) error {
 	if len(s.FormatFields()) == 0 {
 		return scanParquet(s.calls, func(c Call) bool { return fn(c, FormatRow{}) })
 	}
@@ -2005,7 +2144,7 @@ func callFromRow(row parquet.Row, cols map[string]int) Call {
 // says what they MEAN -- which VCF key each came from, its declared type, and
 // its Number. A column called info_r2 alone cannot tell a consumer whether it
 // holds minimac's R2 or something a caller mapped onto that name.
-func (s *ParquetStore) InfoFields() []InfoField {
+func (s *ParquetVolume) InfoFields() []InfoField {
 	if s.manifest == nil {
 		return nil
 	}
@@ -2021,7 +2160,7 @@ func (s *ParquetStore) InfoFields() []InfoField {
 // A store that captured nothing walks normally with an empty InfoRow, so a
 // caller need not branch on whether capture was on -- Present reports false for
 // every field, which is the truth.
-func (s *ParquetStore) SitesInfo(fn func(Site, InfoRow) bool) error {
+func (s *ParquetVolume) SitesInfo(fn func(Site, InfoRow) bool) error {
 	if !s.hasSites {
 		return fmt.Errorf("%s is missing", SitesPath(s.base))
 	}
@@ -2030,7 +2169,7 @@ func (s *ParquetStore) SitesInfo(fn func(Site, InfoRow) bool) error {
 	}
 
 	// The captured-INFO columns are the same in every shard, so the first one
-	// describes the member.
+	// describes the table.
 	pf, err := s.sites.single().parsed()
 	if err != nil {
 		return err
@@ -2110,8 +2249,8 @@ func siteFromRow(row parquet.Row, cols map[string]int) Site {
 }
 
 // Site returns the catalog entry for a locus, if the source reported it.
-func (s *ParquetStore) Site(l Locus) (Site, bool, error) {
-	// Every sibling guards this; Site did not, and an absent sites member is a
+func (s *ParquetVolume) Site(l Locus) (Site, bool, error) {
+	// Every sibling guards this; Site did not, and an absent sites table is a
 	// reachable state -- the manifest permits one that recorded no rows -- so
 	// this was a nil dereference inside the scan rather than the
 	// ErrNotClassifiable its neighbours return.
@@ -2134,20 +2273,20 @@ func (s *ParquetStore) Site(l Locus) (Site, bool, error) {
 // the source actually reported it. For a store built from a plain VCF this is
 // the boundary of what can be answered at all, so callers presenting results to
 // a user should say so rather than let "0 carriers" read as "nobody carries it".
-func (s *ParquetStore) SiteKnown(l Locus) (bool, error) {
+func (s *ParquetVolume) SiteKnown(l Locus) (bool, error) {
 	// Site already does this scan, with the same guard, the same filter and the
 	// same early stop; this was a second copy that discarded the payload.
 	_, ok, err := s.Site(l)
 	return ok, err
 }
 
-// Close releases the three members, which are held open for the store's life.
+// Close releases the three tables, which are held open for the store's life.
 //
 // It is not optional. This comment used to say the opposite -- "a no-op;
-// ParquetStore opens files per query" -- which was true before the members
+// ParquetVolume opens files per query" -- which was true before the tables
 // became long-lived, and a caller trusting it leaks a file handle per store,
-// or a live connection per store when the members are remote.
-func (s *ParquetStore) Close() error {
+// or a live connection per store when the tables are remote.
+func (s *ParquetVolume) Close() error {
 	var first error
 	for _, m := range []*shardSet{s.calls, s.sites, s.regions} {
 		if err := m.Close(); err != nil && first == nil {
@@ -2165,15 +2304,15 @@ func (s *ParquetStore) Close() error {
 // queries should say so rather than let the omission look like a real negative.
 // Stores written before the ref_end column existed report false; rewriting the
 // store is what fixes it.
-func (s *ParquetStore) HasRefSpans() bool { return s.hasRefSpans }
+func (s *ParquetVolume) HasRefSpans() bool { return s.hasRefSpans }
 
-// Manifest returns the completion record this store was opened with.
+// VolumeManifest returns the completion record this store was opened with.
 //
 // It is never nil for an open store: opening requires one. Callers wanting the
 // per-chromosome census, the conversion parameters or the recorded counts read
 // them from here rather than re-deriving them, which is the point of writing
 // them down.
-func (s *ParquetStore) Manifest() *Manifest { return s.manifest }
+func (s *ParquetVolume) VolumeManifest() *VolumeManifest { return s.manifest }
 
 // setCallMeta writes key/value metadata to whichever calls writer is live.
 func (w *Writer) setCallMeta(k, v string) {

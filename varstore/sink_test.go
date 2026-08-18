@@ -16,25 +16,25 @@ import (
 // exercised with no directory, no disk and no cleanup, which the previous
 // version could not be at all. Every writer test had to be a filesystem test.
 
-// memSink keeps members in memory and records what happened to them, so a test
+// memSink keeps tables in memory and records what happened to them, so a test
 // can assert on the sequence rather than on leftover files.
 type memSink struct {
 	mu       sync.Mutex
-	members  map[string]*bytes.Buffer
+	tables   map[string]*bytes.Buffer
 	removed  []string
 	aborted  []string
 	openedIn []string
 }
 
 func newMemSink() *memSink {
-	return &memSink{members: map[string]*bytes.Buffer{}}
+	return &memSink{tables: map[string]*bytes.Buffer{}}
 }
 
 func (m *memSink) Create(name string) (io.WriteCloser, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	buf := &bytes.Buffer{}
-	m.members[name] = buf
+	m.tables[name] = buf
 	m.openedIn = append(m.openedIn, name)
 	return nopCloser{buf}, nil
 }
@@ -43,14 +43,14 @@ func (m *memSink) Remove(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.removed = append(m.removed, name)
-	delete(m.members, name)
+	delete(m.tables, name)
 	return nil
 }
 
 func (m *memSink) Stat(name string) (int64, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	b, ok := m.members[name]
+	b, ok := m.tables[name]
 	if !ok {
 		return 0, false, nil
 	}
@@ -62,8 +62,8 @@ func (m *memSink) Describe() string { return "memory" }
 func (m *memSink) names() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]string, 0, len(m.members))
-	for n := range m.members {
+	out := make([]string, 0, len(m.tables))
+	for n := range m.tables {
 		out = append(out, n)
 	}
 	sort.Strings(out)
@@ -75,14 +75,14 @@ type nopCloser struct{ io.Writer }
 func (nopCloser) Close() error { return nil }
 
 // abortingSink is a memSink that abandons rather than deletes, which is how an
-// object store behaves: a member is not there until it is finished.
+// object store behaves: a table is not there until it is finished.
 type abortingSink struct{ *memSink }
 
 func (a abortingSink) Abort(name string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.aborted = append(a.aborted, name)
-	delete(a.members, name)
+	delete(a.tables, name)
 	return nil
 }
 
@@ -106,13 +106,13 @@ func TestAStoreCanBeWrittenWithoutAFilesystem(t *testing.T) {
 	// The manifest is written LAST and is what makes a store readable. A
 	// conversion that stopped earlier must not leave one, so its position in
 	// the sequence is part of the contract rather than an accident of ordering.
-	if last := sink.openedIn[len(sink.openedIn)-1]; last != ManifestFile {
-		t.Errorf("the last member created was %s; the manifest must be written last", last)
+	if last := sink.openedIn[len(sink.openedIn)-1]; last != VolumeManifestFile {
+		t.Errorf("the last table created was %s; the manifest must be written last", last)
 	}
 }
 
 // A failed conversion ABANDONS rather than deletes when the sink says its
-// members only appear once finished.
+// tables only appear once finished.
 //
 // The distinction is invisible locally and load-bearing remotely: calling
 // Remove on an upload that never completed deletes nothing and leaves its parts
@@ -130,7 +130,7 @@ func TestAbortAbandonsOnASinkThatCannotDelete(t *testing.T) {
 	}
 
 	if len(sink.aborted) != 3 {
-		t.Errorf("abandoned %v; all three members should have been abandoned", sink.aborted)
+		t.Errorf("abandoned %v; all three tables should have been abandoned", sink.aborted)
 	}
 	for _, name := range sink.removed {
 		if strings.HasSuffix(name, ".parquet") {
@@ -178,9 +178,9 @@ var _ = fmt.Sprintf
 //
 // It used to stat local paths, so against a remote base it found nothing and
 // waved through exactly the overwrite it exists to prevent -- silently, because
-// the members it looks for cannot be seen with os.Stat. This is that case: a
+// the tables it looks for cannot be seen with os.Stat. This is that case: a
 // sink holding a store, asked whether it may be written over.
-func TestTheOverwriteGuardSeesMembersInAnySink(t *testing.T) {
+func TestTheOverwriteGuardSeesTablesInAnySink(t *testing.T) {
 	sink := newMemSink()
 
 	// Nothing there yet.
@@ -203,16 +203,16 @@ func TestTheOverwriteGuardSeesMembersInAnySink(t *testing.T) {
 	}
 	// The reader has to be able to go and look at what stopped them.
 	if !strings.Contains(err.Error(), "calls.parquet") {
-		t.Errorf("the refusal does not name a member: %v", err)
+		t.Errorf("the refusal does not name a table: %v", err)
 	}
 	if CheckStoreTargetIn(sink, true) != nil {
 		t.Error("--force did not override the guard")
 	}
 }
 
-// A partial set stops it too: the members are only meaningful together, so a
+// A partial set stops it too: the tables are only meaningful together, so a
 // half-replaced store is worse than either keeping or replacing the old one.
-func TestASingleSurvivingMemberIsEnoughToStop(t *testing.T) {
+func TestASingleSurvivingTableIsEnoughToStop(t *testing.T) {
 	sink := newMemSink()
 	w, err := NewWriter("memory://store", WriterOpts{Sink: sink, Samples: []string{"S1"}})
 	if err != nil {
@@ -221,7 +221,7 @@ func TestASingleSurvivingMemberIsEnoughToStop(t *testing.T) {
 	if err := w.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []string{"calls.parquet", "regions.parquet", ManifestFile} {
+	for _, n := range []string{"calls.parquet", "regions.parquet", VolumeManifestFile} {
 		if err := sink.Remove(n); err != nil {
 			t.Fatal(err)
 		}
@@ -229,7 +229,7 @@ func TestASingleSurvivingMemberIsEnoughToStop(t *testing.T) {
 
 	err = CheckStoreTargetIn(sink, false)
 	if err == nil {
-		t.Fatal("a lone surviving member was not enough to stop an overwrite")
+		t.Fatal("a lone surviving table was not enough to stop an overwrite")
 	}
 	if !strings.Contains(err.Error(), "sites.parquet") {
 		t.Errorf("the refusal does not name the survivor: %v", err)
