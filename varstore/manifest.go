@@ -129,37 +129,6 @@ type ManifestCounts struct {
 	Regions int64 `json:"regions"`
 }
 
-// UnmarshalJSON reads a volume manifest, accepting the pre-rename key for the
-// table index.
-//
-// The three parquet tables used to be "members", and the word had to give: it
-// named one of the tables inside a volume AND one of the volumes inside a
-// store, which are different axes entirely. Volumes kept it; tables got the
-// name they always were.
-//
-// Stores written before the rename carry the table index under "members", and
-// reading it is not cosmetic. The row counts there are what catch a table that
-// parses but belongs to a different conversion. Ignoring the old key would not
-// fail loudly -- it would leave an empty map, and the check would pass over
-// nothing at all.
-//
-// Written only as "tables". This reads both.
-func (m *VolumeManifest) UnmarshalJSON(b []byte) error {
-	type raw VolumeManifest
-	var v struct {
-		raw
-		LegacyTables map[string]TableInfo `json:"members"`
-	}
-	if err := json.Unmarshal(b, &v); err != nil {
-		return err
-	}
-	*m = VolumeManifest(v.raw)
-	if len(m.Tables) == 0 {
-		m.Tables = v.LegacyTables
-	}
-	return nil
-}
-
 // TableInfo is one table's size on disk, as written.
 //
 // Rows is checked against the table's own parquet footer at open. That is the
