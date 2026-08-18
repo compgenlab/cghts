@@ -1507,6 +1507,24 @@ func requireManifest(ctx context.Context, base string) (*VolumeManifest, error) 
 		return nil, fmt.Errorf("%s is marked incomplete by its %s; re-convert it",
 			base, VolumeManifestFile)
 	}
+	// A STORE EITHER MATCHES THE CURRENT FORMAT OR IS REFUSED.
+	//
+	// The table index moved from "members" to "tables" when "member" stopped
+	// meaning two things at once, and this read both for a while. It no longer
+	// does: there is one consumer, the stores are cheap to rebuild, and a
+	// compatibility path nobody needs is a second format to keep correct
+	// forever.
+	//
+	// Said plainly here because the alternative is worse than an error. An empty
+	// index does not fail on its own -- it makes every row-count check pass over
+	// nothing, so a store opens, answers, and has silently skipped the one
+	// verification that catches a table belonging to another conversion.
+	if len(man.Tables) == 0 {
+		return nil, fmt.Errorf(
+			"%s records no tables, so nothing verifies the ones on disk belong to it. "+
+				"It predates the members-to-tables rename in cghts v0.10.19; re-convert it",
+			base)
+	}
 	if man.FormatVersion > VolumeManifestVersion {
 		return nil, fmt.Errorf("%s was written by a newer cgkit (manifest format %d, "+
 			"this build understands %d); upgrade to read it",
