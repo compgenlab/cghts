@@ -212,7 +212,7 @@ func TestShardsNeverSpanChromosomes(t *testing.T) {
 	defer s.Close()
 
 	m := s.VolumeManifest()
-	shards := m.Tables[SitesTable].Shards
+	shards := m.Tables[CatalogTable].Shards
 	if len(shards) < 2 {
 		t.Fatalf("got %d shards, want at least 2 -- the chromosome change must cut one "+
 			"even when the site count is nowhere near the limit", len(shards))
@@ -240,7 +240,7 @@ func TestShardIndexMatchesTheFiles(t *testing.T) {
 	defer s.Close()
 
 	m := s.VolumeManifest()
-	for _, table := range []string{CallsTable, SitesTable, RegionsTable} {
+	for _, table := range []string{CallsTable, CatalogTable, CatalogRunsTable} {
 		info := m.Tables[table]
 		if len(info.Shards) == 0 {
 			t.Errorf("%s was not split", table)
@@ -273,7 +273,7 @@ func TestRunsDoNotCrossShards(t *testing.T) {
 	defer s.Close()
 
 	bounds := map[string]ShardInfo{}
-	for _, si := range s.VolumeManifest().Tables[RegionsTable].Shards {
+	for _, si := range s.VolumeManifest().Tables[CatalogRunsTable].Shards {
 		bounds[si.Name] = si
 	}
 	if len(bounds) < 2 {
@@ -283,7 +283,7 @@ func TestRunsDoNotCrossShards(t *testing.T) {
 	// reader does not expose which shard a row came from, so this asserts the
 	// weaker but sufficient property: no run spans a recorded boundary.
 	var crossings int
-	err = s.Regions(func(r CalledSiteRun) bool {
+	err = s.CatalogRuns(func(r CalledSiteRun) bool {
 		for _, si := range bounds {
 			if !SameChrom(si.Chrom, r.Chrom) {
 				continue
@@ -309,7 +309,7 @@ func TestUnsplitStoreHasNoShardIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	for _, table := range []string{CallsTable, SitesTable, RegionsTable} {
+	for _, table := range []string{CallsTable, CatalogTable, CatalogRunsTable} {
 		if n := len(s.VolumeManifest().Tables[table].Shards); n != 0 {
 			t.Errorf("%s recorded %d shards in an unsplit store", table, n)
 		}

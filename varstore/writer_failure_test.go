@@ -43,7 +43,7 @@ func TestDiscardRemovesEveryTable(t *testing.T) {
 	if err := w.Discard(); err != nil {
 		t.Fatalf("Discard: %v", err)
 	}
-	for _, p := range []string{CallsPath(base), SitesPath(base), RegionsPath(base)} {
+	for _, p := range []string{CallsPath(base), CatalogPath(base), CatalogRunsPath(base)} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("%s still present after Discard (err=%v)", p, err)
 		}
@@ -75,7 +75,7 @@ func TestDiscardDoesNotFinalizeTables(t *testing.T) {
 		t.Fatal("Discard reported success though the tables could not be removed")
 	}
 
-	for _, p := range []string{CallsPath(base), SitesPath(base), RegionsPath(base)} {
+	for _, p := range []string{CallsPath(base), CatalogPath(base), CatalogRunsPath(base)} {
 		f, oerr := os.Open(p)
 		if oerr != nil {
 			continue // removed after all; nothing to check
@@ -110,7 +110,7 @@ func TestCloseStopsAtTheFirstFailure(t *testing.T) {
 	}
 
 	// The tables that were never finalized must not carry a footer.
-	for _, p := range []string{SitesPath(base), RegionsPath(base)} {
+	for _, p := range []string{CatalogPath(base), CatalogRunsPath(base)} {
 		f, oerr := os.Open(p)
 		if oerr != nil {
 			t.Fatal(oerr)
@@ -126,7 +126,7 @@ func TestCloseStopsAtTheFirstFailure(t *testing.T) {
 }
 
 // A table that is present but unreadable must not be mistaken for one that was
-// deliberately omitted. Before the footer check, a truncated sites file and a
+// deliberately omitted. Before the footer check, a truncated catalog table and a
 // --no-callable store looked identical at open, and the store answered queries
 // as though the runs had never been requested.
 func TestATruncatedTableIsNotReadAsAbsent(t *testing.T) {
@@ -143,7 +143,7 @@ func TestATruncatedTableIsNotReadAsAbsent(t *testing.T) {
 	}
 	s.Close()
 
-	if err := os.Truncate(SitesPath(base), 12); err != nil {
+	if err := os.Truncate(CatalogPath(base), 12); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := OpenParquet(base); err == nil {
@@ -153,7 +153,7 @@ func TestATruncatedTableIsNotReadAsAbsent(t *testing.T) {
 
 // A table that was never populated may go missing without complaint -- that is
 // the --no-callable shape -- but one the manifest vouched for may not. Before
-// the manifest the two were the same event, so deleting a regions file full of
+// the manifest the two were the same event, so deleting a catalog_runs table full of
 // runs read as "this store never tracked callable regions" and --hom-ref
 // silently changed its answer.
 func TestAbsentMemberIsOnlyAllowedWhenItHeldNothing(t *testing.T) {
@@ -178,7 +178,7 @@ func TestAbsentMemberIsOnlyAllowedWhenItHeldNothing(t *testing.T) {
 		if err := w.Finish(); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Remove(RegionsPath(base)); err != nil {
+		if err := os.Remove(CatalogRunsPath(base)); err != nil {
 			t.Fatal(err)
 		}
 		s, err := OpenParquet(base)
@@ -186,8 +186,8 @@ func TestAbsentMemberIsOnlyAllowedWhenItHeldNothing(t *testing.T) {
 			t.Fatalf("a store whose regions table held nothing should open: %v", err)
 		}
 		defer s.Close()
-		if s.hasRegions {
-			t.Error("hasRegions is true though the table was removed")
+		if s.hasCatalogRuns {
+			t.Error("hasCatalogRuns is true though the table was removed")
 		}
 	})
 
@@ -197,7 +197,7 @@ func TestAbsentMemberIsOnlyAllowedWhenItHeldNothing(t *testing.T) {
 		if err := w.Finish(); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Remove(RegionsPath(base)); err != nil {
+		if err := os.Remove(CatalogRunsPath(base)); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := OpenParquet(base); err == nil {
@@ -208,7 +208,7 @@ func TestAbsentMemberIsOnlyAllowedWhenItHeldNothing(t *testing.T) {
 }
 
 // Site must refuse like its siblings rather than dereference a nil table. An
-// absent sites file is a reachable state -- the manifest permits one that
+// absent catalog table is a reachable state -- the manifest permits one that
 // recorded no rows -- and Site was the only accessor that did not check.
 func TestSiteRefusesWithoutTheSitesMember(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
@@ -224,7 +224,7 @@ func TestSiteRefusesWithoutTheSitesMember(t *testing.T) {
 	if err := w.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(SitesPath(base)); err != nil {
+	if err := os.Remove(CatalogPath(base)); err != nil {
 		t.Fatal(err)
 	}
 

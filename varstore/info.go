@@ -50,7 +50,7 @@ const (
 type InfoField struct {
 	// Name is the VCF INFO key, e.g. "R2".
 	Name string `json:"name"`
-	// Column is where it lands in sites.parquet, e.g. "info_r2".
+	// Column is where it lands in catalog.parquet, e.g. "info_r2".
 	Column string   `json:"column"`
 	Type   InfoType `json:"type"`
 	// Number is the VCF header's Number: "1" (one value per site) or "A" (one
@@ -60,7 +60,7 @@ type InfoField struct {
 
 // InfoPrefix namespaces captured columns.
 //
-// NOT COSMETIC. sites.parquet already has `ac`, `an` and `n_called`, and those
+// NOT COSMETIC. catalog.parquet already has `ac`, `an` and `n_called`, and those
 // are RECOMPUTED over the samples in the store rather than copied from the
 // source's INFO -- which is the whole reason they can be trusted after a subset
 // or a merge. An unprefixed `--info AC` would overwrite the computed column with
@@ -71,7 +71,7 @@ const InfoPrefix = "info_"
 
 var infoKeyOK = regexp.MustCompile(`^[A-Za-z_][0-9A-Za-z_.]*$`)
 
-// InfoColumn is the sites.parquet column an INFO key is captured into.
+// InfoColumn is the catalog.parquet column an INFO key is captured into.
 func InfoColumn(key string) string {
 	return InfoPrefix + strings.ToLower(key)
 }
@@ -102,7 +102,7 @@ func ValidateInfo(fields []InfoField) error {
 		}
 
 		// Number is what decides capturability, and the reason is the shape of
-		// sites.parquet rather than taste. A site row is one (chrom,pos,ref,alt)
+		// catalog.parquet rather than taste. A site row is one (chrom,pos,ref,alt)
 		// -- one ALT -- so Number=A maps to it exactly, and Number=1 repeats
 		// across a multi-allelic record's rows, which is correct. Number=R
 		// carries a reference value with nowhere to go, and Number=G and

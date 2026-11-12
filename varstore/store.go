@@ -228,7 +228,7 @@ type Query struct {
 
 	// IncludeRef also emits the reference (0/0) calls, turning "which variants does
 	// this subject carry" into "every site interrogated for this subject". It needs
-	// the sites and regions tables, so a store built with --no-callable refuses
+	// the catalog and catalog_runs tables, so a store built with --no-callable refuses
 	// with ErrNotClassifiable rather than reporting unobserved samples as reference.
 	IncludeRef bool
 }
@@ -408,7 +408,7 @@ type Store interface {
 	//
 	// The returned error reports setup failure, so a caller learns about an
 	// unusable query before iterating; per-row failures arrive through the
-	// iterator. With Query.IncludeRef a store lacking sites or regions fails here
+	// iterator. With Query.IncludeRef a store lacking catalog or catalog_runs fails here
 	// with ErrNotClassifiable rather than silently omitting reference calls.
 	//
 	// Implementations choose their own access strategy from the query's shape --

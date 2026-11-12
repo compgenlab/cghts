@@ -154,8 +154,8 @@ interface. A store is a directory, and all three members are required:
 ```
 cohort/
   calls.parquet      one row per ALT-carrying genotype
-  sites.parquet      one row per interrogated site, with AC/AN
-  regions.parquet    runs of catalog sites at which a sample was called
+  catalog.parquet      one row per interrogated site, with AC/AN
+  catalog_runs.parquet    runs of catalog sites at which a sample was called
   manifest.json.gz   written last; the store is readable only with it
 ```
 
@@ -224,12 +224,12 @@ so the zero `Query` is every genotype in the store. A query is always **one
 pass**: the Parquet side prunes row groups by the union of the selectors, so a
 1000-variant panel costs about what one variant does.
 
-- `IncludeRef` also emits `0/0` calls, which needs `sites` and `regions` —
+- `IncludeRef` also emits `0/0` calls, which needs `catalog` and `catalog_runs` —
   a store lacking them fails with `ErrNotClassifiable` rather than returning an
   ALT-only stream that would read as "nobody is reference here"
 - **Run intervals are not coverage.** They compress a per-site record of "this
   sample was called at these catalog sites" and claim nothing about the bases
-  between them, so a locus absent from `sites` is unassayed for every sample even
+  between them, so a locus absent from `catalog` is unassayed for every sample even
   where runs bracket it. A gVCF's reference blocks (`END`, `MIN_DP`) *are* span
   assertions, and only such a store could answer off-catalog — hence
   `SpanSemantics`
@@ -251,8 +251,8 @@ pass**: the Parquet side prunes row groups by the union of the selectors, so a
 - Stores keep the source's own contig spelling; compare through
   `CanonKey`/`SameChrom` so `chr17`, `17` and `NC_000017.11` all resolve
 
-`cgkit`'s `vcf-toparquet` and `vcf-varquery` are the CLI over this package; see
-its [`docs/vcf-toparquet.md`](https://github.com/compgenlab/cgkit/blob/main/docs/vcf-toparquet.md)
+`cgkit`'s `vcf-tovarstore` and `vcf-varquery` are the CLI over this package; see
+its [`docs/vcf-tovarstore.md`](https://github.com/compgenlab/cgkit/blob/main/docs/vcf-tovarstore.md)
 for the format walk-through and measurements.
 
 ### iosource — pluggable random-access I/O

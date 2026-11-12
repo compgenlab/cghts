@@ -19,7 +19,7 @@ import (
 // A joint-called VCF needs no sidecars to classify: it carries an explicit
 // genotype for every sample at every record, so a 0/0 is a positive reference
 // observation and a ./. is a positive statement of absence. That is precisely
-// what the Parquet store has to reconstruct from its sites and regions files.
+// what the Parquet store has to reconstruct from its catalog and catalog_runs tables.
 type VcfStore struct {
 	path    string
 	samples []string

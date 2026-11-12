@@ -113,8 +113,8 @@ func TestAnArchiveReportsWhatItsVolumesCaptured(t *testing.T) {
 	if arc.SpanSemantics() != vol.SpanSemantics() {
 		t.Errorf("archive spans %q, volume spans %q", arc.SpanSemantics(), vol.SpanSemantics())
 	}
-	if arc.HasCoverage() != vol.HasCoverage() {
-		t.Errorf("archive coverage %v, volume coverage %v", arc.HasCoverage(), vol.HasCoverage())
+	if arc.HasRefBlocks() != vol.HasRefBlocks() {
+		t.Errorf("archive coverage %v, volume coverage %v", arc.HasRefBlocks(), vol.HasRefBlocks())
 	}
 }
 

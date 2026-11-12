@@ -30,7 +30,7 @@ const (
 	MetaProgram = "cgkit.program"        // cgkit version
 	MetaCommand = "cgkit.command"        // full command line
 	MetaSource  = "cgkit.source"         // input filename
-	MetaNoCall  = "cgkit.nocallable"     // "1" when regions are absent by request
+	MetaNoCall  = "cgkit.nocallable"     // "1" when catalog_runs is absent by request
 	MetaSpans   = "cgkit.span_semantics" // see SpanSemantics
 
 	// MetaContigs holds the source's ##contig header lines verbatim, newline
@@ -171,7 +171,7 @@ func validateMeta(m map[string]string) error {
 		"lowercase letters, digits, underscore and hyphen", strings.Join(bad, ", "))
 }
 
-// SpanSemantics records what the intervals in the regions file are entitled to
+// SpanSemantics records what the intervals in the catalog_runs table are entitled to
 // claim, which depends entirely on what the source format asserted.
 type SpanSemantics string
 
@@ -214,12 +214,12 @@ type WriterOpts struct {
 	NoCallable   bool
 	Program      string
 
-	// Coverage opens the optional coverage table, for genomic block spans that
+	// RefBlocks opens the optional ref_blocks table, for genomic block spans that
 	// answer OFF the sites catalog. Off by default: a store carrying an empty
 	// one asserts "covered nowhere", where an absent one asserts nothing.
-	Coverage bool
+	RefBlocks bool
 
-	// MaxGap is the largest uncovered stretch a coverage block was permitted to
+	// MaxGap is the largest uncovered stretch a reference block was permitted to
 	// span when it was built, recorded so a reader knows what "covered" meant
 	// here. Zero means the blocks are the source's own, unmerged.
 	//
@@ -263,7 +263,7 @@ type WriterOpts struct {
 	// the sites catalog. See format.go.
 	Format []FormatField
 
-	// Info are INFO fields to capture from the source into sites.parquet, each
+	// Info are INFO fields to capture from the source into catalog.parquet, each
 	// as its own typed column. Empty -- the usual case -- writes exactly the
 	// schema this store has always had. See info.go for why these are columns
 	// and why the source key is preserved rather than normalized.
@@ -294,10 +294,10 @@ type WriterOpts struct {
 // Writer builds the three files of a Parquet store. Rows are buffered and
 // flushed in batches so memory stays bounded no matter how large the input is.
 type Writer struct {
-	calls    *parquet.GenericWriter[Call]
-	sites    *parquet.GenericWriter[Site]
-	regions  *parquet.GenericWriter[CalledSiteRun]
-	coverage *parquet.GenericWriter[CoverageBlock]
+	calls       *parquet.GenericWriter[Call]
+	sites       *parquet.GenericWriter[Site]
+	catalogRuns *parquet.GenericWriter[CalledSiteRun]
+	refBlocks   *parquet.GenericWriter[RefBlock]
 
 	// The dynamic sites writer, used only when INFO fields are captured. Exactly
 	// one of sites and sitesAny is ever non-nil.
@@ -310,10 +310,10 @@ type Writer struct {
 	callRows   []any
 	fmtScratch []infoSlots
 
-	callBuf     []Call
-	siteBuf     []Site
-	regionBuf   []CalledSiteRun
-	coverageBuf []CoverageBlock
+	callBuf       []Call
+	siteBuf       []Site
+	catalogRunBuf []CalledSiteRun
+	refBlockBuf   []RefBlock
 
 	// Rows for the dynamic path, allocated once and refilled. A whole-genome
 	// catalog is tens of millions of sites and a map per row would be the
@@ -325,7 +325,7 @@ type Writer struct {
 	// A shard is cut every ShardSites sites and at every chromosome change,
 	// which is what keeps First and Last comparable without a chromosome test.
 	// The three tables are cut TOGETHER on the same site boundaries, so shard
-	// k of calls, sites and regions cover the same interval and a locus query
+	// k of calls, catalog and catalog_runs cover the same interval and a locus query
 	// reads the k'th of each rather than reconciling two partitionings.
 	shardIdx   int
 	shardChrom string
@@ -362,10 +362,10 @@ type Writer struct {
 	chroms   []ChromCensus
 	chromIdx map[string]int
 
-	NCalls    int64
-	NSites    int64
-	NRegions  int64
-	NCoverage int64
+	NCalls       int64
+	NSites       int64
+	NCatalogRuns int64
+	NRefBlocks   int64
 }
 
 // census returns the running tally for chrom, creating it on first sight.
@@ -547,7 +547,7 @@ func (w *Writer) openShard() error {
 		w.setCallMeta(MetaNoCall, "1")
 	}
 
-	sf, err := open(w.tableName(SitesTable))
+	sf, err := open(w.tableName(CatalogTable))
 	if err != nil {
 		return err
 	}
@@ -562,26 +562,26 @@ func (w *Writer) openShard() error {
 		w.sitesAny = nil
 	}
 
-	rf, err := open(w.tableName(RegionsTable))
+	rf, err := open(w.tableName(CatalogRunsTable))
 	if err != nil {
 		return err
 	}
-	w.regions = parquet.NewGenericWriter[CalledSiteRun](rf, append(append([]parquet.WriterOption{}, opts...),
+	w.catalogRuns = parquet.NewGenericWriter[CalledSiteRun](rf, append(append([]parquet.WriterOption{}, opts...),
 		parquet.SortingWriterConfig(parquet.SortingColumns(
 			parquet.Ascending("chrom"), parquet.Ascending("start"))),
 		parquet.BloomFilters(parquet.SplitBlockFilter(10, "sample_id")))...)
 
-	// OPENED ONLY WHEN ASKED FOR, so an absent coverage table means "nobody
+	// OPENED ONLY WHEN ASKED FOR, so an absent ref_blocks table means "nobody
 	// said" rather than "covered nowhere". Creating an empty one by default
 	// would assert the second, which is the claim that turns an unknown into a
 	// wrong answer -- every off-catalog position would read as never covered
 	// for every sample, which is exactly what the table exists to fix.
-	if w.opts.Coverage {
-		cf, err := open(w.tableName(CoverageTable))
+	if w.opts.RefBlocks {
+		cf, err := open(w.tableName(RefBlocksTable))
 		if err != nil {
 			return err
 		}
-		w.coverage = parquet.NewGenericWriter[CoverageBlock](cf, append(append([]parquet.WriterOption{}, opts...),
+		w.refBlocks = parquet.NewGenericWriter[RefBlock](cf, append(append([]parquet.WriterOption{}, opts...),
 			parquet.SortingWriterConfig(parquet.SortingColumns(
 				parquet.Ascending("chrom"), parquet.Ascending("start"))),
 			parquet.BloomFilters(parquet.SplitBlockFilter(10, "sample_id")))...)
@@ -683,16 +683,16 @@ func (w *Writer) Finish() error {
 func (w *Writer) manifest() (VolumeManifest, error) {
 	tables := map[string]TableInfo{}
 	counted := map[string]int64{
-		CallsTable:   w.NCalls,
-		SitesTable:   w.NSites,
-		RegionsTable: w.NRegions,
+		CallsTable:       w.NCalls,
+		CatalogTable:     w.NSites,
+		CatalogRunsTable: w.NCatalogRuns,
 	}
-	// Listed only when the store actually carries one. A coverage entry with
+	// Listed only when the store actually carries one. A ref_blocks entry with
 	// zero rows would read as "covered nowhere" to every later query, where no
 	// entry at all reads as "nobody said" -- and only the second is true of a
 	// conversion that was never given a gVCF.
-	if w.opts.Coverage {
-		counted[CoverageTable] = w.NCoverage
+	if w.opts.RefBlocks {
+		counted[RefBlocksTable] = w.NRefBlocks
 	}
 	for table, rows := range counted {
 		// A SPLIT MEMBER IS SIZED SHARD BY SHARD, and each shard's size is read
@@ -742,16 +742,16 @@ func (w *Writer) manifest() (VolumeManifest, error) {
 			SpanSemantics: w.opts.Spans,
 			DepthBands:    w.opts.DepthBands,
 			MaxGap:        w.opts.MaxGap,
-			Coverage:      w.opts.Coverage,
+			RefBlocks:     w.opts.RefBlocks,
 			Info:          w.opts.Info,
 			Format:        w.opts.Format,
 		},
 		Samples: w.opts.Samples,
 		Counts: ManifestCounts{
-			Samples: len(w.opts.Samples),
-			Calls:   w.NCalls,
-			Sites:   w.NSites,
-			Regions: w.NRegions,
+			Samples:     len(w.opts.Samples),
+			Calls:       w.NCalls,
+			Sites:       w.NSites,
+			CatalogRuns: w.NCatalogRuns,
 		},
 		Tables:          tables,
 		Chromosomes:     w.chroms,
@@ -864,7 +864,7 @@ func (w *Writer) WriteSiteInfo(s Site, info map[string]any) error {
 	}
 	w.census(s.Chrom, s.Pos).Sites++
 	w.NSites++
-	w.shardRows[SitesTable]++
+	w.shardRows[CatalogTable]++
 
 	if w.sitesAny == nil {
 		// Captured nothing: values, if any were offered, have nowhere to go.
@@ -1075,11 +1075,11 @@ func (w *Writer) WriteRegion(r CalledSiteRun) error {
 				"locus this run covers reads as never assayed",
 			r.SampleID, r.Chrom, r.Start, r.End, w.shardChrom, w.shardFirst, w.shardLast)
 	}
-	w.shardRows[RegionsTable]++
-	w.regionBuf = append(w.regionBuf, r)
-	w.NRegions++
-	if len(w.regionBuf) >= batchSize {
-		return w.flushRegions()
+	w.shardRows[CatalogRunsTable]++
+	w.catalogRunBuf = append(w.catalogRunBuf, r)
+	w.NCatalogRuns++
+	if len(w.catalogRunBuf) >= batchSize {
+		return w.flushCatalogRuns()
 	}
 	return nil
 }
@@ -1128,27 +1128,27 @@ func (w *Writer) flushSites() error {
 	return nil
 }
 
-func (w *Writer) flushRegions() error {
-	if len(w.regionBuf) == 0 {
+func (w *Writer) flushCatalogRuns() error {
+	if len(w.catalogRunBuf) == 0 {
 		return nil
 	}
-	if _, err := w.regions.Write(w.regionBuf); err != nil {
+	if _, err := w.catalogRuns.Write(w.catalogRunBuf); err != nil {
 		return fmt.Errorf("writing regions: %w", err)
 	}
-	w.regionBuf = w.regionBuf[:0]
+	w.catalogRunBuf = w.catalogRunBuf[:0]
 	return nil
 }
 
-// WriteCoverage buffers one coverage block.
+// WriteRefBlock buffers one reference block.
 //
-// Refused unless the store was opened with Coverage set, because a block
+// Refused unless the store was opened with RefBlocks set, because a block
 // arriving at a store that will not record one is a caller who believes they
 // are capturing something they are not -- and the loss is unrecoverable, since
 // the gVCF that could have answered is not read again.
-func (w *Writer) WriteCoverage(b CoverageBlock) error {
-	if !w.opts.Coverage {
+func (w *Writer) WriteRefBlock(b RefBlock) error {
+	if !w.opts.RefBlocks {
 		return fmt.Errorf(
-			"this store was not opened to hold coverage blocks; set WriterOpts.Coverage, "+
+			"this store was not opened to hold coverage blocks; set WriterOpts.RefBlocks, "+
 				"or the span %s %s:%d-%d is discarded and cannot be recovered without the source",
 			b.SampleID, b.Chrom, b.Start, b.End)
 	}
@@ -1156,23 +1156,23 @@ func (w *Writer) WriteCoverage(b CoverageBlock) error {
 		return fmt.Errorf("coverage block %s %s:%d-%d ends before it starts",
 			b.SampleID, b.Chrom, b.Start, b.End)
 	}
-	w.shardRows[CoverageTable]++
-	w.coverageBuf = append(w.coverageBuf, b)
-	w.NCoverage++
-	if len(w.coverageBuf) >= batchSize {
-		return w.flushCoverage()
+	w.shardRows[RefBlocksTable]++
+	w.refBlockBuf = append(w.refBlockBuf, b)
+	w.NRefBlocks++
+	if len(w.refBlockBuf) >= batchSize {
+		return w.flushRefBlocks()
 	}
 	return nil
 }
 
-func (w *Writer) flushCoverage() error {
-	if w.coverage == nil || len(w.coverageBuf) == 0 {
+func (w *Writer) flushRefBlocks() error {
+	if w.refBlocks == nil || len(w.refBlockBuf) == 0 {
 		return nil
 	}
-	if _, err := w.coverage.Write(w.coverageBuf); err != nil {
+	if _, err := w.refBlocks.Write(w.refBlockBuf); err != nil {
 		return fmt.Errorf("writing coverage: %w", err)
 	}
-	w.coverageBuf = w.coverageBuf[:0]
+	w.refBlockBuf = w.refBlockBuf[:0]
 	return nil
 }
 
@@ -1262,32 +1262,32 @@ func hasColumn(pf *parquet.File, name string) bool {
 
 // ParquetVolume is a Store backed by the three-file Parquet set.
 type ParquetVolume struct {
-	base        string
-	calls       *shardSet
-	hasRefSpans bool
-	sites       *shardSet
-	regions     *shardSet
-	coverage    *shardSet
-	samples     []string
-	hasSites    bool
-	hasRegions  bool
+	base           string
+	calls          *shardSet
+	hasRefSpans    bool
+	sites          *shardSet
+	catalogRuns    *shardSet
+	refBlocks      *shardSet
+	samples        []string
+	hasSites       bool
+	hasCatalogRuns bool
 
-	// hasCoverage distinguishes a store that was given genomic block spans from
+	// hasRefBlocks distinguishes a store that was given genomic block spans from
 	// one that was not, which is the difference between "not covered there" and
 	// "nobody said". Only the first may be reported as an answer.
-	hasCoverage bool
-	noCallable  bool
-	spans       SpanSemantics
-	minDP       int32
-	meta        map[string]string
-	manifest    *VolumeManifest
+	hasRefBlocks bool
+	noCallable   bool
+	spans        SpanSemantics
+	minDP        int32
+	meta         map[string]string
+	manifest     *VolumeManifest
 }
 
-// HasCoverage reports whether this store carries genomic block spans, and so
+// HasRefBlocks reports whether this store carries genomic block spans, and so
 // whether it can answer about positions absent from the sites catalog.
-func (s *ParquetVolume) HasCoverage() bool { return s.hasCoverage }
+func (s *ParquetVolume) HasRefBlocks() bool { return s.hasRefBlocks }
 
-// MaxGap is the largest uncovered stretch this store's coverage blocks were
+// MaxGap is the largest uncovered stretch this store's reference blocks were
 // permitted to span. Zero when there are none, or when they are unmerged.
 func (s *ParquetVolume) MaxGap() int32 {
 	if s.manifest == nil {
@@ -1296,13 +1296,13 @@ func (s *ParquetVolume) MaxGap() int32 {
 	return s.manifest.Params.MaxGap
 }
 
-// Coverage streams the coverage blocks, calling fn for each until it returns
+// RefBlocks streams the reference blocks, calling fn for each until it returns
 // false. Reports nothing at all for a store that carries none.
-func (s *ParquetVolume) Coverage(fn func(CoverageBlock) bool) error {
-	if !s.hasCoverage {
+func (s *ParquetVolume) RefBlocks(fn func(RefBlock) bool) error {
+	if !s.hasRefBlocks {
 		return nil
 	}
-	return scanParquet(s.coverage, fn)
+	return scanParquet(s.refBlocks, fn)
 }
 
 // SpanSemantics reports what this store's run intervals may claim. A store
@@ -1434,27 +1434,27 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetVolume, error
 	// The optional tables. Absence is legitimate only where the manifest
 	// recorded nothing in them, which verifyAgainstManifest below enforces;
 	// note that the writer creates all three regardless, so --no-callable
-	// produces a present, zero-row regions table rather than a missing one.
-	sites, hasSites, err := openOptionalShardSet(ctx, base, SitesTable, man.Tables[SitesTable])
+	// produces a present, zero-row catalog_runs table rather than a missing one.
+	sites, hasSites, err := openOptionalShardSet(ctx, base, CatalogTable, man.Tables[CatalogTable])
 	if err != nil {
 		calls.Close()
 		return nil, err
 	}
 	s.sites, s.hasSites = sites, hasSites
-	regions, hasRegions, err := openOptionalShardSet(ctx, base, RegionsTable, man.Tables[RegionsTable])
+	regions, hasCatalogRuns, err := openOptionalShardSet(ctx, base, CatalogRunsTable, man.Tables[CatalogRunsTable])
 	if err != nil {
 		calls.Close()
 		sites.Close()
 		return nil, err
 	}
-	s.regions, s.hasRegions = regions, hasRegions
+	s.catalogRuns, s.hasCatalogRuns = regions, hasCatalogRuns
 
 	// OPTIONAL, and absent is the common case: only a conversion given a gVCF
 	// or a callable mask has one. Absent means nothing was claimed off the
 	// catalog, never that nothing was covered.
 	// ASKED OF THE MANIFEST FIRST, and not probed for.
 	//
-	// Every other table is probed because every store has one; coverage is the
+	// Every other table is probed because every store has one; ref_blocks is the
 	// first that is genuinely absent from almost all of them, which is what
 	// exposed the difference. Probing cost a round trip per open on every store
 	// that has none -- and worse, it FAILED: iosource is documented to wrap a
@@ -1462,14 +1462,14 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetVolume, error
 	// absence came back as an error and every existing store stopped opening.
 	//
 	// The manifest is the authority on which tables a store has, which is why
-	// it lists coverage only when one was written. Believing it is both correct
+	// it lists ref_blocks only when one was written. Believing it is both correct
 	// and free.
 	var coverage *shardSet
-	var hasCoverage bool
-	if _, listed := man.Tables[CoverageTable]; listed {
-		coverage, hasCoverage, err = openOptionalShardSet(ctx, base, CoverageTable, man.Tables[CoverageTable])
+	var hasRefBlocks bool
+	if _, listed := man.Tables[RefBlocksTable]; listed {
+		coverage, hasRefBlocks, err = openOptionalShardSet(ctx, base, RefBlocksTable, man.Tables[RefBlocksTable])
 	} else {
-		coverage = &shardSet{name: CoverageTable}
+		coverage = &shardSet{name: RefBlocksTable}
 	}
 	if err != nil {
 		calls.Close()
@@ -1477,7 +1477,7 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetVolume, error
 		regions.Close()
 		return nil, err
 	}
-	s.coverage, s.hasCoverage = coverage, hasCoverage
+	s.refBlocks, s.hasRefBlocks = coverage, hasRefBlocks
 	s.manifest = man
 
 	if err := verifyAgainstManifest(man, pf, calls, sites, regions); err != nil {
@@ -1540,7 +1540,7 @@ func requireManifest(ctx context.Context, base string) (*VolumeManifest, error) 
 // finishing this store produced. Comparing them is what catches a table that
 // is well-formed but does not belong -- one copied in from another conversion,
 // or left over from a run whose replacement died. Nothing else can see that,
-// because sites and regions carry no metadata of their own.
+// because catalog and catalog_runs carry no metadata of their own.
 //
 // It costs nothing: every count here is footer metadata that was already read.
 func verifyAgainstManifest(man *VolumeManifest, callsFile *parquet.File, calls, sites, regions *shardSet) error {
@@ -1555,8 +1555,8 @@ func verifyAgainstManifest(man *VolumeManifest, callsFile *parquet.File, calls, 
 		// against the table's total would compare one shard's rows with all of
 		// them, which is how this first failed.
 		{CallsTable, callsFile, calls},
-		{SitesTable, nil, sites},
-		{RegionsTable, nil, regions},
+		{CatalogTable, nil, sites},
+		{CatalogRunsTable, nil, regions},
 	} {
 		want, recorded := man.Tables[c.name]
 		if !recorded {
@@ -1620,7 +1620,7 @@ func verifyAgainstManifest(man *VolumeManifest, callsFile *parquet.File, calls, 
 // The two outcomes have to stay distinct. Absence is normal: a --no-callable
 // store records no callable runs. A table that is *present but unreadable* is
 // not, and until this checked, the two were indistinguishable -- the open error
-// was discarded either way, so a truncated or half-written sites file read
+// was discarded either way, so a truncated or half-written catalog table read
 // exactly like a deliberate omission and the store went on to answer queries as
 // though those runs had never been asked for.
 //
@@ -1674,7 +1674,7 @@ func openOptionalTable(ctx context.Context, locator string) (*table, bool, error
 // os.Stat simply failed and the path fell through unchanged.
 func TrimStoreSuffix(p string) string {
 	for _, name := range []string{
-		CallsTable + ".parquet", SitesTable + ".parquet", RegionsTable + ".parquet",
+		CallsTable + ".parquet", CatalogTable + ".parquet", CatalogRunsTable + ".parquet",
 		VolumeManifestFile,
 	} {
 		if base, ok := cutTableSuffix(p, name); ok {
@@ -1754,7 +1754,7 @@ func (s *ParquetVolume) Calls(q Query) (iter.Seq2[Call, error], error) {
 
 	// Reference calls have to be interleaved with the ALT calls in one order, and
 	// they are derived from two other files, so this path assembles before it
-	// yields. Ordering comes from walking sites.parquet -- itself in store order --
+	// yields. Ordering comes from walking catalog.parquet -- itself in store order --
 	// rather than from sorting, so contig order is preserved for free.
 	//
 	// It is bounded by the query, not by the store: naming samples or loci bounds
@@ -1945,7 +1945,7 @@ func (s *ParquetVolume) Classify(l Locus, g Gate) ([]SampleState, error) {
 	// Reached only for a locus in the catalog (or a block-semantics store), so a
 	// run bracketing the position genuinely means "called here".
 	called := map[string]bool{}
-	if err := scanParquetPruned(s.regions, coveringFilter(l.Chrom, l.Pos), func(r CalledSiteRun) bool {
+	if err := scanParquetPruned(s.catalogRuns, coveringFilter(l.Chrom, l.Pos), func(r CalledSiteRun) bool {
 		if SameChrom(r.Chrom, l.Chrom) && l.Pos >= r.Start && l.Pos <= r.End {
 			called[r.SampleID] = true
 		}
@@ -1980,10 +1980,10 @@ func (s *ParquetVolume) Classify(l Locus, g Gate) ([]SampleState, error) {
 // would otherwise have to guess goes through this first.
 func (s *ParquetVolume) classifiable() error {
 	if !s.hasSites {
-		return fmt.Errorf("%w: %s is missing", ErrNotClassifiable, SitesPath(s.base))
+		return fmt.Errorf("%w: %s is missing", ErrNotClassifiable, CatalogPath(s.base))
 	}
-	if !s.hasRegions {
-		return fmt.Errorf("%w: %s is missing", ErrNotClassifiable, RegionsPath(s.base))
+	if !s.hasCatalogRuns {
+		return fmt.Errorf("%w: %s is missing", ErrNotClassifiable, CatalogRunsPath(s.base))
 	}
 	if s.noCallable {
 		return fmt.Errorf("%w: %s was built with --no-callable (the source had no DP field)",
@@ -1996,9 +1996,9 @@ func (s *ParquetVolume) classifiable() error {
 // canonical chromosome and sorted by start.
 //
 // Held in memory because reconstructing reference calls tests every catalog site
-// against it, and re-scanning the regions file per site would be quadratic. A run
+// against it, and re-scanning the catalog_runs table per site would be quadratic. A run
 // spans as many sites as the sample was called at consecutively, so this stays far
-// smaller than the regions file -- but it grows with the number of samples
+// smaller than the catalog_runs table -- but it grows with the number of samples
 // selected, which is the bound on an unrestricted IncludeRef query.
 type runsBySample map[string]map[string][]CalledSiteRun
 
@@ -2025,7 +2025,7 @@ func (s *ParquetVolume) runsFor(samples []string, p *plan) (runsBySample, error)
 		want[name] = true
 	}
 	out := runsBySample{}
-	err := scanParquetPruned(s.regions, runScanFilter(p.q), func(r CalledSiteRun) bool {
+	err := scanParquetPruned(s.catalogRuns, runScanFilter(p.q), func(r CalledSiteRun) bool {
 		if !want[r.SampleID] {
 			return true
 		}
@@ -2050,21 +2050,21 @@ func (s *ParquetVolume) runsFor(samples []string, p *plan) (runsBySample, error)
 // Sites streams the catalog, calling fn per site. fn returns false to stop.
 func (s *ParquetVolume) Sites(fn func(Site) bool) error {
 	if !s.hasSites {
-		return fmt.Errorf("%s is missing", SitesPath(s.base))
+		return fmt.Errorf("%s is missing", CatalogPath(s.base))
 	}
 	return scanParquet(s.sites, fn)
 }
 
-// Regions walks the callable runs.
+// CatalogRuns walks the callable runs.
 //
 // The counterpart to Sites, and the way a consumer inspects what a reference
 // call rests on: a run carries the span, the site count and -- since depth
 // banding -- the lowest depth vouched for across the whole of it.
-func (s *ParquetVolume) Regions(fn func(CalledSiteRun) bool) error {
-	if !s.hasRegions {
-		return fmt.Errorf("%s is missing", RegionsPath(s.base))
+func (s *ParquetVolume) CatalogRuns(fn func(CalledSiteRun) bool) error {
+	if !s.hasCatalogRuns {
+		return fmt.Errorf("%s is missing", CatalogRunsPath(s.base))
 	}
-	return scanParquet(s.regions, fn)
+	return scanParquet(s.catalogRuns, fn)
 }
 
 // FormatFields reports the FORMAT fields this store captured onto its calls,
@@ -2180,7 +2180,7 @@ func (s *ParquetVolume) InfoFields() []InfoField {
 // every field, which is the truth.
 func (s *ParquetVolume) SitesInfo(fn func(Site, InfoRow) bool) error {
 	if !s.hasSites {
-		return fmt.Errorf("%s is missing", SitesPath(s.base))
+		return fmt.Errorf("%s is missing", CatalogPath(s.base))
 	}
 	if len(s.InfoFields()) == 0 {
 		return s.Sites(func(site Site) bool { return fn(site, InfoRow{}) })
@@ -2268,12 +2268,12 @@ func siteFromRow(row parquet.Row, cols map[string]int) Site {
 
 // Site returns the catalog entry for a locus, if the source reported it.
 func (s *ParquetVolume) Site(l Locus) (Site, bool, error) {
-	// Every sibling guards this; Site did not, and an absent sites table is a
+	// Every sibling guards this; Site did not, and an absent catalog table is a
 	// reachable state -- the manifest permits one that recorded no rows -- so
 	// this was a nil dereference inside the scan rather than the
 	// ErrNotClassifiable its neighbours return.
 	if !s.hasSites {
-		return Site{}, false, fmt.Errorf("%w: %s is missing", ErrNotClassifiable, SitesPath(s.base))
+		return Site{}, false, fmt.Errorf("%w: %s is missing", ErrNotClassifiable, CatalogPath(s.base))
 	}
 	var got Site
 	found := false
@@ -2306,7 +2306,7 @@ func (s *ParquetVolume) SiteKnown(l Locus) (bool, error) {
 // or a live connection per store when the tables are remote.
 func (s *ParquetVolume) Close() error {
 	var first error
-	for _, m := range []*shardSet{s.calls, s.sites, s.regions} {
+	for _, m := range []*shardSet{s.calls, s.sites, s.catalogRuns} {
 		if err := m.Close(); err != nil && first == nil {
 			first = err
 		}
