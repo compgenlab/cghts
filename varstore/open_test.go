@@ -27,7 +27,7 @@ func TestStoreKind(t *testing.T) {
 		{"s3://bucket/cohort.vcf.gz", KindVcf},
 
 		{"cohort/calls.parquet", KindParquet},
-		{"s3://bucket/cohort/sites.parquet", KindParquet},
+		{"s3://bucket/cohort/catalog.parquet", KindParquet},
 		{"s3://bucket/cohort/" + VolumeManifestFile, KindParquet},
 
 		// A bare directory is resolved by finding a manifest in it.

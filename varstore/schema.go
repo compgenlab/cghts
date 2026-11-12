@@ -8,8 +8,8 @@
 //
 //	cohort/
 //	  calls.parquet     one row per ALT-carrying genotype
-//	  sites.parquet     one row per interrogated site, sample-independent
-//	  regions.parquet   runs of catalog sites at which a sample was called
+//	  catalog.parquet     one row per interrogated site, sample-independent
+//	  catalog_runs.parquet   runs of catalog sites at which a sample was called
 //
 // The tables are only meaningful together, so the store is one thing to copy,
 // move and delete. A trailing separator on the base is optional, and a table
@@ -24,14 +24,14 @@
 // boundary of what is knowable, and a query for any locus outside it yields
 // StateNotAssayed for every sample -- not StateNonCarrier.
 //
-// This is why the run intervals in the regions file must never be read as
+// This is why the run intervals in the catalog_runs table must never be read as
 // coverage. They compress a per-sample, per-site record of "this sample was
 // called at these catalog sites"; the gaps between those sites are not part of
 // the claim. A gVCF is different, because its reference blocks (END, MIN_DP)
 // are positive statements about spans, and only such a store could answer
 // off-catalog positions.
 //
-// The sites file cannot be reconstructed from the calls file. Taking the
+// The catalog table cannot be reconstructed from the calls file. Taking the
 // distinct loci out of the calls recovers every site only when the store holds
 // the entire joint callset; over a subset of samples the sites where nobody in
 // that subset carries an ALT vanish silently, and a query would then report
@@ -97,7 +97,7 @@ const HomRefGT = "0/0"
 //
 // A store keeps only ALT-carrying genotypes, so the reference call itself was
 // never written down; what survives conversion is the *fact* that the sample was
-// called at this catalog site, held in the regions file. So the genotype string
+// called at this catalog site, held in the catalog_runs table. So the genotype string
 // is synthesized and every quality field is Missing. The row asserts exactly
 // "observed here, and observed to be reference" and nothing more -- notably not
 // the ploidy or phasing of the original genotype, which are unrecoverable.
@@ -203,9 +203,9 @@ type CalledSiteRun struct {
 	MinDP int32 `parquet:"min_dp"`
 }
 
-// CoverageBlock is a positive claim about every base in a span.
+// RefBlock is a positive claim about every base in a span.
 //
-// WHAT IT IS FOR. regions records runs of CATALOG SITES, which is all a
+// WHAT IT IS FOR. catalog_runs records runs of CATALOG SITES, which is all a
 // joint-called pVCF supports: it says a sample was called at the sites inside
 // an interval and claims nothing about the bases between them. That is honest
 // and it is pessimistic in two ways that only surface later.
@@ -219,7 +219,7 @@ type CalledSiteRun struct {
 // Across time it is worse. The catalog is frozen at conversion, so a variant
 // discovered next year is permanently unanswerable for everything already
 // converted, and reconverting recovers nothing because the pVCF never held it.
-// A coverage block is the only thing that can answer it, and the only moment to
+// A reference block is the only thing that can answer it, and the only moment to
 // capture one is at conversion from a source that still has it -- a gVCF, or a
 // per-sample callable BED.
 //
@@ -230,7 +230,7 @@ type CalledSiteRun struct {
 // across 10bp collapsed it 8.4x for 0.35% over-claim -- and it is recorded in
 // ManifestParams for the same reason MinDP is: two stores with different
 // tolerances do not mean the same thing by "covered".
-type CoverageBlock struct {
+type RefBlock struct {
 	SampleID string `parquet:"sample_id,dict"`
 	Chrom    string `parquet:"chrom,dict"`
 
@@ -254,16 +254,16 @@ type CoverageBlock struct {
 	GQ int32 `parquet:"gq"`
 }
 
-// CoveragePath returns the file holding a store's coverage blocks.
-func CoveragePath(base string) string { return TablePath(base, CoverageTable) }
+// RefBlocksPath returns the file holding a store's reference blocks.
+func RefBlocksPath(base string) string { return TablePath(base, RefBlocksTable) }
 
 // The tables of a store. A store IS a directory, and they sit inside it under
 // fixed names:
 //
 //	cohort/
 //	  calls.parquet
-//	  sites.parquet
-//	  regions.parquet
+//	  catalog.parquet
+//	  catalog_runs.parquet
 //
 // A trailing separator on the base is optional and means nothing;
 // "cohort" and "cohort/" name the same store.
@@ -276,13 +276,13 @@ func CoveragePath(base string) string { return TablePath(base, CoverageTable) }
 // there is no longer a base that might be a prefix or might be a directory, no
 // separator-sensitive TablePath, and no need to guess which was meant.
 const (
-	CallsTable   = "calls"
-	SitesTable   = "sites"
-	RegionsTable = "regions"
+	CallsTable       = "calls"
+	CatalogTable     = "catalog"
+	CatalogRunsTable = "catalog_runs"
 
-	// CoverageTable is OPTIONAL, and its absence means "nobody said" rather
-	// than "covered nowhere". See CoverageBlock.
-	CoverageTable = "coverage"
+	// RefBlocksTable is OPTIONAL, and its absence means "nobody said" rather
+	// than "covered nowhere". See RefBlock.
+	RefBlocksTable = "ref_blocks"
 )
 
 // TableFile returns the file name one table of a store is stored under,
@@ -330,11 +330,11 @@ func trimStoreDir(base string) string {
 // CallsPath returns the calls file for a store base name.
 func CallsPath(base string) string { return TablePath(base, CallsTable) }
 
-// SitesPath returns the sites file for a store base name.
-func SitesPath(base string) string { return TablePath(base, SitesTable) }
+// CatalogPath returns the catalog table for a store base name.
+func CatalogPath(base string) string { return TablePath(base, CatalogTable) }
 
-// RegionsPath returns the callable-regions file for a store base name.
-func RegionsPath(base string) string { return TablePath(base, RegionsTable) }
+// CatalogRunsPath returns the callable-catalog_runs table for a store base name.
+func CatalogRunsPath(base string) string { return TablePath(base, CatalogRunsTable) }
 
 // EnsureStoreDir creates the directory a store lives in.
 //
@@ -365,8 +365,8 @@ func EnsureStoreDir(base string) error {
 // marker vouching for tables it replaced.
 func TableFiles() []string {
 	return []string{
-		TableFile(CallsTable), TableFile(SitesTable),
-		TableFile(RegionsTable), VolumeManifestFile,
+		TableFile(CallsTable), TableFile(CatalogTable),
+		TableFile(CatalogRunsTable), VolumeManifestFile,
 	}
 }
 
@@ -379,7 +379,7 @@ func TableFiles() []string {
 // answer in the one direction that matters.
 func ExistingTables(base string) []string {
 	var found []string
-	for _, m := range []string{CallsTable, SitesTable, RegionsTable} {
+	for _, m := range []string{CallsTable, CatalogTable, CatalogRunsTable} {
 		if p := TablePath(base, m); fileExists(p) {
 			found = append(found, p)
 		}
@@ -445,7 +445,7 @@ func CheckStoreTargetIn(sink Sink, force bool) error {
 // relative to the store: "calls/00007.parquet".
 //
 // A DIRECTORY PER MEMBER rather than a directory per shard, because the tables
-// are read independently -- a locus lookup touches calls and regions and may
+// are read independently -- a locus lookup touches calls and catalog_runs and may
 // never open sites -- and because it keeps the unsplit layout recognisable:
 // `calls.parquet` becomes `calls/`, which reads as the same thing having grown.
 //

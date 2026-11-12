@@ -126,7 +126,7 @@ func TestFinishDiscardsWhenTheManifestCannotBeWritten(t *testing.T) {
 	// Remove a table out from under the writer. The handle stays open, so Close
 	// still writes its footer, but manifest()'s os.Stat then fails -- which is
 	// the failure mode this guards.
-	if err := os.Remove(SitesPath(base)); err != nil {
+	if err := os.Remove(CatalogPath(base)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -134,7 +134,7 @@ func TestFinishDiscardsWhenTheManifestCannotBeWritten(t *testing.T) {
 		t.Fatal("Finish succeeded despite being unable to size a table")
 	}
 
-	for _, p := range []string{CallsPath(base), SitesPath(base), RegionsPath(base), VolumeManifestPath(base)} {
+	for _, p := range []string{CallsPath(base), CatalogPath(base), CatalogRunsPath(base), VolumeManifestPath(base)} {
 		if _, err := os.Stat(p); err == nil {
 			t.Errorf("%s survived a failed Finish", filepath.Base(p))
 		}

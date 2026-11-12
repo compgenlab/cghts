@@ -5,7 +5,7 @@
 The target is 150,000 samples in batches of 10,000, each batch joint-called on
 its own.
 
-A varstore is built from a joint-called cohort VCF, and its `regions` table records
+A varstore is built from a joint-called cohort VCF, and its `catalog_runs` table records
 runs of **catalog sites** a sample was called at. `SpanSemantics` says so outright:
 the interval marks catalog sites, and *nothing is claimed about the bases in between*.
 
@@ -50,8 +50,8 @@ and why `SpansBlocks` has always been defined and never produced.
 
 ## The design
 
-**A new optional table, `coverage.parquet`**, holding genomic block spans, beside
-the existing `regions.parquet` holding catalog-site runs.
+**A new optional table, `ref_blocks.parquet`**, holding genomic block spans, beside
+the existing `catalog_runs.parquet` holding catalog-site runs.
 
 Two tables rather than one table with a kind column, for three reasons:
 
@@ -69,8 +69,8 @@ Two tables rather than one table with a kind column, for three reasons:
 ### Schema
 
 ```go
-// CoverageBlock is a positive claim about every base in a span.
-type CoverageBlock struct {
+// RefBlock is a positive claim about every base in a span.
+type RefBlock struct {
     SampleID string `parquet:"sample_id,dict"`
     Chrom    string `parquet:"chrom,dict"`
     Start    int32  `parquet:"start"`
@@ -107,7 +107,7 @@ the depth-band fixture swung an order of magnitude on binning choice alone.
 
 ### Precedence — the load-bearing rule
 
-> **At a catalog site, `regions` is authoritative. `coverage` answers only off
+> **At a catalog site, `catalog_runs` is authoritative. `ref_blocks` answers only off
 > catalog.**
 
 Get this backwards and every declined genotype silently becomes a reference call.
@@ -148,7 +148,7 @@ block-derived Ref from a clean region beats a real no-call from a hard one.
   coverage note has to say that a source could not answer rather than letting the
   asymmetry pass silently. Same shape as the existing assay and depth-band guards.
 - **A volume's coverage table is verified against its own roster at open**, exactly
-  as calls and regions are. A coverage table from another conversion is the same
+  as calls and catalog_runs are. A ref_blocks table from another conversion is the same
   class of error `TableInfo.Rows` already exists to catch.
 
 ## Measured

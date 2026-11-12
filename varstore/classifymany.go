@@ -16,7 +16,7 @@ import (
 // qualifying sites would have cost a minute, and the sites are not even the
 // expensive part -- the runs are, and they are identical every time.
 //
-// So the work is inverted: one pruned pass over calls, one over regions, both
+// So the work is inverted: one pruned pass over calls, one over catalog_runs, both
 // bounded by the whole locus set at once, and then the same per-sample decision
 // Classify makes. Cost becomes a function of the DATA rather than of the number
 // of loci asked about.
@@ -50,9 +50,9 @@ func (s *ParquetVolume) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleSt
 	// shards it must visit.
 	//
 	// The scans are independent -- sites says what was interrogated, calls says
-	// who carried something, regions says who was covered -- so the query costs
+	// who carried something, catalog_runs says who was covered -- so the query costs
 	// the SLOWEST of them rather than their sum. Measured sequentially at
-	// 175ms for calls and 123ms for regions on a 500-sample store, which is
+	// 175ms for calls and 123ms for catalog_runs on a 500-sample store, which is
 	// 298ms of waiting for 175ms of work.
 	//
 	// Each table is a distinct set of files, and within a table each shard is
@@ -144,12 +144,12 @@ func (s *ParquetVolume) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleSt
 			})
 	}()
 
-	// 3. The coverage, and the expensive one. A run is kept if it covers any
+	// 3. The catalog runs, and the expensive one. A run is kept if it covers any
 	//    requested locus, and recorded against the loci it brackets.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		errs[2] = scanShardsParallel(s.regions, runScanFilter(q), workers,
+		errs[2] = scanShardsParallel(s.catalogRuns, runScanFilter(q), workers,
 			func() map[Locus]map[string]bool { return map[Locus]map[string]bool{} },
 			func(acc map[Locus]map[string]bool, r CalledSiteRun) bool {
 				for _, l := range byChrom[CanonKey(r.Chrom)] {

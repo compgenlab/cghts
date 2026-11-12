@@ -89,7 +89,7 @@ func (m *table) Close() error {
 // manifest settles, since it records how many rows each table held.
 //
 // Note that the writer creates all three tables regardless, so --no-callable
-// yields a present, zero-row regions file rather than a missing one -- the
+// yields a present, zero-row catalog_runs table rather than a missing one -- the
 // comments here used to say otherwise, and any logic keyed on that absence
 // would never have fired.
 func tableExists(ctx context.Context, locator string) bool {

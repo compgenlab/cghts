@@ -49,7 +49,7 @@ func TestManifestRecordsWhatWasWritten(t *testing.T) {
 	buildCensusStore(t, base, WriterOpts{
 		MinDP:   10,
 		Program: "cgkit test",
-		Command: "cgkit vcf-toparquet chr1.vcf chr2.vcf --out cohort",
+		Command: "cgkit vcf-tovarstore chr1.vcf chr2.vcf --out cohort",
 		Sources: []string{"chr1.vcf", "chr2.vcf"},
 		Contigs: []string{"##contig=<ID=chr1>", "##contig=<ID=chr2>"},
 	})
@@ -67,7 +67,7 @@ func TestManifestRecordsWhatWasWritten(t *testing.T) {
 	if m.Created.IsZero() {
 		t.Error("Created is zero")
 	}
-	if got := m.Counts; got.Calls != 10 || got.Sites != 10 || got.Regions != 2 || got.Samples != 2 {
+	if got := m.Counts; got.Calls != 10 || got.Sites != 10 || got.CatalogRuns != 2 || got.Samples != 2 {
 		t.Errorf("counts = %+v, want 10 calls / 10 sites / 2 regions / 2 samples", got)
 	}
 	if got, want := len(m.Sources), 2; got != want {
@@ -94,7 +94,7 @@ func TestManifestRecordsWhatWasWritten(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{CallsTable, SitesTable, RegionsTable} {
+	for _, name := range []string{CallsTable, CatalogTable, CatalogRunsTable} {
 		info, ok := m.Tables[name]
 		if !ok {
 			t.Errorf("no table entry for %s", name)
@@ -185,11 +185,11 @@ func TestOpenRefusesATableFromAnotherVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	swapped, err := os.ReadFile(SitesPath(theirs))
+	swapped, err := os.ReadFile(CatalogPath(theirs))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(SitesPath(mine), swapped, 0o644); err != nil {
+	if err := os.WriteFile(CatalogPath(mine), swapped, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
