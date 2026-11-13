@@ -175,3 +175,47 @@ func TestIndexWriterZeroBasedUnsortedPos(t *testing.T) {
 		t.Errorf("UnsortedError = %+v, want line 2, 100 after 300", *ue)
 	}
 }
+
+// A GTF compressed as a header stream and a body stream, then concatenated,
+// carries an EOF marker in mid-file. htslib reads and indexes straight through
+// it; the index writer panicked on it (bgzf.Reader.ReadByte indexed an empty
+// buffer), and a query whose chunk crossed the join lost its records.
+func TestIndexWriterConcatenatedStreams(t *testing.T) {
+	dir := t.TempDir()
+	hdr := filepath.Join(dir, "hdr.gz")
+	body := filepath.Join(dir, "body.gz")
+	writeBGZF(t, hdr, "##description: test", "##format: gtf")
+	var lines []string
+	for i := 0; i < 3000; i++ {
+		lines = append(lines, "chr1\tHAVANA\texon\t"+strconv.Itoa(1000+i*100)+"\t"+strconv.Itoa(1050+i*100)+
+			"\t.\t+\t.\tgene_id \"G"+strconv.Itoa(i)+"\"; padding \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\";")
+	}
+	writeBGZF(t, body, lines...)
+	a, _ := os.ReadFile(hdr)
+	b, _ := os.ReadFile(body)
+	path := filepath.Join(dir, "concat.gtf.gz")
+	if err := os.WriteFile(path, append(a, b...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewIndexWriter(NewWriterOpts().GFF().Meta('#')).WriteIndex(path); err != nil {
+		t.Fatalf("WriteIndex: %v", err)
+	}
+	r, err := NewReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	// The first record, the last, and the whole contig: none may be lost.
+	if got := queryLines(t, r, "chr1", 1000, 1001); len(got) != 1 || got[0] != lines[0] {
+		t.Errorf("first record: got %v", got)
+	}
+	last := 1000 + 2999*100
+	if got := queryLines(t, r, "chr1", last, last+1); len(got) != 1 || got[0] != lines[2999] {
+		t.Errorf("last record: got %v", got)
+	}
+	if got := queryLines(t, r, "chr1", 0, 1<<29); len(got) != len(lines) {
+		t.Errorf("whole contig: %d records, want %d", len(got), len(lines))
+	}
+}
