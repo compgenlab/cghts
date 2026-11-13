@@ -255,6 +255,10 @@ type WriterOpts struct {
 	// what every store written before this existed is.
 	DepthBands []int32
 
+	// DepthRatio records the ratio DepthBands were generated from, zero for an
+	// explicit list. Recorded in the manifest only; see ManifestParams.DepthRatio.
+	DepthRatio float64
+
 	// Format are FORMAT fields to capture onto the ALT calls, each as its own
 	// typed column in calls.parquet.
 	//
@@ -437,6 +441,11 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 		return nil, err
 	}
 	o.Format = normalizeFormat(o.Format)
+	// Same reason again: a band list DepthBand cannot index unambiguously would
+	// be recorded in the manifest and compared by every BuildStore.
+	if err := ValidateDepthBands(o.DepthBands); err != nil {
+		return nil, err
+	}
 	if o.Codec == nil {
 		o.Codec = &zstd.Codec{}
 	}
@@ -741,6 +750,7 @@ func (w *Writer) manifest() (VolumeManifest, error) {
 			RowGroupSize:  w.opts.RowGroupSize,
 			SpanSemantics: w.opts.Spans,
 			DepthBands:    w.opts.DepthBands,
+			DepthRatio:    w.opts.DepthRatio,
 			MaxGap:        w.opts.MaxGap,
 			RefBlocks:     w.opts.RefBlocks,
 			Info:          w.opts.Info,
@@ -1848,10 +1858,11 @@ func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
 			if carries[name][loc.Record()] {
 				continue // carries this or another alternate of the record
 			}
-			if !runs.covers(name, site.Chrom, site.Pos) {
-				continue // never called here at adequate depth
+			run, ok := runs.covers(name, site.Chrom, site.Pos)
+			if !ok {
+				continue // never called here at a depth the gate admits
 			}
-			out = append(out, HomRefCall(name, loc))
+			out = append(out, HomRefCall(name, loc, run.MinDP))
 		}
 		return true
 	})
@@ -1946,7 +1957,7 @@ func (s *ParquetVolume) Classify(l Locus, g Gate) ([]SampleState, error) {
 	// run bracketing the position genuinely means "called here".
 	called := map[string]bool{}
 	if err := scanParquetPruned(s.catalogRuns, coveringFilter(l.Chrom, l.Pos), func(r CalledSiteRun) bool {
-		if SameChrom(r.Chrom, l.Chrom) && l.Pos >= r.Start && l.Pos <= r.End {
+		if SameChrom(r.Chrom, l.Chrom) && l.Pos >= r.Start && l.Pos <= r.End && s.runAdmits(r, g) {
 			called[r.SampleID] = true
 		}
 		return true
@@ -2006,19 +2017,56 @@ type runsBySample map[string]map[string][]CalledSiteRun
 // for one sample on one chromosome are disjoint and increasing -- the converter
 // closes a run before opening the next -- so the last run starting at or before
 // pos is the only one that can contain it.
-func (r runsBySample) covers(sample, chrom string, pos int32) bool {
+func (r runsBySample) covers(sample, chrom string, pos int32) (CalledSiteRun, bool) {
 	runs := r[sample][CanonKey(chrom)]
 	i := sort.Search(len(runs), func(i int) bool { return runs[i].Start > pos })
-	if i == 0 {
-		return false
+	if i == 0 || pos > runs[i-1].End {
+		return CalledSiteRun{}, false
 	}
-	return pos <= runs[i-1].End
+	return runs[i-1], true
+}
+
+// runFloor is the depth a catalog run vouches for across its whole span.
+//
+// The run's own min_dp where it recorded one; otherwise the conversion gate,
+// which every site in any run cleared by construction. Never zero: a run is
+// evidence of a call at or above the conversion --min-dp, so falling back to
+// "unknown" would let the run pass any gate -- the fail-open this exists to
+// prevent.
+func (s *ParquetVolume) runFloor(r CalledSiteRun) int32 {
+	if r.MinDP > 0 {
+		return r.MinDP
+	}
+	if s.manifest != nil && s.manifest.Params.MinDP > 0 {
+		return s.manifest.Params.MinDP
+	}
+	return s.minDP
+}
+
+// runAdmits reports whether a catalog run supports a reference call under the
+// query's depth gate.
+//
+// THE RUN IS GATED, NOT THE SITE. A store keeps no depth for a reference
+// genotype; what it has is the run's floor, the shallowest site inside it. So a
+// gate inside a depth band can refuse a run whose floor is below the gate even at
+// a site that was deeper -- the answer is a subset of what the source VCF would
+// give, never a superset. On a band boundary, or at or below the conversion
+// --min-dp, no run straddles the gate and the two agree exactly. A run that
+// fails is not_assayed rather than uncertain: there is no observation good
+// enough to draw on, which is different from a below-gate ALT call.
+func (s *ParquetVolume) runAdmits(r CalledSiteRun, g Gate) bool {
+	return g.MinDP <= 0 || s.runFloor(r) >= g.MinDP
 }
 
 // runsFor loads the called-site runs for the named samples in one pass.
 //
 // The query only prunes row groups here; runs surviving that are kept whatever
 // their extent, since a run beginning before a span may still reach into it.
+//
+// Runs the query's gate refuses are dropped here, so covers answers "a run that
+// supports a reference call" rather than merely "a run". Each kept run's MinDP is
+// set to its floor, so the reference call synthesized from it carries the depth
+// the gate was judged on.
 func (s *ParquetVolume) runsFor(samples []string, p *plan) (runsBySample, error) {
 	want := make(map[string]bool, len(samples))
 	for _, name := range samples {
@@ -2026,9 +2074,10 @@ func (s *ParquetVolume) runsFor(samples []string, p *plan) (runsBySample, error)
 	}
 	out := runsBySample{}
 	err := scanParquetPruned(s.catalogRuns, runScanFilter(p.q), func(r CalledSiteRun) bool {
-		if !want[r.SampleID] {
+		if !want[r.SampleID] || !s.runAdmits(r, p.q.Gate) {
 			return true
 		}
+		r.MinDP = s.runFloor(r)
 		if out[r.SampleID] == nil {
 			out[r.SampleID] = map[string][]CalledSiteRun{}
 		}

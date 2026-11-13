@@ -2,6 +2,7 @@ package varstore
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -284,12 +285,75 @@ func (r InfoRow) value(column string) (parquet.Value, bool) {
 // differently do not mean the same thing by a run and a consumer comparing
 // their MinDP values across parts needs to know.
 
-// DefaultDepthBands are the boundaries a conversion uses unless told otherwise.
+// DefaultDepthRatio is the ratio between successive depth bands a conversion
+// uses unless given an explicit list.
 //
-// 10/20/50 spans the range that actually changes an answer: below 10 nothing is
-// callable under the usual gate, 20 is comfortable for a het, and past 50 the
-// extra depth stops changing what anyone would believe.
-var DefaultDepthBands = []int32{10, 20, 50}
+// WHY GEOMETRIC. A band boundary is a query gate the store answers exactly: a
+// run never straddles one, so a gate set on a boundary admits or refuses each
+// run whole. A gate strictly inside a band is answered conservatively -- a run
+// whose floor sits below the gate is refused even where the site the query asks
+// about was deeper -- and the loss is bounded by the next boundary up. Spacing
+// boundaries by a fixed ratio makes that bound one sentence, at every depth:
+// the store never withholds a reference call at a site whose depth is at least
+// ratio x the gate.
+//
+// The cost of a boundary is the runs it breaks, which happens wherever a
+// sample's depth crosses it between consecutive sites. Depth noise grows with
+// depth, so geometric spacing keeps the crossing rate roughly even across the
+// range rather than piling boundaries up where coverage is high.
+const DefaultDepthRatio = 1.5
+
+// MaxDepthBand caps a generated band list. Boundaries above any real depth are
+// free -- nothing crosses them -- so the cap only bounds the list's length.
+const MaxDepthBand int32 = 1000
+
+// GeometricDepthBands returns boundaries floor(start * ratio^k), strictly
+// increasing and not above max. start is the conversion's --min-dp: below it
+// nothing is callable, so a boundary there would never break a run.
+//
+// The list is recorded in the manifest as generated, never regenerated on read,
+// so a reader does not depend on this function's floating-point behaviour
+// staying the same.
+func GeometricDepthBands(start int32, ratio float64, max int32) ([]int32, error) {
+	if start < 1 {
+		return nil, fmt.Errorf("depth bands must start at 1 or more, got %d", start)
+	}
+	if !(ratio > 1) || math.IsInf(ratio, 0) {
+		return nil, fmt.Errorf("depth ratio must be greater than 1, got %v", ratio)
+	}
+	if max < start {
+		return nil, fmt.Errorf("depth band cap %d is below the starting depth %d", max, start)
+	}
+	bands := []int32{start}
+	for k := 1; ; k++ {
+		v := math.Floor(float64(start) * math.Pow(ratio, float64(k)))
+		if v > float64(max) {
+			break
+		}
+		b := int32(v)
+		// A ratio close to 1 at a low start floors to the same integer more
+		// than once; a repeated boundary would mean nothing.
+		if b > bands[len(bands)-1] {
+			bands = append(bands, b)
+		}
+	}
+	return bands, nil
+}
+
+// ValidateDepthBands checks an explicit, caller-supplied band list. Boundaries
+// must be positive and strictly increasing: a repeat or a reversal would make
+// "the band a depth falls in" ambiguous.
+func ValidateDepthBands(bands []int32) error {
+	for i, b := range bands {
+		if b < 1 {
+			return fmt.Errorf("depth band %d is not positive", b)
+		}
+		if i > 0 && b <= bands[i-1] {
+			return fmt.Errorf("depth bands must be strictly increasing; %d follows %d", b, bands[i-1])
+		}
+	}
+	return nil
+}
 
 // DepthBand returns the index of the band a depth falls in, or -1 when bands
 // are not in use. Depths below the first boundary share band 0 with it, since
@@ -298,11 +362,32 @@ func DepthBand(bands []int32, dp int32) int {
 	if len(bands) == 0 {
 		return -1
 	}
-	band := 0
-	for i, b := range bands {
-		if dp >= b {
-			band = i
-		}
+	// The first boundary strictly above dp; the band is the one before it.
+	i := sort.Search(len(bands), func(i int) bool { return bands[i] > dp })
+	if i == 0 {
+		return 0
 	}
-	return band
+	return i - 1
+}
+
+// BandContaining returns the boundaries either side of a gate that falls
+// strictly inside a band -- lo < gate < hi -- and ok=false when the gate sits on
+// a boundary, below the first, or bands are not in use. hi is 0 when the gate is
+// above the last boundary, where the band has no upper edge.
+//
+// It is what a query reports when its answer is a conservative subset rather
+// than exact: reference calls are guaranteed only at sites with depth >= hi.
+func BandContaining(bands []int32, gate int32) (lo, hi int32, ok bool) {
+	if len(bands) == 0 || gate <= bands[0] {
+		return 0, 0, false
+	}
+	i := DepthBand(bands, gate)
+	if bands[i] == gate {
+		return 0, 0, false
+	}
+	lo = bands[i]
+	if i+1 < len(bands) {
+		hi = bands[i+1]
+	}
+	return lo, hi, true
 }
