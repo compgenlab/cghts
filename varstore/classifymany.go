@@ -152,6 +152,11 @@ func (s *ParquetVolume) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleSt
 		errs[2] = scanShardsParallel(s.catalogRuns, runScanFilter(q), workers,
 			func() map[Locus]map[string]bool { return map[Locus]map[string]bool{} },
 			func(acc map[Locus]map[string]bool, r CalledSiteRun) bool {
+				// A run the gate refuses supports no reference call, so it is
+				// not recorded at all: the sample stays not-assayed here.
+				if !s.runAdmits(r, g) {
+					return true
+				}
 				for _, l := range byChrom[CanonKey(r.Chrom)] {
 					if l.Pos < r.Start || l.Pos > r.End {
 						continue

@@ -86,6 +86,15 @@ type ManifestParams struct {
 	// has no other way to find out.
 	DepthBands []int32 `json:"depth_bands,omitempty"`
 
+	// DepthRatio is the ratio DepthBands were generated from, or zero when the
+	// caller supplied the list directly.
+	//
+	// Informational only. DepthBands is what every reader and every agreement
+	// check uses, recorded as generated, so nothing depends on regenerating the
+	// list from this. It exists so a summary can say how the bands were chosen
+	// -- a ratio carries a one-line guarantee that an arbitrary list does not.
+	DepthRatio float64 `json:"depth_ratio,omitempty"`
+
 	// MaxGap is the largest uncovered stretch a reference block was permitted to
 	// span, when this store carries one. Zero means the blocks are the source's
 	// own, unmerged -- or that there are none.
