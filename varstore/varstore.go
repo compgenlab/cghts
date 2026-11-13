@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -82,6 +83,14 @@ type StoreManifest struct {
 	Params ManifestParams `json:"params"`
 
 	Volumes []VolumeInfo `json:"volumes"`
+
+	// RefBlockSamples are the samples whose gVCF fragments were attached, when
+	// every volume records the same list -- which an attach run always writes.
+	// When they differ (a replace that died partway, or a blocks-only volume made
+	// by a later replace) this is nil and each VolumeInfo carries its own, so the
+	// disagreement is visible rather than averaged away. Nil also when no volume
+	// recorded a list. See VolumeManifest.RefBlockSamples.
+	RefBlockSamples *[]string `json:"ref_block_samples,omitempty"`
 }
 
 // VolumeInfo is one volume of an archive.
@@ -98,6 +107,10 @@ type VolumeInfo struct {
 
 	Sites int64 `json:"sites"`
 	Calls int64 `json:"calls"`
+
+	// RefBlockSamples is this volume's own VolumeManifest.RefBlockSamples,
+	// recorded only when the volumes disagree; see StoreManifest.RefBlockSamples.
+	RefBlockSamples *[]string `json:"ref_block_samples,omitempty"`
 }
 
 // VarStore reads a collection of volumes as one.
@@ -194,6 +207,17 @@ func (s *VarStore) HasRefBlocks() bool { return s.man.Params.RefBlocks }
 // MaxGap is the largest uncovered stretch this archive's reference blocks were
 // permitted to span.
 func (s *VarStore) MaxGap() int32 { return s.man.Params.MaxGap }
+
+// RefBlockSamples returns the samples whose gVCF fragments were attached, and
+// whether that is known for the whole store. It is not known when the store has
+// no ref_blocks, when they were attached before the list was recorded, or when
+// the volumes disagree -- StoreManifest().Volumes then carries each list.
+func (s *VarStore) RefBlockSamples() ([]string, bool) {
+	if s.man.RefBlockSamples == nil {
+		return nil, false
+	}
+	return *s.man.RefBlockSamples, true
+}
 
 // SitesInfo walks every volume's catalog, yielding each site's stated
 // provenance. Volumes are visited in the order they were declared, which is the
@@ -482,12 +506,34 @@ func BuildStore(ctx context.Context, base string, volumes []string, program, com
 		if sm != nil {
 			sites, calls = sm.Counts.Sites, sm.Counts.Calls
 		}
-		man.Volumes = append(man.Volumes, VolumeInfo{
-			Name: locator, Chroms: chroms, Sites: sites, Calls: calls,
-		})
+		info := VolumeInfo{Name: locator, Chroms: chroms, Sites: sites, Calls: calls}
+		if sm != nil {
+			info.RefBlockSamples = sm.RefBlockSamples
+		}
+		man.Volumes = append(man.Volumes, info)
 		st.Close()
 	}
+	hoistRefBlockSamples(&man)
 	return &man, nil
+}
+
+// hoistRefBlockSamples states the attached-sample list once, at the archive,
+// when every volume agrees on it, and otherwise leaves each volume's own list in
+// place. Ten thousand names repeated per volume would be most of the manifest.
+func hoistRefBlockSamples(man *StoreManifest) {
+	first := man.Volumes[0].RefBlockSamples
+	if first == nil {
+		return
+	}
+	for _, v := range man.Volumes[1:] {
+		if v.RefBlockSamples == nil || !slices.Equal(*v.RefBlockSamples, *first) {
+			return
+		}
+	}
+	man.RefBlockSamples = first
+	for i := range man.Volumes {
+		man.Volumes[i].RefBlockSamples = nil
+	}
 }
 
 func agreeWith(man StoreManifest, locator string, samples []string, sm *VolumeManifest) error {
