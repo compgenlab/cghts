@@ -98,7 +98,7 @@ func TestAStoreCanBeWrittenWithoutAFilesystem(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"calls.parquet", "manifest.json.gz", "regions.parquet", "sites.parquet"}
+	want := []string{"calls.parquet", "catalog.parquet", "catalog_runs.parquet", "manifest.json.gz"}
 	if got := sink.names(); !equal(got, want) {
 		t.Errorf("wrote %v, want %v", got, want)
 	}
@@ -221,7 +221,7 @@ func TestASingleSurvivingTableIsEnoughToStop(t *testing.T) {
 	if err := w.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []string{"calls.parquet", "regions.parquet", VolumeManifestFile} {
+	for _, n := range []string{"calls.parquet", "catalog_runs.parquet", VolumeManifestFile} {
 		if err := sink.Remove(n); err != nil {
 			t.Fatal(err)
 		}
@@ -231,7 +231,7 @@ func TestASingleSurvivingTableIsEnoughToStop(t *testing.T) {
 	if err == nil {
 		t.Fatal("a lone surviving table was not enough to stop an overwrite")
 	}
-	if !strings.Contains(err.Error(), "sites.parquet") {
+	if !strings.Contains(err.Error(), "catalog.parquet") {
 		t.Errorf("the refusal does not name the survivor: %v", err)
 	}
 }

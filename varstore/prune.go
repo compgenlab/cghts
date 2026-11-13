@@ -9,7 +9,7 @@ import (
 )
 
 // Row-group pruning. Parquet records min/max statistics per column per row
-// group, and vcf-toparquet writes rows in VCF order, which is coordinate
+// group, and vcf-tovarstore writes rows in VCF order, which is coordinate
 // sorted -- so those ranges are already tight and non-overlapping. Reading them
 // turns a whole-file scan into a scan of the few groups that could match.
 //
@@ -151,7 +151,7 @@ func spanFilter(s *Span) rowGroupFilter {
 		// still overlap it, so a group whose maximum pos sits below the span would
 		// be wrongly skipped. Bound it by the widest reference end in the group
 		// instead. ref_end is unsorted, so it can only bound this direction -- the
-		// same asymmetry spanRunFilter documents for the regions file. A store
+		// same asymmetry spanRunFilter documents for the catalog_runs table. A store
 		// written before the column existed has no statistics for it, and then
 		// there is no sound lower bound at all: keep the group.
 		if _, hi, ok := colBounds(rg, "ref_end"); ok {
@@ -219,7 +219,7 @@ func spanRunFilter(s *Span) rowGroupFilter {
 }
 
 // callsFilter turns a query's site axis into a row-group predicate for the calls
-// and sites files, which share a (chrom, pos) layout.
+// and catalog tables, which share a (chrom, pos) layout.
 //
 // Sample selection deliberately does not participate, and should not be added:
 // every sample appears in nearly every row group, so the sample_id bloom filter
@@ -280,7 +280,7 @@ func callsRowGroups(q Query) rowGroupFilter {
 	return unionFilter(q)
 }
 
-// runScanFilter prunes the regions file, whose position column is "start" rather
+// runScanFilter prunes the catalog_runs table, whose position column is "start" rather
 // than "pos" and whose "end" is unsorted -- so only a lower bound on start is
 // usable, and with several selectors there is little left to prune on.
 func runScanFilter(q Query) scanFilter {

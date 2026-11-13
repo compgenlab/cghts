@@ -86,7 +86,7 @@ type ManifestParams struct {
 	// has no other way to find out.
 	DepthBands []int32 `json:"depth_bands,omitempty"`
 
-	// MaxGap is the largest uncovered stretch a coverage block was permitted to
+	// MaxGap is the largest uncovered stretch a reference block was permitted to
 	// span, when this store carries one. Zero means the blocks are the source's
 	// own, unmerged -- or that there are none.
 	//
@@ -97,20 +97,20 @@ type ManifestParams struct {
 	// a roll-up spanning both has no other way to see.
 	MaxGap int32 `json:"max_gap,omitempty"`
 
-	// Coverage records whether this store carries genomic block spans, so a
+	// RefBlocks records whether this store carries genomic block spans, so a
 	// reader knows whether it can answer OFF the sites catalog without opening
 	// the table to find out. Parallel to NoCallable, and for the same reason: it
 	// is a claim about what the store can answer rather than about how it is
 	// encoded, and an archive must be able to state it for all its volumes at
 	// once.
-	Coverage bool `json:"coverage,omitempty"`
+	RefBlocks bool `json:"ref_blocks,omitempty"`
 
 	// Format are the FORMAT fields captured onto the ALT calls, if any. The
 	// same reasoning as Info: absence and a zero read alike from a typed
 	// reader, and only this can tell them apart.
 	Format []FormatField `json:"format,omitempty"`
 
-	// Info are the INFO fields captured into sites.parquet, if any.
+	// Info are the INFO fields captured into catalog.parquet, if any.
 	//
 	// THIS IS THE ONLY PLACE ABSENCE IS ANSWERABLE. A typed reader gets a zero
 	// both for a column that is not in the file and for one holding zero, and
@@ -123,10 +123,10 @@ type ManifestParams struct {
 
 // ManifestCounts are store-wide totals.
 type ManifestCounts struct {
-	Samples int   `json:"samples"`
-	Calls   int64 `json:"calls"`
-	Sites   int64 `json:"sites"`
-	Regions int64 `json:"regions"`
+	Samples     int   `json:"samples"`
+	Calls       int64 `json:"calls"`
+	Sites       int64 `json:"sites"`
+	CatalogRuns int64 `json:"catalog_runs"`
 }
 
 // TableInfo is one table's size on disk, as written.
@@ -134,7 +134,7 @@ type ManifestCounts struct {
 // Rows is checked against the table's own parquet footer at open. That is the
 // check which catches a table that is present and well-formed but does not
 // belong to this store -- one copied in from another conversion, say -- which
-// nothing else can see, since sites and regions carry no metadata of their own.
+// nothing else can see, since catalog and catalog_runs carry no metadata of their own.
 type TableInfo struct {
 	Rows  int64 `json:"rows"`
 	Bytes int64 `json:"bytes"`
@@ -155,7 +155,7 @@ type TableInfo struct {
 
 // ShardInfo is one coordinate range of a split table.
 //
-// Shards are ALIGNED ACROSS MEMBERS: shard k of calls, sites and regions cover
+// Shards are ALIGNED ACROSS MEMBERS: shard k of calls, catalog and catalog_runs cover
 // the same interval, so a locus query reads the k'th of each and never has to
 // reconcile two different partitionings. A shard never spans chromosomes, which
 // is what lets First and Last be compared without a chromosome check.
@@ -166,7 +166,7 @@ type ShardInfo struct {
 
 	// First and Last bound the SITE coordinates this shard covers, inclusive.
 	//
-	// For regions the bound is on the interval, not on any single run: a run is
+	// For catalog_runs the bound is on the interval, not on any single run: a run is
 	// broken at shard boundaries when it is written, so every run lies wholly
 	// inside one shard. That is what makes a shard answerable on its own --
 	// without it, a query would have to read every earlier shard in case a run

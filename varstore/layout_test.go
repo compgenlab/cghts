@@ -15,8 +15,8 @@ func TestTrimStoreSuffixSpellings(t *testing.T) {
 		{"cohort/", "cohort"},
 		{"cohort//", "cohort"},
 		{"cohort/calls.parquet", "cohort"},
-		{"cohort/sites.parquet", "cohort"},
-		{"cohort/regions.parquet", "cohort"},
+		{"cohort/catalog.parquet", "cohort"},
+		{"cohort/catalog_runs.parquet", "cohort"},
 		{"/data/stores/cohort", "/data/stores/cohort"},
 		{"/data/stores/cohort/", "/data/stores/cohort"},
 		{"/data/stores/cohort/calls.parquet", "/data/stores/cohort"},
@@ -28,7 +28,7 @@ func TestTrimStoreSuffixSpellings(t *testing.T) {
 		{"s3://bucket/cohort", "s3://bucket/cohort"},
 		{"s3://bucket/cohort/", "s3://bucket/cohort"},
 		{"s3://bucket/cohort/calls.parquet", "s3://bucket/cohort"},
-		{"https://host/d/cohort/regions.parquet", "https://host/d/cohort"},
+		{"https://host/d/cohort/catalog_runs.parquet", "https://host/d/cohort"},
 
 		// The filesystem root is a directory name, not a decorated empty one.
 		{"/", "/"},
@@ -66,7 +66,7 @@ func TestStoreOpensUnderEverySpelling(t *testing.T) {
 	}
 
 	want := -1
-	for _, spelling := range []string{base, base + "/", CallsPath(base), SitesPath(base)} {
+	for _, spelling := range []string{base, base + "/", CallsPath(base), CatalogPath(base)} {
 		s, err := OpenParquet(spelling)
 		if err != nil {
 			t.Fatalf("OpenParquet(%q): %v", spelling, err)

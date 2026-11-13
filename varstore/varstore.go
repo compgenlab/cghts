@@ -190,11 +190,11 @@ func (s *VarStore) FormatFields() []FormatField { return s.man.Params.Format }
 // SpanSemantics reports what this archive's run intervals may claim.
 func (s *VarStore) SpanSemantics() SpanSemantics { return s.man.Params.SpanSemantics }
 
-// HasCoverage reports whether this archive carries genomic block spans, and so
+// HasRefBlocks reports whether this archive carries genomic block spans, and so
 // whether it can answer about positions absent from the sites catalog.
-func (s *VarStore) HasCoverage() bool { return s.man.Params.Coverage }
+func (s *VarStore) HasRefBlocks() bool { return s.man.Params.RefBlocks }
 
-// MaxGap is the largest uncovered stretch this archive's coverage blocks were
+// MaxGap is the largest uncovered stretch this archive's reference blocks were
 // permitted to span.
 func (s *VarStore) MaxGap() int32 { return s.man.Params.MaxGap }
 
@@ -322,12 +322,12 @@ func (s *VarStore) agrees(m VolumeInfo, st *ParquetVolume) error {
 					"a site as unmeasured only because nobody asked it that question",
 				m.Name, infoNames(mm.Params.Info), infoNames(s.man.Params.Info))
 		}
-		if mm.Params.Coverage != s.man.Params.Coverage {
+		if mm.Params.RefBlocks != s.man.Params.RefBlocks {
 			return fmt.Errorf(
 				"volume %s %s coverage blocks but the store declares %s; a partly covered "+
 					"archive would answer off-catalog for some chromosomes and not others, "+
 					"which moves a denominator by which chromosome was asked about",
-				m.Name, hasWord(mm.Params.Coverage), hasWord(s.man.Params.Coverage))
+				m.Name, hasWord(mm.Params.RefBlocks), hasWord(s.man.Params.RefBlocks))
 		}
 		if !sameBands(mm.Params.DepthBands, s.man.Params.DepthBands) {
 			return fmt.Errorf(
