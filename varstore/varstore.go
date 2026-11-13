@@ -187,9 +187,6 @@ func (s *VarStore) InfoFields() []InfoField { return s.man.Params.Info }
 // FormatFields reports the FORMAT fields captured onto the calls.
 func (s *VarStore) FormatFields() []FormatField { return s.man.Params.Format }
 
-// SpanSemantics reports what this archive's run intervals may claim.
-func (s *VarStore) SpanSemantics() SpanSemantics { return s.man.Params.SpanSemantics }
-
 // HasRefBlocks reports whether this archive carries genomic block spans, and so
 // whether it can answer about positions absent from the sites catalog.
 func (s *VarStore) HasRefBlocks() bool { return s.man.Params.RefBlocks }

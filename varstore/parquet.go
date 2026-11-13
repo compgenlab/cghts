@@ -25,13 +25,12 @@ import (
 // mentions carriers, so a sample carrying nothing anywhere would otherwise be
 // invisible and get reported as not-assayed everywhere.
 const (
-	MetaSamples = "cgkit.samples"        // newline-separated sample ids, source order
-	MetaMinDP   = "cgkit.min_dp"         // callable threshold used at conversion
-	MetaProgram = "cgkit.program"        // cgkit version
-	MetaCommand = "cgkit.command"        // full command line
-	MetaSource  = "cgkit.source"         // input filename
-	MetaNoCall  = "cgkit.nocallable"     // "1" when catalog_runs is absent by request
-	MetaSpans   = "cgkit.span_semantics" // see SpanSemantics
+	MetaSamples = "cgkit.samples"    // newline-separated sample ids, source order
+	MetaMinDP   = "cgkit.min_dp"     // callable threshold used at conversion
+	MetaProgram = "cgkit.program"    // cgkit version
+	MetaCommand = "cgkit.command"    // full command line
+	MetaSource  = "cgkit.source"     // input filename
+	MetaNoCall  = "cgkit.nocallable" // "1" when catalog_runs is absent by request
 
 	// MetaContigs holds the source's ##contig header lines verbatim, newline
 	// separated. Kept because a store is expected to be exported back to VCF, and
@@ -171,22 +170,6 @@ func validateMeta(m map[string]string) error {
 		"lowercase letters, digits, underscore and hyphen", strings.Join(bad, ", "))
 }
 
-// SpanSemantics records what the intervals in the catalog_runs table are entitled to
-// claim, which depends entirely on what the source format asserted.
-type SpanSemantics string
-
-const (
-	// SpansSites means the intervals only mark catalog sites at which a sample
-	// was called. Nothing is claimed about the bases in between. This is all a
-	// plain VCF supports, and it confines queries to the sites catalog.
-	SpansSites SpanSemantics = "sites"
-
-	// SpansBlocks means the intervals came from gVCF reference blocks, which
-	// are positive statements about whole spans. Only such a store may answer
-	// for positions absent from the catalog. Not yet produced by any converter.
-	SpansBlocks SpanSemantics = "blocks"
-)
-
 // CodecFor maps a --compression flag value to a parquet codec.
 func CodecFor(name string) (compress.Codec, error) {
 	switch strings.ToLower(name) {
@@ -284,10 +267,6 @@ type WriterOpts struct {
 	// the rest.
 	Contigs []string
 
-	// Spans declares what the run intervals may claim. Defaults to SpansSites,
-	// which is all a plain VCF can support.
-	Spans SpanSemantics
-
 	// Meta is caller-supplied metadata describing what the store *is*, as
 	// opposed to how it was built: see ReservedMetaKeys for the keys with an
 	// agreed meaning. The map is open, so a caller may record anything; keys are
@@ -337,6 +316,7 @@ type Writer struct {
 	shardLast  int32
 	shardSites int64
 	shardRows  map[string]int64
+	roster     map[string]bool // built on the first WriteRefBlock
 	shards     map[string][]ShardInfo
 
 	// Backing storage for captured values, one slot per buffered row per field.
@@ -452,9 +432,6 @@ func NewWriter(base string, o WriterOpts) (*Writer, error) {
 	if o.RowGroupSize <= 0 {
 		o.RowGroupSize = 250_000
 	}
-	if o.Spans == "" {
-		o.Spans = SpansSites
-	}
 	sink := o.Sink
 	if sink == nil {
 		var err error
@@ -548,7 +525,6 @@ func (w *Writer) openShard() error {
 	if len(o.Contigs) > 0 {
 		w.setCallMeta(MetaContigs, strings.Join(o.Contigs, "\n"))
 	}
-	w.setCallMeta(MetaSpans, string(o.Spans))
 	for _, k := range sortedKeys(o.Meta) {
 		w.setCallMeta(MetaPrefix+k, o.Meta[k])
 	}
@@ -745,16 +721,15 @@ func (w *Writer) manifest() (VolumeManifest, error) {
 		Sources:       w.opts.Sources,
 		Meta:          copyMeta(w.opts.Meta),
 		Params: ManifestParams{
-			MinDP:         w.opts.MinDP,
-			NoCallable:    w.opts.NoCallable,
-			RowGroupSize:  w.opts.RowGroupSize,
-			SpanSemantics: w.opts.Spans,
-			DepthBands:    w.opts.DepthBands,
-			DepthRatio:    w.opts.DepthRatio,
-			MaxGap:        w.opts.MaxGap,
-			RefBlocks:     w.opts.RefBlocks,
-			Info:          w.opts.Info,
-			Format:        w.opts.Format,
+			MinDP:        w.opts.MinDP,
+			NoCallable:   w.opts.NoCallable,
+			RowGroupSize: w.opts.RowGroupSize,
+			DepthBands:   w.opts.DepthBands,
+			DepthRatio:   w.opts.DepthRatio,
+			MaxGap:       w.opts.MaxGap,
+			RefBlocks:    w.opts.RefBlocks,
+			Info:         w.opts.Info,
+			Format:       w.opts.Format,
 		},
 		Samples: w.opts.Samples,
 		Counts: ManifestCounts{
@@ -1166,6 +1141,18 @@ func (w *Writer) WriteRefBlock(b RefBlock) error {
 		return fmt.Errorf("coverage block %s %s:%d-%d ends before it starts",
 			b.SampleID, b.Chrom, b.Start, b.End)
 	}
+	// A block for a sample the store does not hold would be unreachable -- a
+	// reader emits only roster samples -- and is almost certainly a fragment
+	// from another cohort. Refused here, since no reader checks it later.
+	if w.roster == nil {
+		w.roster = make(map[string]bool, len(w.opts.Samples))
+		for _, name := range w.opts.Samples {
+			w.roster[name] = true
+		}
+	}
+	if !w.roster[b.SampleID] {
+		return fmt.Errorf("reference block for %s, who is not among this store's samples", b.SampleID)
+	}
 	w.shardRows[RefBlocksTable]++
 	w.refBlockBuf = append(w.refBlockBuf, b)
 	w.NRefBlocks++
@@ -1287,7 +1274,6 @@ type ParquetVolume struct {
 	// "nobody said". Only the first may be reported as an answer.
 	hasRefBlocks bool
 	noCallable   bool
-	spans        SpanSemantics
 	minDP        int32
 	meta         map[string]string
 	manifest     *VolumeManifest
@@ -1315,11 +1301,6 @@ func (s *ParquetVolume) RefBlocks(fn func(RefBlock) bool) error {
 	return scanParquet(s.refBlocks, fn)
 }
 
-// SpanSemantics reports what this store's run intervals may claim. A store
-// written from a plain VCF reports SpansSites, confining answers to the sites
-// catalog.
-func (s *ParquetVolume) SpanSemantics() SpanSemantics { return s.spans }
-
 // Provenance is what a store records about how it was built. It matters at
 // query time chiefly because of MinDP: a store baked that threshold into its
 // called-site runs, so a query gating at a different value is not asking the
@@ -1330,7 +1311,13 @@ type Provenance struct {
 	Command    string
 	MinDP      int32
 	NoCallable bool
-	Spans      SpanSemantics
+
+	// RefBlocks reports whether the store carries reference blocks, and so can
+	// answer at positions off its catalog. It replaces a "span semantics" label
+	// that described the catalog runs: whether off-catalog positions are
+	// answerable is a property of which tables exist, not of how the runs are
+	// read, and the manifest is what says which tables exist.
+	RefBlocks bool
 
 	NumSamples int
 
@@ -1349,7 +1336,7 @@ func (s *ParquetVolume) Provenance() Provenance {
 		Command:    s.meta[MetaCommand],
 		MinDP:      s.minDP,
 		NoCallable: s.noCallable,
-		Spans:      s.spans,
+		RefBlocks:  s.hasRefBlocks,
 		NumSamples: len(s.samples),
 		Meta:       s.metaFields(),
 	}
@@ -1430,10 +1417,6 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetVolume, error
 	if v, ok := pf.Lookup(MetaNoCall); ok && v == "1" {
 		s.noCallable = true
 	}
-	s.spans = SpansSites // the conservative reading for stores predating the key
-	if v, ok := pf.Lookup(MetaSpans); ok && v != "" {
-		s.spans = SpanSemantics(v)
-	}
 	// Whether this store can answer overlap queries is read from the schema rather
 	// than from a metadata key: the column either exists or it does not, and a key
 	// could disagree with the data. Absent means the store predates ref_end, so
@@ -1490,7 +1473,7 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetVolume, error
 	s.refBlocks, s.hasRefBlocks = coverage, hasRefBlocks
 	s.manifest = man
 
-	if err := verifyAgainstManifest(man, pf, calls, sites, regions); err != nil {
+	if err := verifyAgainstManifest(man, pf, calls, sites, regions, coverage); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("%s: %w", base, err)
 	}
@@ -1553,7 +1536,13 @@ func requireManifest(ctx context.Context, base string) (*VolumeManifest, error) 
 // because catalog and catalog_runs carry no metadata of their own.
 //
 // It costs nothing: every count here is footer metadata that was already read.
-func verifyAgainstManifest(man *VolumeManifest, callsFile *parquet.File, calls, sites, regions *shardSet) error {
+//
+// ref_blocks is checked the same way when the manifest lists it. Its sample IDs
+// are NOT scanned against the roster here: that would read the whole table at
+// every open, the cost of a query paid before any query is asked. The roster is
+// enforced where blocks are written (WriteRefBlock, and attaching fragments), and
+// a reader emits only roster samples, so a stray ID could never surface anyway.
+func verifyAgainstManifest(man *VolumeManifest, callsFile *parquet.File, calls, sites, regions, refBlocks *shardSet) error {
 	type check struct {
 		name string
 		file *parquet.File
@@ -1567,6 +1556,7 @@ func verifyAgainstManifest(man *VolumeManifest, callsFile *parquet.File, calls, 
 		{CallsTable, callsFile, calls},
 		{CatalogTable, nil, sites},
 		{CatalogRunsTable, nil, regions},
+		{RefBlocksTable, nil, refBlocks},
 	} {
 		want, recorded := man.Tables[c.name]
 		if !recorded {
@@ -1834,12 +1824,14 @@ func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
 	}
 
 	var out []Call
+	inCatalog := map[Locus]bool{}
 	err = scanParquetPruned(s.sites, callsFilter(p.q), func(site Site) bool {
 		loc := site.Locus()
 		if !p.wantsSite(loc, site.RefEnd) {
 			return true
 		}
 		k := canonLocus(loc)
+		inCatalog[k] = true
 		// One pass over the roster, emitting each sample's ALT call or its reference
 		// call. Interleaved rather than ALT-block-then-reference-block, so rows are
 		// genuinely ordered by sample within a locus -- which is what the Calls
@@ -1903,22 +1895,135 @@ func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
 			out = append(out, calls...)
 		}
 	}
+
+	extra, err := s.offCatalogRefs(p, wanted, inCatalog)
+	if err != nil {
+		return nil, err
+	}
+	if len(extra) > 0 {
+		out = mergeStoreOrder(out, extra)
+	}
 	return out, nil
+}
+
+// offCatalogRefs answers the exact loci a query named that the catalog does not
+// hold, from the store's reference blocks.
+//
+// ONLY NAMED LOCI. A span is never enumerated off the catalog: a block answers
+// for every base it covers, so walking a region would emit one row per base per
+// sample -- the dense matrix the store exists not to be. A caller who wants to
+// know about a position names it.
+//
+// A requested locus here can have no ALT call (calls live only at catalog
+// sites), so a sample is either vouched for by a block or absent.
+func (s *ParquetVolume) offCatalogRefs(p *plan, wanted []string, inCatalog map[Locus]bool) ([]Call, error) {
+	if !s.hasRefBlocks {
+		return nil, nil
+	}
+	var off []Locus
+	seen := map[Locus]bool{}
+	for _, l := range p.q.Loci {
+		k := canonLocus(l)
+		if inCatalog[k] || seen[k] {
+			continue
+		}
+		seen[k] = true
+		off = append(off, l)
+	}
+	if len(off) == 0 {
+		return nil, nil
+	}
+	want := make(map[string]bool, len(wanted))
+	for _, name := range wanted {
+		want[name] = true
+	}
+	// The best floor per sample per locus: blocks for one sample do not
+	// overlap, but taking the maximum keeps the answer independent of that.
+	floor := map[Locus]map[string]int32{}
+	if err := scanParquetPruned(s.refBlocks, refBlockFilter(off), func(b RefBlock) bool {
+		if !want[b.SampleID] || !blockAdmits(b, p.q.Gate) {
+			return true
+		}
+		for _, l := range off {
+			if !SameChrom(b.Chrom, l.Chrom) || l.Pos < b.Start || l.Pos > b.End {
+				continue
+			}
+			if floor[l] == nil {
+				floor[l] = map[string]int32{}
+			}
+			if cur, ok := floor[l][b.SampleID]; !ok || b.MinDP > cur {
+				floor[l][b.SampleID] = b.MinDP
+			}
+		}
+		return true
+	}); err != nil {
+		return nil, err
+	}
+	var out []Call
+	for _, l := range off {
+		for _, name := range wanted { // roster order, as at a catalog site
+			if dp, ok := floor[l][name]; ok {
+				out = append(out, HomRefCall(name, l, dp))
+			}
+		}
+	}
+	return out, nil
+}
+
+// mergeStoreOrder places off-catalog rows among catalog rows by position.
+//
+// The catalog walk yields rows in the store's own contig order, which is not
+// lexicographic and cannot be recomputed from names -- so it is read off the
+// rows themselves: a chromosome ranks by where it first appears. A position no
+// catalog row shares a chromosome with goes after them all, in query order.
+func mergeStoreOrder(out, extra []Call) []Call {
+	rank := map[string]int{}
+	for _, c := range out {
+		if _, ok := rank[CanonKey(c.Chrom)]; !ok {
+			rank[CanonKey(c.Chrom)] = len(rank)
+		}
+	}
+	for _, c := range extra {
+		if _, ok := rank[CanonKey(c.Chrom)]; !ok {
+			rank[CanonKey(c.Chrom)] = len(rank)
+		}
+	}
+	all := append(out, extra...)
+	// Stable, so rows already in store order keep it, and an off-catalog row
+	// lands after any catalog row at an equal position.
+	sort.SliceStable(all, func(i, j int) bool {
+		a, b := rank[CanonKey(all[i].Chrom)], rank[CanonKey(all[j].Chrom)]
+		if a != b {
+			return a < b
+		}
+		return all[i].Pos < all[j].Pos
+	})
+	return all
 }
 
 // Classify resolves every sample at a locus.
 //
-// It refuses rather than guesses: without the sites catalog there is no way to
-// know the position was interrogated at all, and without run information no way
-// to know a silent sample was called there. Returning "non-carrier" in either
-// case would be a fabricated observation.
+// It refuses rather than guesses: without the catalog there is no way to know
+// the position was interrogated at all, and without catalog runs no way to know
+// a silent sample was called there. Returning "non-carrier" in either case
+// would be a fabricated observation.
 //
-// The sites catalog is a hard gate. For a store whose spans are SpansSites --
-// everything a plain VCF can produce -- a locus absent from the catalog is
-// StateNotAssayed for every sample, no matter that run intervals appear to
-// bracket it. Those intervals only mark catalog sites; the bases between them
-// were never reported, and treating a run as coverage would invent reference
-// observations. Only a gVCF-derived store (SpansBlocks) could answer here.
+// THE PRECEDENCE, which is load-bearing and lives in resolveState:
+//
+//  1. An ALT call at the locus: carrier, or uncertain if the gate refuses it.
+//  2. A catalog site: the catalog runs decide, and nothing else. A run that
+//     passes the gate is non-carrier; no such run is not assayed -- EVEN WHERE A
+//     REFERENCE BLOCK COVERS THE POSITION. In a joint-called source, "in the
+//     catalog but no run" means the caller declined to genotype the sample
+//     there (allele balance, assembly, mapping), and a block saying reads were
+//     present must not overrule that. Those disagreements cluster where calling
+//     is hard, so getting this backwards fabricates reference calls in exactly
+//     the worst places.
+//  3. Off the catalog, on a store carrying ref_blocks: a block covering the
+//     position at a depth the gate admits is non-carrier; otherwise not assayed.
+//  4. Off the catalog with no ref_blocks: not assayed for everyone. The runs are
+//     never consulted here -- they mark catalog sites, and the bases between
+//     them were never reported.
 func (s *ParquetVolume) Classify(l Locus, g Gate) ([]SampleState, error) {
 	if err := s.classifiable(); err != nil {
 		return nil, err
@@ -1929,13 +2034,13 @@ func (s *ParquetVolume) Classify(l Locus, g Gate) ([]SampleState, error) {
 	}
 
 	// Was this position interrogated at all? This is a hard gate rather than one
-	// input among several: if the source never reported the locus, the run
-	// intervals must not be consulted, so return before they are even opened.
+	// input among several: it decides which table may answer, so it is settled
+	// before either is opened.
 	interrogated, err := s.SiteKnown(l)
 	if err != nil {
 		return nil, err
 	}
-	if !interrogated && s.spans != SpansBlocks {
+	if !interrogated && !s.hasRefBlocks {
 		out := make([]SampleState, 0, len(samples))
 		for _, name := range samples {
 			out = append(out, SampleState{SampleID: name, State: StateNotAssayed})
@@ -1943,47 +2048,79 @@ func (s *ParquetVolume) Classify(l Locus, g Gate) ([]SampleState, error) {
 		return out, nil
 	}
 
+	// Calls exist only at catalog sites, so off the catalog there are none to
+	// find; the scan is skipped rather than relied on to come back empty.
 	calls := map[string]Call{}
-	if err := scanParquetPruned(s.calls, locusFilter(l), func(c Call) bool {
-		if SameLocus(c.Locus(), l) {
-			calls[c.SampleID] = c
+	if interrogated {
+		if err := scanParquetPruned(s.calls, locusFilter(l), func(c Call) bool {
+			if SameLocus(c.Locus(), l) {
+				calls[c.SampleID] = c
+			}
+			return true
+		}); err != nil {
+			return nil, err
 		}
-		return true
-	}); err != nil {
-		return nil, err
 	}
 
-	// Reached only for a locus in the catalog (or a block-semantics store), so a
-	// run bracketing the position genuinely means "called here".
-	called := map[string]bool{}
-	if err := scanParquetPruned(s.catalogRuns, coveringFilter(l.Chrom, l.Pos), func(r CalledSiteRun) bool {
-		if SameChrom(r.Chrom, l.Chrom) && l.Pos >= r.Start && l.Pos <= r.End && s.runAdmits(r, g) {
-			called[r.SampleID] = true
+	// Exactly one of the two reference sources is read, and which one is the
+	// catalog's decision -- never both, never a fallback from one to the other.
+	ref := map[string]bool{}
+	source := RefFromCatalog
+	if interrogated {
+		if err := scanParquetPruned(s.catalogRuns, coveringFilter(l.Chrom, l.Pos), func(r CalledSiteRun) bool {
+			if SameChrom(r.Chrom, l.Chrom) && l.Pos >= r.Start && l.Pos <= r.End && s.runAdmits(r, g) {
+				ref[r.SampleID] = true
+			}
+			return true
+		}); err != nil {
+			return nil, err
 		}
-		return true
-	}); err != nil {
-		return nil, err
+	} else {
+		source = RefFromBlock
+		if err := scanParquetPruned(s.refBlocks, refBlockFilter([]Locus{l}), func(b RefBlock) bool {
+			if SameChrom(b.Chrom, l.Chrom) && l.Pos >= b.Start && l.Pos <= b.End && blockAdmits(b, g) {
+				ref[b.SampleID] = true
+			}
+			return true
+		}); err != nil {
+			return nil, err
+		}
 	}
 
 	out := make([]SampleState, 0, len(samples))
 	for _, name := range samples {
-		st := SampleState{SampleID: name}
-		if c, ok := calls[name]; ok {
-			cc := c
-			st.Call = &cc
-			if g.Admits(c) {
-				st.State = StateCarrier
-			} else {
-				st.State = StateUncertain
-			}
-		} else if called[name] {
-			st.State = StateNonCarrier
-		} else {
-			st.State = StateNotAssayed
+		var c *Call
+		if x, ok := calls[name]; ok {
+			c = &x
 		}
-		out = append(out, st)
+		out = append(out, resolveState(name, c, ref[name], source, g))
 	}
 	return out, nil
+}
+
+// resolveState is the one decision every Parquet classification makes, given
+// what was found for a sample at a locus: its ALT call, if any, and whether the
+// reference source the catalog selected vouches for it.
+func resolveState(name string, c *Call, ref bool, source RefSource, g Gate) SampleState {
+	st := SampleState{SampleID: name}
+	switch {
+	case c != nil:
+		cc := *c
+		st.Call = &cc
+		if g.Admits(cc) {
+			st.State = StateCarrier
+		} else {
+			// An ALT call we do not believe. NOT a reference, and not an
+			// absence: we looked, and saw something we cannot vouch for.
+			st.State = StateUncertain
+		}
+	case ref:
+		st.State = StateNonCarrier
+		st.RefSource = source
+	default:
+		st.State = StateNotAssayed
+	}
+	return st
 }
 
 // classifiable reports whether the store carries the evidence needed to tell a

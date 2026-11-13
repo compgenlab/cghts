@@ -280,6 +280,36 @@ func callsRowGroups(q Query) rowGroupFilter {
 	return unionFilter(q)
 }
 
+// refBlockFilter prunes the ref_blocks table for a set of point lookups.
+//
+// SHARDS ARE NARROWED BY CHROMOSOME ONLY. Catalog-run shards are bounded by the
+// SITES they cover, and a reference block answers precisely where there is no
+// site -- so a position between one shard's last site and the next shard's first
+// lies in neither range, and Covers would skip the shard holding the block that
+// answers it. Row-group pruning on start does the rest within a chromosome.
+func refBlockFilter(loci []Locus) scanFilter {
+	chroms := map[string]bool{}
+	for _, l := range loci {
+		chroms[CanonKey(l.Chrom)] = true
+	}
+	rg := keepAll
+	if len(loci) == 1 {
+		rg = coveringRowGroups(loci[0].Chrom, loci[0].Pos)
+	}
+	return scanFilter{
+		shard:    func(si ShardInfo) bool { return chroms[CanonKey(si.Chrom)] },
+		rowGroup: rg,
+	}
+}
+
+// blockAdmits reports whether a reference block supports a reference call under
+// a depth gate. FAIL CLOSED: a block's MinDP is the whole of its claim, so zero
+// -- no depth vouched for -- passes no positive gate, where Gate.Admits would
+// wave an unknown depth through.
+func blockAdmits(b RefBlock, g Gate) bool {
+	return g.MinDP <= 0 || b.MinDP >= g.MinDP
+}
+
 // runScanFilter prunes the catalog_runs table, whose position column is "start" rather
 // than "pos" and whose "end" is unsorted -- so only a lower bound on start is
 // usable, and with several selectors there is little left to prune on.

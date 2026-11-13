@@ -72,10 +72,9 @@ type VolumeManifest struct {
 // ManifestParams records the conversion settings that change what the store
 // means, as opposed to how it is encoded.
 type ManifestParams struct {
-	MinDP         int32         `json:"min_dp"`
-	NoCallable    bool          `json:"no_callable"`
-	RowGroupSize  int64         `json:"row_group_size"`
-	SpanSemantics SpanSemantics `json:"span_semantics"`
+	MinDP        int32 `json:"min_dp"`
+	NoCallable   bool  `json:"no_callable"`
+	RowGroupSize int64 `json:"row_group_size"`
 
 	// DepthBands are the boundaries at which callable runs were broken, empty
 	// when they were not banded.

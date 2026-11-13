@@ -73,8 +73,8 @@ func TestManifestRecordsWhatWasWritten(t *testing.T) {
 	if got, want := len(m.Sources), 2; got != want {
 		t.Errorf("Sources has %d entries, want %d", got, want)
 	}
-	if m.Params.MinDP != 10 || m.Params.SpanSemantics != SpansSites {
-		t.Errorf("params = %+v, want min_dp 10 and sites semantics", m.Params)
+	if m.Params.MinDP != 10 || m.Params.RefBlocks {
+		t.Errorf("params = %+v, want min_dp 10 and no reference blocks", m.Params)
 	}
 
 	// The census is the field that can contradict the intent stamped at
