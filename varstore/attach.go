@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/parquet-go/parquet-go"
@@ -117,6 +118,11 @@ type AttachOpts struct {
 	// TempDir holds intermediate merge files; empty is the system default. Always
 	// local: intermediates are written and read once, and never belong remotely.
 	TempDir string
+	// ExtraChroms are chromosomes to take from the fragments beyond those the
+	// volume already holds. Each that gains a block is added to the volume's
+	// census, which is what lets a store route a query there. Set by
+	// AttachRefBlocksToStore; see it for why.
+	ExtraChroms []string
 }
 
 // AttachResult reports what an attach wrote.
@@ -230,7 +236,23 @@ func AttachRefBlocks(ctx context.Context, base string, frags []Fragment, opts At
 	out := &segmentWriter{sink: sink, gen: gen}
 	samples := map[string]bool{}
 
-	for _, chrom := range man.Chromosomes {
+	chroms := make([]string, 0, len(man.Chromosomes)+len(opts.ExtraChroms))
+	held := map[string]bool{}
+	for _, c := range man.Chromosomes {
+		chroms = append(chroms, c.Name)
+		held[CanonKey(c.Name)] = true
+	}
+	var added []string
+	for _, c := range opts.ExtraChroms {
+		if !held[CanonKey(c)] {
+			held[CanonKey(c)] = true
+			chroms = append(chroms, c)
+			added = append(added, c)
+		}
+	}
+
+	for _, name := range chroms {
+		chrom := ChromCensus{Name: name}
 		var inputs []blockSource
 		for _, f := range frags {
 			for _, c := range f.Meta.Chroms {
@@ -277,6 +299,23 @@ func AttachRefBlocks(ctx context.Context, base string, frags []Fragment, opts At
 	// The switch. Everything before this left the volume reading as it did.
 	old := man.Tables[RefBlocksTable]
 	man.Tables[RefBlocksTable] = TableInfo{Rows: out.rows, Bytes: out.bytes, Shards: out.shards}
+	// A chromosome taken in for its blocks joins the census, which records rows
+	// rather than intent: one that gained none stays out, since a census entry
+	// is what routes a query to this volume.
+	for _, name := range added {
+		var c *ChromCensus
+		for _, sh := range out.shards {
+			if !SameChrom(sh.Chrom, name) {
+				continue
+			}
+			if c == nil {
+				man.Chromosomes = append(man.Chromosomes, ChromCensus{Name: name, FirstPos: sh.First, LastPos: sh.Last})
+				c = &man.Chromosomes[len(man.Chromosomes)-1]
+			}
+			c.FirstPos = min(c.FirstPos, sh.First)
+			c.LastPos = max(c.LastPos, sh.Last)
+		}
+	}
 	man.Params.RefBlocks = true
 	man.Params.MaxGap = maxGap
 	if err := WriteManifestTo(sink, *man); err != nil {
@@ -647,4 +686,204 @@ func (w *segmentWriter) discard() {
 			_ = w.sink.Remove(name)
 		}
 	}
+}
+
+// StoreAttachResult reports an attach across a store.
+type StoreAttachResult struct {
+	Volumes map[string]*AttachResult
+	// Created are blocks-only volumes made for chromosomes no volume held.
+	Created []string
+}
+
+// AttachRefBlocksToStore attaches fragments to a store -- an archive of volumes
+// or a single volume -- so that EVERY chromosome a fragment has blocks on is
+// answerable, not only those with a catalog site.
+//
+// WHY THIS IS MORE THAN ATTACHING TO EACH VOLUME. A store routes a query by
+// chromosome to the one volume that holds it, and a volume holds the
+// chromosomes it has rows on -- until now, catalog sites. A chromosome with no
+// catalog site (chrM, unplaced contigs, chrY in a cohort of women) therefore had
+// no volume, and its blocks had nowhere to be read from: every query there came
+// back not assayed, however well covered it was. Putting every chromosome into
+// every volume is not the answer either -- each pVCF header declares every
+// contig, so each block would land in every volume and a locus would have as
+// many answers as there are volumes.
+//
+// So each such chromosome gets a home. On an archive it is a new BLOCKS-ONLY
+// volume -- the store's samples and settings, an empty catalog, and the
+// chromosome's blocks -- registered in the archive manifest, which is rewritten
+// last. On a single volume, the volume itself takes the chromosome. Either way
+// the chromosome joins a census, so it routes, and a query there is answered
+// from blocks like any other off-catalog position. A declared contig nobody has
+// a block on gets no volume: "no volume" and "nothing covered" both answer not
+// assayed.
+func AttachRefBlocksToStore(ctx context.Context, base string, frags []Fragment, opts AttachOpts, program, command string) (*StoreAttachResult, error) {
+	base = TrimStoreSuffix(base)
+	res := &StoreAttachResult{Volumes: map[string]*AttachResult{}}
+	fragChroms := fragmentChroms(frags)
+
+	if !IsStore(ctx, base) {
+		man, err := ReadVolumeManifestContext(ctx, base)
+		if err != nil {
+			return nil, err
+		}
+		o := opts
+		o.ExtraChroms = missingChroms(fragChroms, censusNames(man))
+		r, err := AttachRefBlocks(ctx, base, frags, o)
+		if err != nil {
+			return nil, err
+		}
+		res.Volumes[base] = r
+		return res, nil
+	}
+
+	smf, err := readStoreManifest(ctx, base)
+	if err != nil {
+		return nil, err
+	}
+	var names, held []string
+	for _, v := range smf.Volumes {
+		names = append(names, v.Name)
+		held = append(held, v.Chroms...)
+	}
+	orphans := missingChroms(fragChroms, held)
+
+	// Template for new volumes: the first volume's settings, which the archive
+	// already requires every volume to share.
+	var tmpl *VolumeManifest
+	if len(names) > 0 {
+		if tmpl, err = ReadVolumeManifestContext(ctx, volumeAt(base, names[0])); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, n := range names {
+		r, err := AttachRefBlocks(ctx, volumeAt(base, n), frags, opts)
+		if err != nil {
+			return nil, fmt.Errorf("volume %s: %w", n, err)
+		}
+		res.Volumes[n] = r
+	}
+	for _, chrom := range orphans {
+		if tmpl == nil {
+			break
+		}
+		name := volumeDirName(chrom)
+		loc := volumeAt(base, name)
+		if _, err := ReadVolumeManifestContext(ctx, loc); err == nil {
+			return nil, fmt.Errorf("%s already holds a volume named %s that the archive does not list; "+
+				"remove it or add it with BuildStore before attaching", base, name)
+		}
+		if err := writeEmptyVolume(loc, tmpl, program, command); err != nil {
+			return nil, fmt.Errorf("creating a blocks-only volume for %s: %w", chrom, err)
+		}
+		// A volume made now has no blocks to keep or replace: it is built.
+		r, err := AttachRefBlocks(ctx, loc, frags, AttachOpts{
+			Batch: opts.Batch, TempDir: opts.TempDir, ExtraChroms: []string{chrom},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("volume %s: %w", name, err)
+		}
+		res.Volumes[name] = r
+		res.Created = append(res.Created, name)
+		names = append(names, name)
+	}
+
+	// Last: the archive manifest, so the archive and its volumes agree that
+	// blocks are present, and so the new volumes are routed.
+	man, err := BuildStore(ctx, base, names, program, command)
+	if err != nil {
+		return nil, err
+	}
+	if err := WriteStoreManifest(base, *man); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func volumeAt(base, name string) string {
+	if isLocator(name) || strings.HasPrefix(name, "/") {
+		return name
+	}
+	return joinStore(base, name)
+}
+
+// isLocator reports whether a volume name is a locator in its own right.
+func isLocator(name string) bool { return strings.Contains(name, "://") }
+
+// volumeDirName turns a chromosome name into a directory name. Contig names may
+// hold characters a path should not ("HLA-A*01:01", "chrUn_KI270302v1").
+func volumeDirName(chrom string) string {
+	b := []byte(chrom)
+	for i, c := range b {
+		ok := c == '.' || c == '_' || c == '-' ||
+			(c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		if !ok {
+			b[i] = '_'
+		}
+	}
+	return string(b)
+}
+
+// writeEmptyVolume writes a volume with the template's samples and settings and
+// no rows -- what an archive requires of a volume, so that it agrees.
+func writeEmptyVolume(loc string, tmpl *VolumeManifest, program, command string) error {
+	w, err := NewWriter(loc, WriterOpts{
+		Samples:    tmpl.Samples,
+		MinDP:      tmpl.Params.MinDP,
+		NoCallable: tmpl.Params.NoCallable,
+		DepthBands: tmpl.Params.DepthBands,
+		DepthRatio: tmpl.Params.DepthRatio,
+		Info:       tmpl.Params.Info,
+		Format:     tmpl.Params.Format,
+		Meta:       tmpl.Meta,
+		Program:    program,
+		Command:    command,
+	})
+	if err != nil {
+		return err
+	}
+	if err := w.Finish(); err != nil {
+		w.Discard()
+		return err
+	}
+	return nil
+}
+
+// fragmentChroms is every chromosome any fragment has a block on, in the order
+// first seen, spelled as first seen.
+func fragmentChroms(frags []Fragment) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, f := range frags {
+		for _, c := range f.Meta.Chroms {
+			if c.Rows > 0 && !seen[CanonKey(c.Name)] {
+				seen[CanonKey(c.Name)] = true
+				out = append(out, c.Name)
+			}
+		}
+	}
+	return out
+}
+
+func censusNames(m *VolumeManifest) []string {
+	out := make([]string, 0, len(m.Chromosomes))
+	for _, c := range m.Chromosomes {
+		out = append(out, c.Name)
+	}
+	return out
+}
+
+func missingChroms(want, have []string) []string {
+	h := map[string]bool{}
+	for _, c := range have {
+		h[CanonKey(c)] = true
+	}
+	var out []string
+	for _, c := range want {
+		if !h[CanonKey(c)] {
+			out = append(out, c)
+		}
+	}
+	return out
 }

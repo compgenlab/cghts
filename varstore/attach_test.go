@@ -262,3 +262,103 @@ func TestAttachToAnUnshardedVolume(t *testing.T) {
 		t.Errorf("off-catalog 50000: %v", got["S1"])
 	}
 }
+
+func buildVolumeOn(t *testing.T, base, chrom string) {
+	t.Helper()
+	w, err := NewWriter(base, WriterOpts{Samples: []string{"S1", "S2"}, MinDP: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteSite(Site{Chrom: chrom, Pos: 1000, Ref: "G", Alt: "A", AN: 4, NCalled: 2}); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"S1", "S2"} {
+		if err := w.WriteRegion(CalledSiteRun{SampleID: s, Chrom: chrom, Start: 1000, End: 1000, NSites: 1, MinDP: 30}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func classifyStore(t *testing.T, s Store, chrom string, pos int32) map[string]State {
+	t.Helper()
+	states, err := s.Classify(Locus{Chrom: chrom, Pos: pos, Ref: "C", Alt: "T"}, Gate{MinDP: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return statesByName(states)
+}
+
+// A chromosome with no catalog site belonged to no volume, so its blocks had
+// nowhere to be read from and every query there was not assayed. On a single
+// volume, the volume now takes the chromosome.
+func TestAttachToAVolumeTakesChromosomesWithoutSites(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "vol")
+	buildVolumeOn(t, base, "chr1")
+	frags := loadFrags(t, buildFragment(t, "S1", 10, blk("chr1", 1, 900, 30), blk("chr2", 100, 200, 30)))
+	if _, err := AttachRefBlocksToStore(context.Background(), base, frags, AttachOpts{}, "test", ""); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenParquet(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got := classifyStore(t, s, "chr2", 150); got["S1"] != StateNonCarrier || got["S2"] != StateNotAssayed {
+		t.Errorf("chr2:150 on a volume whose catalog is chr1 only: %v", got)
+	}
+}
+
+// On an archive, a chromosome no volume holds gets a blocks-only volume of its
+// own, registered in the archive, so a query there is routed and answered.
+func TestAttachToAnArchiveCreatesBlocksOnlyVolumes(t *testing.T) {
+	ctx := context.Background()
+	base := filepath.Join(t.TempDir(), "cohort")
+	buildVolumeOn(t, filepath.Join(base, "chr1"), "chr1")
+	buildVolumeOn(t, filepath.Join(base, "chr2"), "chr2")
+	man, err := BuildStore(ctx, base, []string{"chr1", "chr2"}, "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteStoreManifest(base, *man); err != nil {
+		t.Fatal(err)
+	}
+
+	frags := loadFrags(t,
+		buildFragment(t, "S1", 10, blk("chr1", 1, 900, 30), blk("chr2", 1, 900, 30), blk("chrM", 1, 16000, 200)),
+		buildFragment(t, "S2", 10, blk("chrM", 1, 500, 150)),
+	)
+	res, err := AttachRefBlocksToStore(ctx, base, frags, AttachOpts{}, "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res.Created, []string{"chrM"}) {
+		t.Errorf("created %v, want a chrM volume", res.Created)
+	}
+
+	s, err := OpenStore(ctx, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := classifyStore(t, s, "chrM", 1000); got["S1"] != StateNonCarrier || got["S2"] != StateNotAssayed {
+		t.Errorf("chrM:1000: %v", got)
+	}
+	if got := classifyStore(t, s, "chr2", 500); got["S1"] != StateNonCarrier {
+		t.Errorf("chr2:500 off the catalog: %v", got)
+	}
+	if got := classifyStore(t, s, "chrX", 500); got["S1"] != StateNotAssayed {
+		t.Errorf("chrX, which no fragment covers: %v", got)
+	}
+	s.Close()
+
+	// A rebuild now finds chrM held, and creates nothing.
+	res, err = AttachRefBlocksToStore(ctx, base, frags, AttachOpts{Rebuild: true}, "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Created) != 0 || len(res.Volumes) != 3 {
+		t.Errorf("rebuild: created %v over %d volumes, want none over 3", res.Created, len(res.Volumes))
+	}
+}
