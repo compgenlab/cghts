@@ -6,8 +6,7 @@ The target is 150,000 samples in batches of 10,000, each batch joint-called on
 its own.
 
 A varstore is built from a joint-called cohort VCF, and its `catalog_runs` table records
-runs of **catalog sites** a sample was called at. `SpanSemantics` says so outright:
-the interval marks catalog sites, and *nothing is claimed about the bases in between*.
+runs of **catalog sites** a sample was called at. The interval marks catalog sites, and *nothing is claimed about the bases in between*.
 
 That is the honest reading of a pVCF, and it has two consequences that only appear
 later.
@@ -40,13 +39,15 @@ when it breaks a block on GQ. The rows would look the same.
 
 What differs is the **claim**, not the shape:
 
-| | claims |
+| table | claims |
 |---|---|
-| `SpansSites` | this sample was called at the catalog sites inside this interval |
-| `SpansBlocks` | every base in this interval was covered at depth ≥ D |
+| `catalog_runs` | this sample was called at the catalog sites inside this interval |
+| `ref_blocks` | every base in this interval was covered at depth ≥ D |
 
-That is why `SpanSemantics` is a manifest field rather than a schema difference,
-and why `SpansBlocks` has always been defined and never produced.
+The claim is carried by *which table* a span lives in. An earlier design labelled
+the run table with a `SpanSemantics` of `sites` or `blocks`; that was removed once
+blocks got their own table, since whether a store answers off its catalog is a
+question of which tables exist, and the manifest already says that.
 
 ## The design
 
@@ -117,8 +118,9 @@ rejection, a local assembly failure, a mapping problem. A coverage block spannin
 that position must not overrule it. Those disagreements cluster exactly where
 calling is hard, which is where a fabricated Ref does the most damage.
 
-This is also what `SpansBlocks` has always said: *"Only such a store may answer for
-positions absent from the catalog."*
+Implemented in `ParquetVolume.Classify`/`ClassifyMany` (one shared `resolveState`):
+the catalog decides which table may answer, and only one is ever read for a
+locus. `TestARefBlockDoesNotOverruleADeclinedGenotype` pins it.
 
 ### What becomes answerable
 
@@ -135,7 +137,8 @@ variant, and the denominator is the cohort again.
 reference."* A Ref inferred from a block is a weaker claim than one inferred from a
 catalog run, and the difference matters precisely where the two would disagree.
 
-So the state must carry its provenance, and Cohort Studio's `wins()` must prefer a
+So the state must carry its provenance -- `SampleState.RefSource`, `catalog_run`
+or `ref_block`, set by both backends -- and Cohort Studio's `wins()` must prefer a
 catalog-run Ref over a block-derived one when two parts observe the same person.
 Not a fifth state — the four states stay as they are — but a field on the returned
 observation. Without it, "positive evidence dominates" runs in reverse: a
@@ -147,9 +150,11 @@ block-derived Ref from a clean region beats a real no-call from a hard one.
   The part without contributes `NotAssayed` off catalog, which is correct; the
   coverage note has to say that a source could not answer rather than letting the
   asymmetry pass silently. Same shape as the existing assay and depth-band guards.
-- **A volume's coverage table is verified against its own roster at open**, exactly
-  as calls and catalog_runs are. A ref_blocks table from another conversion is the same
-  class of error `TableInfo.Rows` already exists to catch.
+- **A volume's ref_blocks table is verified at open by row count**, exactly as calls
+  and catalog_runs are, which is what catches a table from another conversion. Its
+  sample IDs are checked against the roster where blocks are *written* rather than
+  at every open, which would read the whole table before the first query; a reader
+  only ever emits roster samples, so a stray ID cannot surface.
 
 ## Measured
 
@@ -230,7 +235,7 @@ counts are small and fidelity is cheap.
 **A gap tolerance is needed as well as depth bands, and it changes the claim.**
 Fragmentation comes from short excursions, not from real coverage structure —
 which is why 10 bp buys 8.4x. But merging across a gap asserts coverage where the
-source reported none, so `SpansBlocks` can no longer mean "every base". It means:
+source reported none, so a ref_blocks span can no longer mean "every base". It means:
 
 > covered at `MinDP` or above, with no uncovered run longer than `MaxGap` bases.
 

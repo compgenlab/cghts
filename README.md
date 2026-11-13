@@ -231,8 +231,9 @@ pass**: the Parquet side prunes row groups by the union of the selectors, so a
   sample was called at these catalog sites" and claim nothing about the bases
   between them, so a locus absent from `catalog` is unassayed for every sample even
   where runs bracket it. A gVCF's reference blocks (`END`, `MIN_DP`) *are* span
-  assertions, and only such a store could answer off-catalog — hence
-  `SpanSemantics`
+  assertions, and only a store carrying them in its optional `ref_blocks` table
+  answers off-catalog — never at a catalog site, where the runs stay
+  authoritative (see `docs/coverage-spans.md`)
 - **A span selects by overlap, not by start position.** A record covers more than
   its POS whenever REF is longer than one base, or a symbolic ALT or gVCF block
   declares a span, so a query for `chr1:3100-3150` returns a deletion beginning at

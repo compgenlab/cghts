@@ -90,7 +90,8 @@ func (s *ParquetVolume) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleSt
 	}
 
 	var wg sync.WaitGroup
-	errs := make([]error, 3)
+	errs := make([]error, 4)
+	blocked := make(map[Locus]map[string]bool, len(loci))
 
 	// 1. Which of the requested loci the source actually reported. An
 	//    off-catalog locus must not consult the run intervals, because a run
@@ -181,6 +182,47 @@ func (s *ParquetVolume) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleSt
 			})
 	}()
 
+	// 4. The reference blocks, on a store that has them. Read for every locus
+	//    while the catalog scan is still deciding which loci are off it, so the
+	//    batch costs the slowest scan rather than an extra round; the decision
+	//    below consults a locus's blocks only once the catalog has said it is
+	//    not a site. Reading them for a catalog site is wasted work, never a
+	//    wrong answer.
+	if s.hasRefBlocks {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[3] = scanShardsParallel(s.refBlocks, refBlockFilter(loci), workers,
+				func() map[Locus]map[string]bool { return map[Locus]map[string]bool{} },
+				func(acc map[Locus]map[string]bool, b RefBlock) bool {
+					if !blockAdmits(b, g) {
+						return true
+					}
+					for _, l := range byChrom[CanonKey(b.Chrom)] {
+						if l.Pos < b.Start || l.Pos > b.End {
+							continue
+						}
+						if acc[l] == nil {
+							acc[l] = map[string]bool{}
+						}
+						acc[l][b.SampleID] = true
+					}
+					return true
+				},
+				func(acc map[Locus]map[string]bool) {
+					for k, cov := range acc {
+						if blocked[k] == nil {
+							blocked[k] = cov
+							continue
+						}
+						for name := range cov {
+							blocked[k][name] = true
+						}
+					}
+				})
+		}()
+	}
+
 	wg.Wait()
 	for _, err := range errs {
 		if err != nil {
@@ -188,37 +230,31 @@ func (s *ParquetVolume) ClassifyMany(loci []Locus, g Gate) (map[Locus][]SampleSt
 		}
 	}
 
-	// The same decision Classify makes, per sample per locus.
+	// The same decision Classify makes, per sample per locus -- including which
+	// reference source the catalog selects, so a block never answers at a site.
 	for _, raw := range loci {
 		l := canonLocus(raw)
 		states := make([]SampleState, 0, len(samples))
-		if !interrogated[l] && s.spans != SpansBlocks {
+		if !interrogated[l] && !s.hasRefBlocks {
 			for _, name := range samples {
 				states = append(states, SampleState{SampleID: name, State: StateNotAssayed})
 			}
 			out[raw] = states
 			continue
 		}
-		at, cov := calls[l], called[l]
+		ref, source := called[l], RefFromCatalog
+		at := calls[l]
+		if !interrogated[l] {
+			// Calls only exist at catalog sites; a stray match here would be a
+			// store disagreeing with itself, and the catalog is the authority.
+			ref, source, at = blocked[l], RefFromBlock, nil
+		}
 		for _, name := range samples {
-			st := SampleState{SampleID: name}
-			if c, ok := at[name]; ok {
-				cc := c
-				st.Call = &cc
-				if g.Admits(c) {
-					st.State = StateCarrier
-				} else {
-					// An ALT call we do not believe. NOT a reference, and not
-					// an absence: we looked, and saw something we cannot vouch
-					// for.
-					st.State = StateUncertain
-				}
-			} else if cov[name] {
-				st.State = StateNonCarrier
-			} else {
-				st.State = StateNotAssayed
+			var c *Call
+			if x, ok := at[name]; ok {
+				c = &x
 			}
-			states = append(states, st)
+			states = append(states, resolveState(name, c, ref[name], source, g))
 		}
 		out[raw] = states
 	}
