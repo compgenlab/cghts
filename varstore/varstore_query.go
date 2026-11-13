@@ -152,15 +152,15 @@ func (s *VarStore) Sites(fn func(Site) bool) error {
 	return nil
 }
 
-// Regions walks every volume's callable runs, in volume order.
-func (s *VarStore) Regions(fn func(CalledSiteRun) bool) error {
+// CatalogRuns walks every volume's callable runs, in volume order.
+func (s *VarStore) CatalogRuns(fn func(CalledSiteRun) bool) error {
 	for i := range s.man.Volumes {
 		st, err := s.openVolumeAt(i)
 		if err != nil {
 			return err
 		}
 		stop := false
-		if err := st.Regions(func(r CalledSiteRun) bool {
+		if err := st.CatalogRuns(func(r CalledSiteRun) bool {
 			if !fn(r) {
 				stop = true
 				return false

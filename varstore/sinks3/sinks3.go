@@ -7,7 +7,7 @@
 //
 //	import _ "github.com/compgenlab/cghts/varstore/sinks3"
 //
-//	cgkit vcf-toparquet --out s3://bucket/cohort input.vcf.gz
+//	cgkit vcf-tovarstore --out s3://bucket/cohort input.vcf.gz
 //
 // It is a separate package for the same reason iosource/s3 is: it pulls in the
 // AWS SDK, and a program that only ever writes local stores should not carry

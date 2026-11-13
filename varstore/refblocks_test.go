@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// writeCoverageStore builds a small store, optionally carrying coverage blocks.
-func writeCoverageStore(t *testing.T, base string, opts WriterOpts, blocks []CoverageBlock) {
+// writeCoverageStore builds a small store, optionally carrying reference blocks.
+func writeCoverageStore(t *testing.T, base string, opts WriterOpts, blocks []RefBlock) {
 	t.Helper()
 	if opts.Samples == nil {
 		opts.Samples = []string{"S1", "S2"}
@@ -40,7 +40,7 @@ func writeCoverageStore(t *testing.T, base string, opts WriterOpts, blocks []Cov
 		}
 	}
 	for _, b := range blocks {
-		if err := w.WriteCoverage(b); err != nil {
+		if err := w.WriteRefBlock(b); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -50,14 +50,14 @@ func writeCoverageStore(t *testing.T, base string, opts WriterOpts, blocks []Cov
 }
 
 // Coverage blocks survive a round trip.
-func TestCoverageBlocksRoundTrip(t *testing.T) {
+func TestRefBlocksRoundTrip(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
-	want := []CoverageBlock{
+	want := []RefBlock{
 		{SampleID: "S1", Chrom: "chr1", Start: 1, End: 5000, MinDP: 31, GQ: 60},
 		{SampleID: "S2", Chrom: "chr1", Start: 1, End: 4200, MinDP: 12, GQ: 40},
 		{SampleID: "S2", Chrom: "chr1", Start: 4300, End: 9000, MinDP: 28, GQ: 55},
 	}
-	writeCoverageStore(t, base, WriterOpts{MinDP: 10, Coverage: true, MaxGap: 10}, want)
+	writeCoverageStore(t, base, WriterOpts{MinDP: 10, RefBlocks: true, MaxGap: 10}, want)
 
 	s, err := OpenParquet(base)
 	if err != nil {
@@ -65,22 +65,22 @@ func TestCoverageBlocksRoundTrip(t *testing.T) {
 	}
 	defer s.Close()
 
-	if !s.HasCoverage() {
+	if !s.HasRefBlocks() {
 		t.Fatal("a store written with coverage reports none")
 	}
 	if s.MaxGap() != 10 {
 		t.Errorf("MaxGap is %d, want 10; a reader cannot tell what covered meant here", s.MaxGap())
 	}
 
-	var got []CoverageBlock
-	if err := s.Coverage(func(b CoverageBlock) bool { got = append(got, b); return true }); err != nil {
+	var got []RefBlock
+	if err := s.RefBlocks(func(b RefBlock) bool { got = append(got, b); return true }); err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != len(want) {
 		t.Fatalf("read %d coverage blocks, wrote %d", len(got), len(want))
 	}
 	// Sorted by (chrom, start), so compare as a set keyed by sample and start.
-	byKey := map[string]CoverageBlock{}
+	byKey := map[string]RefBlock{}
 	for _, b := range got {
 		byKey[fmt.Sprintf("%s:%d", b.SampleID, b.Start)] = b
 	}
@@ -113,11 +113,11 @@ func TestAStoreWithoutCoverageIsNotAStoreCoveringNothing(t *testing.T) {
 	}
 	defer s.Close()
 
-	if s.HasCoverage() {
+	if s.HasRefBlocks() {
 		t.Error("a store given no coverage reports that it has some")
 	}
 	n := 0
-	if err := s.Coverage(func(CoverageBlock) bool { n++; return true }); err != nil {
+	if err := s.RefBlocks(func(RefBlock) bool { n++; return true }); err != nil {
 		t.Errorf("reading coverage from a store without it should be silent, got %v", err)
 	}
 	if n != 0 {
@@ -130,7 +130,7 @@ func TestAStoreWithoutCoverageIsNotAStoreCoveringNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, listed := man.Tables[CoverageTable]; listed {
+	if _, listed := man.Tables[RefBlocksTable]; listed {
 		t.Error("the manifest lists a coverage table for a store that has none, " +
 			"which reads as covered-nowhere rather than nothing-said")
 	}
@@ -149,25 +149,25 @@ func TestCoverageIsRefusedUnlessTheStoreWasOpenedForIt(t *testing.T) {
 	}
 	defer w.Discard()
 
-	err = w.WriteCoverage(CoverageBlock{SampleID: "S1", Chrom: "chr1", Start: 1, End: 100, MinDP: 30})
+	err = w.WriteRefBlock(RefBlock{SampleID: "S1", Chrom: "chr1", Start: 1, End: 100, MinDP: 30})
 	if err == nil {
 		t.Fatal("a coverage block was accepted by a store that will not record one")
 	}
-	if !strings.Contains(err.Error(), "WriterOpts.Coverage") {
+	if !strings.Contains(err.Error(), "WriterOpts.RefBlocks") {
 		t.Errorf("the error does not say how to fix it: %v", err)
 	}
 }
 
 // A backwards block is refused rather than stored.
-func TestABackwardsCoverageBlockIsRefused(t *testing.T) {
+func TestABackwardsRefBlockIsRefused(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
-	w, err := NewWriter(base, WriterOpts{Samples: []string{"S1"}, MinDP: 10, Coverage: true})
+	w, err := NewWriter(base, WriterOpts{Samples: []string{"S1"}, MinDP: 10, RefBlocks: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer w.Discard()
 
-	if err := w.WriteCoverage(CoverageBlock{
+	if err := w.WriteRefBlock(RefBlock{
 		SampleID: "S1", Chrom: "chr1", Start: 500, End: 100, MinDP: 30,
 	}); err == nil {
 		t.Fatal("a block ending before it starts was accepted")

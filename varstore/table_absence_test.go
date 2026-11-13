@@ -24,9 +24,9 @@ func TestAnUnreadableTableIsNotReportedAsAbsent(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "cohort")
 	buildCensusStore(t, base, WriterOpts{MinDP: 10})
 
-	// The regions table is optional -- --no-callable stores legitimately have
+	// The catalog_runs table is optional -- --no-callable stores legitimately have
 	// none -- which is exactly why an unreadable one must not pass for missing.
-	regions := RegionsPath(base)
+	regions := CatalogRunsPath(base)
 	if err := os.Chmod(regions, 0o000); err != nil {
 		t.Fatal(err)
 	}
@@ -34,10 +34,10 @@ func TestAnUnreadableTableIsNotReportedAsAbsent(t *testing.T) {
 
 	_, err := OpenParquet(base)
 	if err == nil {
-		t.Fatal("OpenParquet succeeded with an unreadable regions table; it was " +
+		t.Fatal("OpenParquet succeeded with an unreadable catalog_runs table; it was " +
 			"treated as absent, so --hom-ref would answer from a store missing half its evidence")
 	}
-	if !strings.Contains(err.Error(), "regions") {
+	if !strings.Contains(err.Error(), "catalog_runs") {
 		t.Errorf("error %q should name the table that could not be read", err)
 	}
 }

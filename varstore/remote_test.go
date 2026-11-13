@@ -156,7 +156,7 @@ func TestParquetStoreOverS3(t *testing.T) {
 
 	// Upload the three tables with the plain AWS CLI-equivalent: a PUT each.
 	prefix := "varstore-test"
-	for _, m := range []string{CallsTable, SitesTable, RegionsTable} {
+	for _, m := range []string{CallsTable, CatalogTable, CatalogRunsTable} {
 		if err := putObject(ctx, bucket, prefix+"/cohort."+m+".parquet",
 			TablePath(base, m)); err != nil {
 			t.Fatal(err)
