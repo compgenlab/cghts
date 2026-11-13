@@ -371,11 +371,11 @@ func (s *VcfStore) Classify(l Locus, g Gate) ([]SampleState, error) {
 					// has looked without concluding, which is not-assayed rather
 					// than non-carrier. Reporting it as non-carrier is what would
 					// let an uncovered span enlarge the reference denominator.
-					state := StateNonCarrier
+					st := SampleState{SampleID: name, State: StateNonCarrier, Call: &cc, RefSource: RefFromBlock}
 					if cc.GT == NoCallGT {
-						state = StateNotAssayed
+						st.State, st.RefSource = StateNotAssayed, ""
 					}
-					byBlock[name] = SampleState{SampleID: name, State: state, Call: &cc}
+					byBlock[name] = st
 				}
 			}
 			return true, nil
@@ -414,6 +414,7 @@ func (s *VcfStore) Classify(l Locus, g Gate) ([]SampleState, error) {
 				// enlarge the non-carrier denominator.
 				if g.Admits(Call{DP: sf.DP, GQ: sf.GQ}) {
 					st.State = StateNonCarrier
+					st.RefSource = RefFromCatalog
 				} else {
 					st.State = StateNotAssayed
 				}

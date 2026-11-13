@@ -388,7 +388,31 @@ type SampleState struct {
 	SampleID string
 	State    State
 	Call     *Call
+
+	// RefSource says what a StateNonCarrier rests on, and is empty for every
+	// other state.
+	//
+	// NOT A FIFTH STATE. Both sources make the same claim -- observed, and
+	// observed to be reference -- but not with the same strength. A catalog run
+	// says the caller looked at this site and genotyped the sample reference; a
+	// reference block says reads covered the base at some depth, which is what a
+	// caller would have needed and is not the same as having called it. A
+	// consumer reconciling two observations of one person should prefer the
+	// first, and could not without being told which it holds.
+	RefSource RefSource
 }
+
+// RefSource is the evidence behind a reference observation.
+type RefSource string
+
+const (
+	// RefFromCatalog: the sample was genotyped at this catalog site -- a
+	// catalog run on a Parquet store, an explicit genotype in a VCF.
+	RefFromCatalog RefSource = "catalog_run"
+	// RefFromBlock: a reference block covers the position -- the ref_blocks
+	// table, or a gVCF block read directly.
+	RefFromBlock RefSource = "ref_block"
+)
 
 // Store answers carrier questions over a genotype backend.
 //

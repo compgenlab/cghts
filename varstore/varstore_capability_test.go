@@ -110,9 +110,6 @@ func TestAnArchiveReportsWhatItsVolumesCaptured(t *testing.T) {
 		t.Errorf("the archive-wide provenance walk saw %d sites, want 8 across two volumes", n)
 	}
 
-	if arc.SpanSemantics() != vol.SpanSemantics() {
-		t.Errorf("archive spans %q, volume spans %q", arc.SpanSemantics(), vol.SpanSemantics())
-	}
 	if arc.HasRefBlocks() != vol.HasRefBlocks() {
 		t.Errorf("archive coverage %v, volume coverage %v", arc.HasRefBlocks(), vol.HasRefBlocks())
 	}

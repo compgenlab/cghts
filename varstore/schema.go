@@ -184,7 +184,7 @@ func (s Site) Locus() Locus {
 // Consequently a run is only meaningful at positions that appear in the sites
 // catalog, and Classify checks the catalog first for exactly that reason. A
 // gVCF, whose reference blocks carry END and MIN_DP, is what would license
-// answering off-catalog positions; see SpanSemantics.
+// answering off-catalog positions; see RefBlock and the ref_blocks table.
 type CalledSiteRun struct {
 	SampleID string `parquet:"sample_id,dict"`
 	Chrom    string `parquet:"chrom,dict"`
