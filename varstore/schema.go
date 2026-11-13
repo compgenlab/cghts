@@ -102,10 +102,15 @@ const HomRefGT = "0/0"
 // "observed here, and observed to be reference" and nothing more -- notably not
 // the ploidy or phasing of the original genotype, which are unrecoverable.
 //
+// minDP is the floor of the catalog run the call was recovered from, carried as
+// Call.MinDP so a gate applied to this row judges the depth the run vouched for
+// rather than DP, which is Missing and would pass anything.
+//
 // A VCF-backed store does not go through this: it still has the real genotype
 // and its DP/AD/GQ, and reports them.
-func HomRefCall(sample string, l Locus) Call {
+func HomRefCall(sample string, l Locus, minDP int32) Call {
 	return Call{
+		MinDP:    minDP,
 		SampleID: sample,
 		Chrom:    l.Chrom,
 		Pos:      l.Pos,

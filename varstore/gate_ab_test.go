@@ -118,7 +118,7 @@ func TestGTClassification(t *testing.T) {
 }
 
 func TestDepthBanding(t *testing.T) {
-	bands := DefaultDepthBands // 10, 20, 50
+	bands := []int32{10, 20, 50}
 	for _, c := range []struct {
 		dp   int32
 		want int
