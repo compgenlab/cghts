@@ -300,6 +300,7 @@ func TestIndexedReaderGZIAutoLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenIndexedReader: %v", err)
 	}
+	defer ir.Close()
 
 	// Seek by uncompressed offset should work (gzi was auto-loaded).
 	pos, err := ir.Seek(12, io.SeekStart)

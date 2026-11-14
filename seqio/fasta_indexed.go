@@ -164,8 +164,9 @@ func (r *IndexedFastaReader) Close() error {
 	if r.file != nil {
 		return r.file.Close()
 	}
-	// bgzf.IndexedReader doesn't expose Close, but the underlying file
-	// was opened by OpenIndexedReader which keeps the *os.File internally.
+	if r.bgzr != nil {
+		return r.bgzr.Close()
+	}
 	return nil
 }
 

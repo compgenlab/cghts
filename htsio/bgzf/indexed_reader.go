@@ -3,6 +3,7 @@ package bgzf
 import (
 	"container/list"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -143,9 +144,11 @@ func (idx *GZIndex) lookup(uncompressedOffset int64) (compressedOffset int64, wi
 // It implements io.Reader and io.ByteReader. If a GZIndex is loaded via
 // SetGZIndex, it also supports Seek(offset, whence) by uncompressed position.
 type IndexedReader struct {
-	rs    io.ReadSeeker
-	cache *blockCache
-	gzi   *GZIndex // optional; enables Seek by uncompressed offset
+	rs     io.ReadSeeker
+	closer io.Closer // the file OpenIndexedReader opened; nil when the caller owns rs
+	closed bool
+	cache  *blockCache
+	gzi    *GZIndex // optional; enables Seek by uncompressed offset
 
 	// Current reading state
 	block       *cachedBlock // current block (from cache)
@@ -172,6 +175,32 @@ func NewIndexedReaderSize(rs io.ReadSeeker, cacheSize int) *IndexedReader {
 	}
 }
 
+// errReaderClosed is the sticky error a read after Close returns.
+var errReaderClosed = errors.New("bgzf: read from a closed IndexedReader")
+
+// Close releases the reader. It closes the underlying file when the reader
+// opened it ([OpenIndexedReader]); a reader built with [NewIndexedReader] over
+// the caller's own ReadSeeker leaves that to the caller, who still owns it.
+// Either way the block cache is dropped and any later read fails. Closing
+// twice is safe.
+//
+// Before Close existed, nothing could release a reader from OpenIndexedReader:
+// its file stayed open until the garbage collector happened to finalize it, so
+// every bgzip FASTA an IndexedFastaReader opened -- a CRAM reference, say --
+// held a descriptor for as long as no collection ran.
+func (r *IndexedReader) Close() error {
+	r.closed = true
+	r.err = errReaderClosed
+	r.block = nil
+	r.cache = newBlockCache(1)
+	if r.closer == nil {
+		return nil
+	}
+	c := r.closer
+	r.closer = nil
+	return c.Close()
+}
+
 // OpenIndexedReader opens a BGZF file by name and returns an IndexedReader.
 // If a .gzi index file exists at filename.gzi, it is loaded automatically,
 // enabling Seek by uncompressed offset.
@@ -188,6 +217,7 @@ func OpenIndexedReaderSize(filename string, cacheSize int) (*IndexedReader, erro
 	}
 
 	r := NewIndexedReaderSize(f, cacheSize)
+	r.closer = f
 
 	// Auto-load .gzi index if it exists.
 	gziPath := filename + ".gzi"
@@ -212,6 +242,9 @@ func (r *IndexedReader) setGZIndex(idx *GZIndex) {
 // Requires a GZIndex to be loaded via SetGZIndex. whence follows the
 // standard io.Seek* constants (only io.SeekStart is supported).
 func (r *IndexedReader) Seek(offset int64, whence int) (int64, error) {
+	if r.closed {
+		return 0, errReaderClosed
+	}
 	if r.gzi == nil {
 		return 0, fmt.Errorf("bgzf: Seek requires a GZIndex (call SetGZIndex)")
 	}
@@ -235,6 +268,9 @@ func (r *IndexedReader) Seek(offset int64, whence int) (int64, error) {
 // Subsequent reads will start from the uncompressed position within the
 // block identified by the virtual offset.
 func (r *IndexedReader) SeekToVirtualOffset(vo VirtualOffset) error {
+	if r.closed {
+		return errReaderClosed // a seek clears the sticky error, so check first
+	}
 	r.err = nil // clear sticky error on seek
 
 	blockOff := vo.BlockOffset()
