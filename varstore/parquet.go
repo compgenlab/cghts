@@ -2518,6 +2518,16 @@ func (s *ParquetVolume) HasRefSpans() bool { return s.hasRefSpans }
 // them down.
 func (s *ParquetVolume) VolumeManifest() *VolumeManifest { return s.manifest }
 
+// RefBlockSamples returns the samples whose gVCF fragments were merged into this
+// volume's ref_blocks, and whether that is known. See
+// VolumeManifest.RefBlockSamples.
+func (s *ParquetVolume) RefBlockSamples() ([]string, bool) {
+	if s.manifest == nil || s.manifest.RefBlockSamples == nil {
+		return nil, false
+	}
+	return *s.manifest.RefBlockSamples, true
+}
+
 // setCallMeta writes key/value metadata to whichever calls writer is live.
 func (w *Writer) setCallMeta(k, v string) {
 	if w.callsAny != nil {

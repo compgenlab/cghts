@@ -318,6 +318,7 @@ func AttachRefBlocks(ctx context.Context, base string, frags []Fragment, opts At
 	}
 	man.Params.RefBlocks = true
 	man.Params.MaxGap = maxGap
+	man.RefBlockSamples = attachedSamples(man, frags, replaced, keepExisting)
 	if err := WriteManifestTo(sink, *man); err != nil {
 		out.discard()
 		return nil, err
@@ -886,4 +887,36 @@ func missingChroms(want, have []string) []string {
 		}
 	}
 	return out
+}
+
+// attachedSamples is the roster-ordered list of samples whose fragments make up
+// the new table: every fragment's sample, plus -- on a replace -- everyone the
+// existing table held who was not replaced. A replaced sample with no fragment
+// drops out, as its blocks do.
+//
+// Unknown stays unknown. A replace over a table attached before the list was
+// recorded cannot say who else is in it, so it records nothing rather than the
+// replaced samples alone, which would claim everyone else had been removed.
+func attachedSamples(man *VolumeManifest, frags []Fragment, replaced map[string]bool, keepExisting bool) *[]string {
+	in := map[string]bool{}
+	if keepExisting {
+		if man.RefBlockSamples == nil {
+			return nil
+		}
+		for _, s := range *man.RefBlockSamples {
+			if !replaced[s] {
+				in[s] = true
+			}
+		}
+	}
+	for _, f := range frags {
+		in[f.Meta.SampleID] = true
+	}
+	out := []string{}
+	for _, s := range man.Samples {
+		if in[s] {
+			out = append(out, s)
+		}
+	}
+	return &out
 }
