@@ -67,6 +67,23 @@ type VolumeManifest struct {
 
 	Chromosomes     []ChromCensus `json:"chromosomes"`
 	ContigsDeclared []string      `json:"contigs_declared,omitempty"`
+
+	// RefBlockSamples are the samples whose gVCF fragments were merged into this
+	// volume's ref_blocks, in roster order. Written by AttachRefBlocks.
+	//
+	// IT IS THE ONLY WAY TO TELL "NOT COVERED" FROM "NOT ATTACHED". A roster
+	// sample with no blocks at a position answers not_assayed either way, but the
+	// reasons differ: one sample's gVCF was read and reported nothing there,
+	// another's was never attached at all. A store built from 9,800 of 10,000
+	// gVCFs looks identical to one built from all of them unless this says which.
+	// Recorded rather than scanned for, because the table holds only samples
+	// with at least one block, and because reading it would cost a summary the
+	// guarantee that it never touches a record.
+	//
+	// A pointer so that absence and emptiness stay distinct: nil means unknown
+	// (no ref_blocks, or attached before this field existed), while an empty list
+	// is a recorded claim that nobody's fragments are in the table.
+	RefBlockSamples *[]string `json:"ref_block_samples,omitempty"`
 }
 
 // ManifestParams records the conversion settings that change what the store
