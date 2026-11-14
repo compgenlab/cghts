@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -240,5 +241,44 @@ func TestIndexedFastaReaderWithCRAMTestdata(t *testing.T) {
 	}
 	if !bytes.Equal(partial, full[5000:6000]) {
 		t.Error("range [5000:6000] does not match full sequence slice")
+	}
+}
+
+// IndexedFastaReader.Close used to release a plain FASTA but not a bgzip one:
+// bgzf.IndexedReader had no Close, so every bgzip reference opened -- a CRAM
+// reference, say -- kept its file open until the garbage collector finalized
+// it. The count only has to grow for the test to fail, and it did (7 to 9
+// over 50 cycles on the old code: most leaks were collected in between).
+func TestIndexedFastaReaderBgzipCloseReleasesTheFile(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("counting descriptors needs /proc")
+	}
+	path := filepath.Join(t.TempDir(), "ref.fa.gz")
+	bgzipTo(t, path, bigFasta())
+	if _, err := BuildFastaIndex(path); err != nil {
+		t.Fatal(err)
+	}
+	fds := func() int {
+		ents, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Skipf("cannot read /proc/self/fd: %v", err)
+		}
+		return len(ents)
+	}
+	before := fds()
+	for i := 0; i < 50; i++ {
+		r, err := NewIndexedFastaReader(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seq, err := r.GetSequenceRange("chr2", 100, 110); err != nil || len(seq) != 10 {
+			t.Fatalf("GetSequenceRange: %q, %v", seq, err)
+		}
+		if err := r.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if after := fds(); after > before {
+		t.Errorf("open descriptors grew from %d to %d over 50 bgzip FASTA open/close cycles", before, after)
 	}
 }
