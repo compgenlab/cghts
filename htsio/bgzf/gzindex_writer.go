@@ -72,61 +72,74 @@ func (r *IndexingReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// next decodes one block into buf, advancing the offsets.
+// next decodes the next non-empty block into buf, advancing the offsets.
+//
+// Empty blocks are stepped over. The EOF marker is one, but so is the marker
+// left in mid-file when BGZF streams are concatenated (a separately compressed
+// header and body), which htslib reads through. Taking every empty block for
+// the end stopped at the first stream: a .gzi built from such a file covered
+// only its header, and a block census of it reported one block.
 func (r *IndexingReader) next() error {
-	hdr := make([]byte, 18)
-	n, err := io.ReadFull(r.br, hdr)
-	if err == io.EOF || (err == io.ErrUnexpectedEOF && n == 0) {
-		return io.EOF
-	}
-	if err != nil {
-		return fmt.Errorf("bgzf: read block header at %d: %w", r.coffset, err)
-	}
-	if hdr[0] != 0x1f || hdr[1] != 0x8b {
-		return fmt.Errorf("bgzf: block at %d has no gzip magic", r.coffset)
-	}
-	if hdr[3]&0x04 == 0 {
-		return fmt.Errorf("bgzf: plain gzip, not BGZF")
-	}
-	// The BC subfield carries BSIZE-1, the total block length, and is the first
-	// extra subfield in every BGZF block — which is what the fixed 18-byte
-	// header read above assumes.
-	if hdr[12] != 'B' || hdr[13] != 'C' {
-		return fmt.Errorf("bgzf: block at %d has no BC subfield", r.coffset)
-	}
-	bsize := int(binary.LittleEndian.Uint16(hdr[16:18])) + 1
-	if bsize <= 18 {
-		return fmt.Errorf("bgzf: block at %d declares length %d", r.coffset, bsize)
-	}
+	for {
+		hdr := make([]byte, 18)
+		n, err := io.ReadFull(r.br, hdr)
+		if err == io.EOF || (err == io.ErrUnexpectedEOF && n == 0) {
+			return io.EOF
+		}
+		if err != nil {
+			return fmt.Errorf("bgzf: read block header at %d: %w", r.coffset, err)
+		}
+		if hdr[0] != 0x1f || hdr[1] != 0x8b {
+			return fmt.Errorf("bgzf: block at %d has no gzip magic", r.coffset)
+		}
+		if hdr[3]&0x04 == 0 {
+			return fmt.Errorf("bgzf: plain gzip, not BGZF")
+		}
+		// The BC subfield carries BSIZE-1, the total block length, and is the first
+		// extra subfield in every BGZF block — which is what the fixed 18-byte
+		// header read above assumes.
+		if hdr[12] != 'B' || hdr[13] != 'C' {
+			return fmt.Errorf("bgzf: block at %d has no BC subfield", r.coffset)
+		}
+		bsize := int(binary.LittleEndian.Uint16(hdr[16:18])) + 1
+		if bsize <= 18 {
+			return fmt.Errorf("bgzf: block at %d declares length %d", r.coffset, bsize)
+		}
 
-	rest := make([]byte, bsize-18)
-	if _, err := io.ReadFull(r.br, rest); err != nil {
-		return fmt.Errorf("bgzf: read block at %d: %w", r.coffset, err)
-	}
-	whole := make([]byte, 0, bsize)
-	whole = append(append(whole, hdr...), rest...)
+		rest := make([]byte, bsize-18)
+		if _, err := io.ReadFull(r.br, rest); err != nil {
+			return fmt.Errorf("bgzf: read block at %d: %w", r.coffset, err)
+		}
+		whole := make([]byte, 0, bsize)
+		whole = append(append(whole, hdr...), rest...)
 
-	zr, err := gzip.NewReader(bytes.NewReader(whole))
-	if err != nil {
-		return fmt.Errorf("bgzf: block at %d: %w", r.coffset, err)
-	}
-	data, err := io.ReadAll(zr)
-	zr.Close()
-	if err != nil {
-		return fmt.Errorf("bgzf: block at %d: %w", r.coffset, err)
-	}
-	if len(data) == 0 {
-		return io.EOF // the EOF marker
-	}
-	if !r.first {
-		r.blocks = append(r.blocks, BlockOffset{Compressed: r.coffset, Uncompressed: r.uoffset})
-	}
-	r.first = false
+		zr, err := gzip.NewReader(bytes.NewReader(whole))
+		if err != nil {
+			return fmt.Errorf("bgzf: block at %d: %w", r.coffset, err)
+		}
+		data, err := io.ReadAll(zr)
+		zr.Close()
+		if err != nil {
+			return fmt.Errorf("bgzf: block at %d: %w", r.coffset, err)
+		}
+		if len(data) == 0 {
+			// Indexes nothing; the next block starts after it.
+			r.coffset += int64(bsize)
+			if _, err := r.br.Peek(1); err != nil {
+				return io.EOF // the final EOF marker
+			}
+			continue
+		}
+		if !r.first {
+			r.blocks = append(r.blocks, BlockOffset{Compressed: r.coffset, Uncompressed: r.uoffset})
+		}
+		r.first = false
 
-	r.buf = data
-	r.coffset += int64(bsize)
-	r.uoffset += int64(len(data))
-	return nil
+		r.buf = data
+		r.coffset += int64(bsize)
+		r.uoffset += int64(len(data))
+		return nil
+	}
 }
 
 // WriteGZIndex writes a .gzi: uint64 count, then count pairs of (compressed,

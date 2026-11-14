@@ -359,16 +359,23 @@ func (r *IndexedReader) advance() error {
 		return io.EOF
 	}
 
-	nextOffset := r.blockOffset + int64(r.block.bsize)
-	if err := r.loadBlock(nextOffset); err != nil {
-		return err
+	// Empty blocks are stepped over rather than taken as the end. The EOF
+	// marker is an empty block, but so is the marker left in mid-file when BGZF
+	// streams are concatenated -- a separately compressed header and body, say
+	// -- and htslib reads straight through it. Stopping there ended every read
+	// that crossed it, so a tabix chunk spanning the join silently lost its
+	// records. Only running out of file ends the stream.
+	for {
+		nextOffset := r.blockOffset + int64(r.block.bsize)
+		if err := r.loadBlock(nextOffset); err != nil {
+			if err == io.EOF {
+				return io.EOF
+			}
+			return err
+		}
+		if len(r.block.data) > 0 {
+			r.pos = 0
+			return nil
+		}
 	}
-
-	// EOF block (empty data).
-	if len(r.block.data) == 0 {
-		return io.EOF
-	}
-
-	r.pos = 0
-	return nil
 }

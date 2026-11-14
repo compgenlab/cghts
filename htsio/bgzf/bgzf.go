@@ -168,7 +168,10 @@ func (r *Reader) ReadByte() (byte, error) {
 	if r.err != nil {
 		return 0, r.err
 	}
-	if r.pos >= len(r.buf) {
+	// A loop, not an if: nextBlock returns nil with an empty buffer when it
+	// consumed an EOF marker in mid-file and more data follows (concatenated
+	// BGZF streams), and indexing buf[0] then panicked. Read loops the same way.
+	for r.pos >= len(r.buf) {
 		if err := r.nextBlock(); err != nil {
 			r.err = err
 			return 0, err
