@@ -9,8 +9,14 @@ import (
 )
 
 // annGTF: GeneA (+, coding) over [100,200) and GeneB (-, non-coding lncRNA)
-// over [150,250) overlap at [150,200), so a variant there hits both genes.
-const annGTF = `chr1	t	exon	101	200	.	+	.	gene_id "GeneA"; gene_name "GeneA"; transcript_id "TA"; gene_type "protein_coding";
+// over [150,250) overlap at [150,200), so a variant there hits both genes. It
+// has gene and transcript rows, as GENCODE does: the indexed reader refuses a
+// GTF without them (gtf.ErrNoGeneExtents).
+const annGTF = `chr1	t	gene	101	200	.	+	.	gene_id "GeneA"; gene_name "GeneA"; gene_type "protein_coding";
+chr1	t	transcript	101	200	.	+	.	gene_id "GeneA"; gene_name "GeneA"; transcript_id "TA"; gene_type "protein_coding";
+chr1	t	gene	151	250	.	-	.	gene_id "GeneB"; gene_name "GeneB"; gene_type "lncRNA";
+chr1	t	transcript	151	250	.	-	.	gene_id "GeneB"; gene_name "GeneB"; transcript_id "TB"; gene_type "lncRNA";
+chr1	t	exon	101	200	.	+	.	gene_id "GeneA"; gene_name "GeneA"; transcript_id "TA"; gene_type "protein_coding";
 chr1	t	CDS	101	200	.	+	0	gene_id "GeneA"; gene_name "GeneA"; transcript_id "TA"; gene_type "protein_coding";
 chr1	t	exon	151	250	.	-	.	gene_id "GeneB"; gene_name "GeneB"; transcript_id "TB"; gene_type "lncRNA";
 `

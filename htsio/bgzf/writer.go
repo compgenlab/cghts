@@ -189,6 +189,19 @@ func (w *Writer) Write(p []byte) (int, error) {
 		w.buf = append(w.buf, p[:n]...)
 		p = p[n:]
 		total += n
+		// Flush a full block now rather than on the next write. A full block's
+		// end is uncompressed byte 65536, which a virtual offset's 16-bit
+		// within-block field cannot hold: VirtualTell would wrap to byte 0 of
+		// the same block, so a tabix index built while writing recorded the
+		// start of a line straddling the boundary as the start of the block.
+		// htslib flushes eagerly for the same reason. Block boundaries, and so
+		// the bytes written, are unchanged.
+		if len(w.buf) == MaxUncompressedSize {
+			if err := w.flush(); err != nil {
+				w.err = err
+				return total, err
+			}
+		}
 	}
 	return total, nil
 }
