@@ -106,31 +106,38 @@ func (s *AnnotationSource) FindGenicRegionForPos(ref string, pos int, strand bed
 }
 
 // classifyAt classifies a 0-based position on ref given the genes overlapping
-// it. It ports ngsutilsj GTFAnnotationSource.findGenicRegionForPos -- the same
+// it. It follows ngsutilsj GTFAnnotationSource.findGenicRegionForPos -- the same
 // categories, the same precedence (coding, 5'UTR, 3'UTR, non-coding exon, then
 // coding/5'UTR/3'UTR/non-coding intron, then intergenic) and the same rule that
-// a category is anti-sense when any gene contributing to it is -- with one
-// deliberate difference: it does not depend on the order genes and transcripts
-// are visited.
+// a category is anti-sense when any gene contributing to it is -- except that
+// the answer does not depend on the order genes and transcripts are visited.
 //
-// The Java version keeps its isExon/isCoding flags across the whole loop, so a
-// transcript is judged partly by the ones visited before it: an exon hit in an
-// earlier transcript makes a later transcript's intron read as a UTR, and a CDS
-// hit anywhere skips every later transcript's exon check. It visits transcripts
-// in java.util.HashMap order and overlapping genes in HashSet order, the second
-// coming from JVM identity hash codes, so its answer at a position covered by
-// several transcripts or genes is an accident of iteration order -- and the
-// gene order cannot be reproduced outside the JVM. Here each transcript is
-// judged on its own exons and CDS and the findings are combined, so the answer
-// is a property of the annotation. Where Java's order happened not to matter
-// the two agree; they differ at roughly 3% of positions in a GENCODE gene body.
+// The rules:
+//   - exonic if any transcript of any overlapping gene has an exon or CDS here;
+//   - coding if any transcript has CDS here;
+//   - otherwise, if exonic, a coding transcript makes it 5'UTR or 3'UTR by
+//     where it lies relative to that transcript's CDS, 5'UTR taking precedence;
+//     with neither it is a non-coding exon;
+//   - if not exonic, a coding transcript makes it a coding, 5'UTR or 3'UTR
+//     intron by the same test; with none of those it is a non-coding intron;
+//   - intergenic where no gene overlaps, mitochondrial on chrM/M.
 //
-// What is kept, quirks included: the coding-sequence bounds are the CDS rows'
-// (the stop codon is outside them, so its first base is neither CDS nor UTR and
-// reads as a non-coding exon), and a coding transcript classifies every
-// position of its gene that none of its exons covers as an intron, by where it
-// lies relative to that transcript's CDS -- even outside the transcript's own
-// span.
+// Java keeps its isExon/isCoding flags across the whole loop, so a transcript is
+// judged partly by the ones visited before it: whether a coding transcript reads
+// a position as UTR or intron depends on whether an exon hit was seen earlier.
+// It visits transcripts in java.util.HashMap order and overlapping genes in
+// HashSet order (JVM identity hash codes), and cghts used to visit them in
+// sorted-ID order, so wherever transcripts disagreed the answer was an accident
+// of naming -- a renamed transcript could turn a 5'UTR into a non-coding exon.
+// Deciding "exonic" over all transcripts first keeps Java's evident intent, an
+// exonic position being UTR by the coding transcripts' CDS, without the order.
+// See compgenlab/cghts#61.
+//
+// Kept as in Java, quirks included: the coding-sequence bounds are the CDS rows'
+// (the stop codon lies outside them, so its first base is neither CDS nor UTR),
+// a coding transcript classifies a position its exons do not cover by its CDS
+// bounds even outside its own span, and "exonic" spans genes, so another gene's
+// exon makes a coding gene's position a UTR rather than an intron.
 func classifyAt(genes []*Gene, ref string, pos int, strand bed.Strand) GenicRegion {
 	if ref == "chrM" || ref == "M" {
 		return Mitochondrial
