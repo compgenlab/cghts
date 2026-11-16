@@ -132,7 +132,17 @@ func NewReader(r io.Reader) *Reader {
 }
 
 // VirtualTell returns the virtual offset of the next byte that will be read.
+//
+// Once a block has been read to its end the position is reported as the start
+// of the next block, as htslib's bgzf_tell does. The end of a block is the
+// same file position, but "byte len of this block" cannot always be written:
+// a full block holds 65536 bytes and the within-block field is 16 bits, so it
+// wrapped to byte 0 of the same block. An index built from such a position
+// sent readers into the middle of a line.
 func (r *Reader) VirtualTell() VirtualOffset {
+	if len(r.buf) > 0 && r.pos >= len(r.buf) {
+		return NewVirtualOffset(r.fileOffset, 0)
+	}
 	return NewVirtualOffset(r.blockOffset, uint16(r.pos))
 }
 
