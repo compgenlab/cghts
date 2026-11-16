@@ -36,8 +36,20 @@ type FormatField struct {
 	// Column is where it lands in calls.parquet, e.g. "fmt_pid".
 	Column string   `json:"column"`
 	Type   InfoType `json:"type"`
-	// Number is the VCF header's Number: "1" or "A".
+	// Number is the VCF header's Number: "1", "A", or "." (stored verbatim as
+	// text -- see FormatFieldFor).
 	Number string `json:"number"`
+}
+
+// FormatFieldFor builds the captured field for a FORMAT key as its header
+// declares it. A Number=. field is captured as its verbatim text, for the reason
+// InfoFieldFor gives.
+func FormatFieldFor(name, typ, number string) FormatField {
+	f := FormatField{Name: name, Column: FormatColumn(name), Type: InfoType(typ), Number: number}
+	if number == NumberAny {
+		f.Type = InfoString
+	}
+	return f
 }
 
 // FormatPrefix namespaces captured columns, for the same reason InfoPrefix does:
@@ -76,6 +88,14 @@ func ValidateFormat(fields []FormatField) error {
 
 		switch f.Number {
 		case "1", "A":
+		case NumberAny:
+			// Kept whole and repeated down a multiallelic record's calls, as
+			// Number=1 is; slicing it per ALT would invent an allele mapping.
+			if f.Type != InfoString {
+				return fmt.Errorf(
+					"format %s: a Number=. field is captured as its verbatim text, so its Type "+
+						"must be String, not %s (FormatFieldFor does this)", f.Name, f.Type)
+			}
 		case "R":
 			// AD is the Number=R field anybody actually wants, and the store
 			// already splits it into ad_ref and ad_alt. Naming the one that
@@ -86,7 +106,7 @@ func ValidateFormat(fields []FormatField) error {
 				f.Name)
 		default:
 			return fmt.Errorf(
-				"format %s: only Number=1 and Number=A can be captured, header says Number=%s "+
+				"format %s: only Number=1, Number=A and Number=. can be captured, header says Number=%s "+
 					"(a call row is one sample at one ALT, so there is nowhere for the other values to go)",
 				f.Name, f.Number)
 		}

@@ -54,9 +54,30 @@ type InfoField struct {
 	// Column is where it lands in catalog.parquet, e.g. "info_r2".
 	Column string   `json:"column"`
 	Type   InfoType `json:"type"`
-	// Number is the VCF header's Number: "1" (one value per site) or "A" (one
-	// per ALT). Flags carry "0".
+	// Number is the VCF header's Number: "1" (one value per site), "A" (one
+	// per ALT) or "." (variable length, stored verbatim as text -- see
+	// InfoFieldFor). Flags carry "0".
 	Number string `json:"number"`
+}
+
+// NumberAny is the VCF Number for a field of unstated length.
+const NumberAny = "."
+
+// InfoFieldFor builds the captured field for an INFO key as its header declares
+// it, so every consumer stores a declaration the same way.
+//
+// A Number=. field is captured as TEXT, whatever its declared Type. Its value is
+// a list of unstated length -- "0.91,0.88" as readily as "0.91" -- and a numeric
+// column could hold only the rows that happen to carry one value, dropping the
+// rest without a trace. So the column holds the record's value verbatim, and the
+// manifest says so: Type String with Number "." is how a reader knows this
+// column is raw text from a variable-length field rather than a scalar.
+func InfoFieldFor(name, typ, number string) InfoField {
+	f := InfoField{Name: name, Column: InfoColumn(name), Type: InfoType(typ), Number: number}
+	if number == NumberAny && f.Type != InfoFlag {
+		f.Type = InfoString
+	}
+	return f
 }
 
 // InfoPrefix namespaces captured columns.
@@ -105,20 +126,28 @@ func ValidateInfo(fields []InfoField) error {
 		// Number is what decides capturability, and the reason is the shape of
 		// catalog.parquet rather than taste. A site row is one (chrom,pos,ref,alt)
 		// -- one ALT -- so Number=A maps to it exactly, and Number=1 repeats
-		// across a multi-allelic record's rows, which is correct. Number=R
-		// carries a reference value with nowhere to go, and Number=G and
-		// Number=. are variable-length: keeping "the first value" of either
-		// would be a number that means something different per row, which is
-		// worse than not having it.
+		// across a multi-allelic record's rows, which is correct. Number=. is
+		// kept WHOLE, as text, and repeated the same way: nothing says which of
+		// its values belongs to which allele, so slicing it per ALT would invent
+		// that, and keeping only "the first value" would store a number that
+		// means something different per row. Number=R carries a reference value
+		// with nowhere to go, and Number=G one per genotype; both are refused.
 		switch f.Type {
 		case InfoFlag:
 			if f.Number != "0" && f.Number != "" {
 				return fmt.Errorf("info %s: Flag must be Number=0, header says Number=%s", f.Name, f.Number)
 			}
 		default:
-			if f.Number != "1" && f.Number != "A" {
+			switch {
+			case f.Number == "1" || f.Number == "A":
+			case f.Number == NumberAny && f.Type == InfoString:
+			case f.Number == NumberAny:
 				return fmt.Errorf(
-					"info %s: only Number=1 and Number=A can be captured, header says Number=%s "+
+					"info %s: a Number=. field is captured as its verbatim text, so its Type "+
+						"must be String, not %s (InfoFieldFor does this)", f.Name, f.Type)
+			default:
+				return fmt.Errorf(
+					"info %s: only Number=1, Number=A and Number=. can be captured, header says Number=%s "+
 						"(a site row is one ALT, so there is nowhere for the other values to go)",
 					f.Name, f.Number)
 			}
