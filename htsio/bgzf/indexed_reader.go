@@ -293,6 +293,11 @@ func (r *IndexedReader) SeekToVirtualOffset(vo VirtualOffset) error {
 
 // VirtualTell returns the virtual offset of the next byte that will be read.
 func (r *IndexedReader) VirtualTell() VirtualOffset {
+	// A block read to its end reports the next block's start; see
+	// Reader.VirtualTell for why "byte len of this block" cannot be used.
+	if r.block != nil && len(r.block.data) > 0 && r.pos >= len(r.block.data) {
+		return NewVirtualOffset(r.blockOffset+int64(r.block.bsize), 0)
+	}
 	return NewVirtualOffset(r.blockOffset, uint16(r.pos))
 }
 
