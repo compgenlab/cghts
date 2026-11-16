@@ -189,7 +189,12 @@ func TestNoSelectionMeansEveryGtfField(t *testing.T) {
 // models sample or know now, so both headers describe the file in front of them.
 func TestTheBiotypeFieldFollowsTheFile(t *testing.T) {
 	// The shared fixture carries gene_type; this one carries nothing optional.
-	const bare = "chr1\tt\texon\t101\t200\t.\t+\t.\t" +
+	// (Its gene and transcript rows are not optional: an indexed GTF needs them.)
+	const bare = "chr1\tt\tgene\t101\t200\t.\t+\t.\t" +
+		`gene_id "GeneA"; gene_name "GeneA";` + "\n" +
+		"chr1\tt\ttranscript\t101\t200\t.\t+\t.\t" +
+		`gene_id "GeneA"; gene_name "GeneA"; transcript_id "TA";` + "\n" +
+		"chr1\tt\texon\t101\t200\t.\t+\t.\t" +
 		`gene_id "GeneA"; gene_name "GeneA"; transcript_id "TA";` + "\n" +
 		"chr1\tt\tCDS\t101\t200\t.\t+\t0\t" +
 		`gene_id "GeneA"; gene_name "GeneA"; transcript_id "TA";` + "\n"

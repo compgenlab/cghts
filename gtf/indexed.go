@@ -2,6 +2,7 @@ package gtf
 
 import (
 	"container/list"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -44,6 +45,7 @@ type IndexedAnnotationSource struct {
 	probed     bool
 	hasBioType bool
 	hasStatus  bool
+	hasExtents bool // gene or transcript rows: see CheckGeneExtents
 }
 
 type geneKey struct{ ref, geneID string }
@@ -57,12 +59,49 @@ type geneCacheEntry struct {
 // sit beside gtfPath — build it with a GFF-preset tabix index). requiredTags is the
 // same --gtf-tag / gtf_tags filter as NewAnnotationSource, applied when a queried
 // gene's rows are parsed.
+//
+// A GTF without gene or transcript rows is refused; see CheckGeneExtents.
 func NewIndexedAnnotationSource(gtfPath string, requiredTags []string) (*IndexedAnnotationSource, error) {
 	tr, err := tabix.NewReader(gtfPath)
 	if err != nil {
 		return nil, fmt.Errorf("gtf: open indexed %s: %w", gtfPath, err)
 	}
-	return NewIndexedAnnotationSourceFrom(tr, requiredTags), nil
+	src := NewIndexedAnnotationSourceFrom(tr, requiredTags)
+	if err := src.CheckGeneExtents(); err != nil {
+		tr.Close()
+		return nil, fmt.Errorf("gtf: %s: %w", gtfPath, err)
+	}
+	return src, nil
+}
+
+// ErrNoGeneExtents is returned for an indexed GTF that carries no gene or
+// transcript rows.
+var ErrNoGeneExtents = errors.New("no gene or transcript rows: an indexed GTF needs them to know how far each gene reaches; " +
+	"without them a position in an intron overlaps no row and reads as intergenic, and a UTR call misses the coding transcripts that do not reach it")
+
+// CheckGeneExtents reports whether the GTF carries the rows the indexed reader
+// needs to know a gene's extent, judged from the same bounded sample as
+// Provides.
+//
+// The index can find rows only by position. A gene's full extent -- exons,
+// introns and all -- is read from its gene row, or failing that from the
+// union of its transcript rows, which any point inside the gene returns. A GTF
+// of exon and CDS rows alone (UCSC genePredToGtf output, for one) has nothing
+// spanning an intron, so a position inside one overlaps no row of its gene and
+// would be called intergenic, and a UTR call would see only the transcripts
+// whose exons touch it. Neither fails; both answer wrongly. So such a GTF is
+// refused rather than classified: read it whole with NewAnnotationSource, or
+// add gene/transcript rows. NewIndexedAnnotationSource calls this; a caller of
+// NewIndexedAnnotationSourceFrom should.
+//
+// A sample that finds nothing to judge by -- an empty file -- is not refused:
+// "cannot tell" is not "has none".
+func (s *IndexedAnnotationSource) CheckGeneExtents() error {
+	s.probe()
+	if !s.hasExtents {
+		return ErrNoGeneExtents
+	}
+	return nil
 }
 
 // NewIndexedAnnotationSourceFrom wraps an already-open tabix reader, so the gene
@@ -331,12 +370,12 @@ func (s *IndexedAnnotationSource) probe() {
 		return
 	}
 	s.probed = true
-	// Unknown until proven otherwise, so a file this cannot read reports both
+	// Unknown until proven otherwise, so a file this cannot read reports all
 	// present — see Provides on why that is the safe direction.
-	s.hasBioType, s.hasStatus = true, true
+	s.hasBioType, s.hasStatus, s.hasExtents = true, true, true
 
 	lines, genes := 0, 0
-	bio, status := false, false
+	bio, status, extents := false, false, false
 	for _, ref := range s.tr.RefNames() {
 		if lines >= probeLines {
 			break
@@ -372,16 +411,19 @@ func (s *IndexedAnnotationSource) probe() {
 			if a.status != "" {
 				status = true
 			}
-			if bio && status {
+			if cols[2] == "gene" || cols[2] == "transcript" {
+				extents = true
+			}
+			if bio && status && extents {
 				break // nothing left to learn
 			}
 		}
-		if bio && status {
+		if bio && status && extents {
 			break
 		}
 	}
 	if genes == 0 {
 		return // nothing to go on; the unknown answer stands
 	}
-	s.hasBioType, s.hasStatus = bio, status
+	s.hasBioType, s.hasStatus, s.hasExtents = bio, status, extents
 }
