@@ -27,7 +27,7 @@ import (
 
 type fakeWriteS3 struct {
 	mu      sync.Mutex
-	objects map[string][]byte          // "bucket/key" -> contents
+	objects map[string][]byte           // "bucket/key" -> contents
 	uploads map[string]map[int32][]byte // uploadId -> part number -> bytes
 
 	initiated int
