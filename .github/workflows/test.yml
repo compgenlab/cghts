@@ -28,10 +28,13 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # The SAM/BAM/CRAM tests compare against samtools (and CRAM reading uses
-      # it); without it those tests fail rather than skip.
-      - name: Install samtools
-        run: sudo apt-get update && sudo apt-get install -y samtools
+      # htslib's own tools are the reference implementation the formats are
+      # checked against. The SAM/BAM/CRAM tests compare with samtools (and
+      # CRAM reading uses it) and fail without it; the tabix tests compare
+      # cghts's reader and index writer with htslib's tabix and skip without
+      # it; bcftools is there for VCF checks.
+      - name: Install htslib tools
+        run: sudo apt-get update && sudo apt-get install -y samtools tabix bcftools
 
       - name: Check formatting
         run: |
