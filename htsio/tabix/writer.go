@@ -529,9 +529,17 @@ func (ib *tbiIndexBuilder) addRecord(l tabixLine, begin, end bgzf.VirtualOffset)
 
 	bin := Reg2Bin(l.start, recEnd)
 
+	// A bin's chunk is extended only by a record that starts where it ends --
+	// the previous record in the file was in the same bin. Otherwise another
+	// bin's records lie in between and this one starts a new chunk, as htslib
+	// does. Extending unconditionally gave every bin a single chunk from its
+	// first record to its last, so a top-level bin -- in a GTF, where long
+	// genes live -- spanned most of its chromosome, and every query, which
+	// always reads the top-level bins, read megabytes. The index was valid,
+	// just useless for seeking.
 	chunks := rb.bins[uint32(bin)]
-	if len(chunks) > 0 {
-		chunks[len(chunks)-1].End = end
+	if n := len(chunks); n > 0 && chunks[n-1].End == begin {
+		chunks[n-1].End = end
 	} else {
 		chunks = append(chunks, Chunk{Begin: begin, End: end})
 	}

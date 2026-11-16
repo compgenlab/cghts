@@ -394,41 +394,24 @@ func (tr *Reader) hydrateWindow(refID int, ref string, winStart, winEnd int) ([]
 	if len(chunks) == 0 {
 		return nil, nil
 	}
-	if err := tr.ir.SeekToVirtualOffset(chunks[0].Begin); err != nil {
-		return nil, fmt.Errorf("tabix: seeking to chunk: %w", err)
-	}
-
-	scanner := bufio.NewScanner(tr.ir)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
-
 	var out []*Record
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		if line == "" {
-			continue
+	err := tr.scanChunks(chunks, func(line string) bool {
+		if line == "" || (tr.meta.Meta != 0 && line[0] == byte(tr.meta.Meta)) {
+			return true
 		}
-		if tr.meta.Meta != 0 && line[0] == byte(tr.meta.Meta) {
-			continue
-		}
-
 		rec, err := parseTabulatedLine(line, &tr.meta)
 		if err != nil {
-			continue
+			return true
 		}
-
-		if rec.Ref != ref {
-			break
+		if rec.Ref != ref || rec.Start >= winEnd {
+			return false
 		}
-		if rec.End <= winStart {
-			continue
+		if rec.End > winStart {
+			out = append(out, rec)
 		}
-		if rec.Start >= winEnd {
-			break
-		}
-		out = append(out, rec)
-	}
-	if err := scanner.Err(); err != nil {
+		return true
+	})
+	if err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -436,48 +419,98 @@ func (tr *Reader) hydrateWindow(refID int, ref string, winStart, winEnd int) ([]
 
 func (tr *Reader) iterChunks(chunks []Chunk, ref string, start, end int) iter.Seq2[*Record, error] {
 	return func(yield func(*Record, error) bool) {
-		if err := tr.ir.SeekToVirtualOffset(chunks[0].Begin); err != nil {
-			yield(nil, fmt.Errorf("tabix: seeking to chunk: %w", err))
-			return
-		}
-
-		scanner := bufio.NewScanner(tr.ir)
-		scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
-
-		for scanner.Scan() {
-			line := scanner.Text()
-
-			if line == "" {
-				continue
+		stopped := false
+		err := tr.scanChunks(chunks, func(line string) bool {
+			if line == "" || (tr.meta.Meta != 0 && line[0] == byte(tr.meta.Meta)) {
+				return true
 			}
-			if tr.meta.Meta != 0 && line[0] == byte(tr.meta.Meta) {
-				continue
-			}
-
 			rec, err := parseTabulatedLine(line, &tr.meta)
 			if err != nil {
-				continue
+				return true
 			}
-
-			if rec.Ref != ref {
-				return
+			if rec.Ref != ref || rec.Start >= end {
+				return false
 			}
 			if rec.End <= start {
-				continue
+				return true
 			}
-			if rec.Start >= end {
-				return
-			}
-
 			if !yield(rec, nil) {
-				return
+				stopped = true
+				return false
 			}
-		}
-
-		if err := scanner.Err(); err != nil {
+			return true
+		})
+		if err != nil && !stopped {
 			yield(nil, err)
 		}
 	}
+}
+
+// scanChunks hands fn each line in the index's chunks, in file order, until
+// fn returns false or the chunks run out.
+//
+// It reads each chunk from its start to its end and jumps the gaps between
+// them, which is how a tabix index is meant to be read. It used to seek to the
+// first chunk and read every line from there until the region was passed. A
+// region's first chunk is often a top-level bin's: in a GTF the long genes
+// live there, so it starts far upstream of the region, and every query read
+// -- and decompressed and parsed -- megabytes it then threw away.
+//
+// It seeks only when behind a chunk's start, never back to one: a reader at
+// the end of a block is at the same file position as the next block's start,
+// so the last line read for one chunk can be the first of the next, and
+// seeking back to it would hand fn that line twice.
+func (tr *Reader) scanChunks(chunks []Chunk, fn func(line string) bool) error {
+	var buf []byte
+	for i, ch := range chunks {
+		if i == 0 || tr.ir.VirtualTell() < ch.Begin {
+			if err := tr.ir.SeekToVirtualOffset(ch.Begin); err != nil {
+				return fmt.Errorf("tabix: seeking to chunk: %w", err)
+			}
+		}
+		for tr.ir.VirtualTell() < ch.End {
+			line, err := readLine(tr.ir, buf[:0])
+			buf = line
+			if len(line) > 0 {
+				if !fn(string(line)) {
+					return nil
+				}
+			}
+			if err == io.EOF {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// readLine appends one line from r to buf, without its newline (or a trailing
+// carriage return). It returns io.EOF only once nothing is left; a final line
+// with no newline is returned with a nil error first.
+func readLine(r io.ByteReader, buf []byte) ([]byte, error) {
+	for {
+		c, err := r.ReadByte()
+		if err != nil {
+			if err == io.EOF && len(buf) > 0 {
+				return trimCR(buf), nil
+			}
+			return trimCR(buf), err
+		}
+		if c == '\n' {
+			return trimCR(buf), nil
+		}
+		buf = append(buf, c)
+	}
+}
+
+func trimCR(b []byte) []byte {
+	if n := len(b); n > 0 && b[n-1] == '\r' {
+		return b[:n-1]
+	}
+	return b
 }
 
 func parseTabulatedLine(line string, meta *tabixMeta) (*Record, error) {
