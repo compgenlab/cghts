@@ -112,10 +112,18 @@ func (s *IndexedAnnotationSource) FindGenes(ref string, start, end int) []*Gene 
 	return out
 }
 
-// FindGenicRegionForPos classifies pos within gene geneID, mirroring
-// AnnotationSource.FindGenicRegionForPos. It delegates to the gene's cached
-// single-gene model (self-building it from a point query if not already warm).
+// FindGenicRegionForPos classifies pos, mirroring
+// AnnotationSource.FindGenicRegionForPos. With a geneID it delegates to that
+// gene's cached single-gene model (self-building it from a point query if not
+// already warm); with none it classifies against every gene the index finds at
+// pos, whose models are complete because each is read from its gene's full
+// span. That second form used to return Intergenic for every position, since it
+// looked up a gene with an empty ID; it is what a per-read caller such as
+// cgkit sam-stats --gtf needs, without loading the whole GTF.
 func (s *IndexedAnnotationSource) FindGenicRegionForPos(ref string, pos int, strand bed.Strand, geneID string) GenicRegion {
+	if geneID == "" {
+		return classifyAt(s.FindGenes(ref, pos, pos+1), ref, pos, strand)
+	}
 	if _, ok := s.cache[geneKey{ref, geneID}]; !ok {
 		for _, sp := range s.overlappingSpans(ref, pos, pos+1) {
 			if sp.geneID == geneID {

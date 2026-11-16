@@ -90,12 +90,48 @@ func GenicRegions() []GenicRegion {
 // returned; with a real strand, overlaps on the opposite strand return anti_*
 // codes. When geneID is non-empty, classification is restricted to that gene
 // (used to report a per-gene region for a position overlapping several genes).
-//
-// Faithful port of GTFAnnotationSource.findGenicRegionForPos. The flags
-// accumulate set-once across all transcripts and overlapping genes (logical
-// OR), and the final cascade applies sense findings before their intron/anti
-// counterparts.
+// See classifyAt for the rules.
 func (s *AnnotationSource) FindGenicRegionForPos(ref string, pos int, strand bed.Strand, geneID string) GenicRegion {
+	genes := s.FindGenes(ref, pos, pos+1)
+	if geneID != "" {
+		var only []*Gene
+		for _, g := range genes {
+			if g.GeneID == geneID {
+				only = append(only, g)
+			}
+		}
+		genes = only
+	}
+	return classifyAt(genes, ref, pos, strand)
+}
+
+// classifyAt classifies a 0-based position on ref given the genes overlapping
+// it. It ports ngsutilsj GTFAnnotationSource.findGenicRegionForPos -- the same
+// categories, the same precedence (coding, 5'UTR, 3'UTR, non-coding exon, then
+// coding/5'UTR/3'UTR/non-coding intron, then intergenic) and the same rule that
+// a category is anti-sense when any gene contributing to it is -- with one
+// deliberate difference: it does not depend on the order genes and transcripts
+// are visited.
+//
+// The Java version keeps its isExon/isCoding flags across the whole loop, so a
+// transcript is judged partly by the ones visited before it: an exon hit in an
+// earlier transcript makes a later transcript's intron read as a UTR, and a CDS
+// hit anywhere skips every later transcript's exon check. It visits transcripts
+// in java.util.HashMap order and overlapping genes in HashSet order, the second
+// coming from JVM identity hash codes, so its answer at a position covered by
+// several transcripts or genes is an accident of iteration order -- and the
+// gene order cannot be reproduced outside the JVM. Here each transcript is
+// judged on its own exons and CDS and the findings are combined, so the answer
+// is a property of the annotation. Where Java's order happened not to matter
+// the two agree; they differ at roughly 3% of positions in a GENCODE gene body.
+//
+// What is kept, quirks included: the coding-sequence bounds are the CDS rows'
+// (the stop codon is outside them, so its first base is neither CDS nor UTR and
+// reads as a non-coding exon), and a coding transcript classifies every
+// position of its gene that none of its exons covers as an intron, by where it
+// lies relative to that transcript's CDS -- even outside the transcript's own
+// span.
+func classifyAt(genes []*Gene, ref string, pos int, strand bed.Strand) GenicRegion {
 	if ref == "chrM" || ref == "M" {
 		return Mitochondrial
 	}
@@ -106,99 +142,97 @@ func (s *AnnotationSource) FindGenicRegionForPos(ref string, pos int, strand bed
 		isGeneRev, isExonRev, isCodingRev, isUtr3Rev, isUtr5Rev bool
 	)
 
-	// A 1-bp unstranded probe; the antisense decision is made manually against
-	// each gene's strand so that genes on either strand are found.
+	// A 1-bp unstranded probe; the antisense decision is made against each
+	// gene's strand so that genes on either strand are found.
 	probe := span{ref: ref, start: pos, end: pos + 1, strand: bed.StrandNone}
-	anti := func(g *Gene) bool { return strand != bed.StrandNone && g.Strand != strand }
-
-	for _, gene := range s.FindGenes(ref, pos, pos+1) {
-		if geneID != "" && gene.GeneID != geneID {
-			continue
-		}
-		isGene = true
-		if anti(gene) {
-			isGeneRev = true
-		}
-
-		for _, txpt := range gene.SortedTranscripts() {
-			if txpt.HasCDS() {
-				for _, cds := range txpt.CDS {
-					if cds.region(gene.Ref).contains(probe) {
-						isExon = true
-						isCoding = true
-						if anti(gene) {
-							isCodingRev = true
-						}
-					}
-				}
-				if !isCoding {
-					for _, exon := range txpt.Exons {
-						if exon.region(gene.Ref).contains(probe) {
-							isExon = true
-							if anti(gene) {
-								isExonRev = true
-							}
-						}
-					}
-				}
-				// NB: isExon is the method-scoped flag (it may have been set by
-				// an earlier transcript) — this matches the Java original.
-				if isExon {
-					if gene.Strand == bed.StrandPlus {
-						if pos < txpt.CdsStart {
-							isUtr5 = true
-							if anti(gene) {
-								isUtr5Rev = true
-							}
-						} else if pos > txpt.CdsEnd {
-							isUtr3 = true
-							if anti(gene) {
-								isUtr3Rev = true
-							}
-						}
-					} else {
-						if pos < txpt.CdsStart {
-							isUtr3 = true
-							if anti(gene) {
-								isUtr3Rev = true
-							}
-						} else if pos > txpt.CdsEnd {
-							isUtr5 = true
-							if anti(gene) {
-								isUtr5Rev = true
-							}
-						}
-					}
-				} else {
-					if gene.Strand == bed.StrandPlus {
-						if pos < txpt.CdsStart {
-							isUtr5Intron = true
-						} else if pos > txpt.CdsEnd {
-							isUtr3Intron = true
-						} else {
-							isCodingIntron = true
-						}
-					} else {
-						if pos < txpt.CdsStart {
-							isUtr3Intron = true
-						} else if pos > txpt.CdsEnd {
-							isUtr5Intron = true
-						} else {
-							isCodingIntron = true
-						}
-					}
-				}
-			} else {
-				for _, exon := range txpt.Exons {
-					if exon.region(gene.Ref).contains(probe) {
-						isExon = true
-						if anti(gene) {
-							isExonRev = true
-						}
-					}
-				}
+	covers := func(xs []*Exon, ref string) bool {
+		for _, x := range xs {
+			if x.region(ref).contains(probe) {
+				return true
 			}
 		}
+		return false
+	}
+
+	// Pass 1: is the position exonic in any transcript of any overlapping gene?
+	// Java answers this with a flag that grows as it walks, so a transcript is
+	// judged by whichever ones it happened to visit first; asking it of all of
+	// them up front gives the same answer whatever the order.
+	exonic := false
+	for _, gene := range genes {
+		for _, txpt := range gene.SortedTranscripts() {
+			if covers(txpt.CDS, gene.Ref) || covers(txpt.Exons, gene.Ref) {
+				exonic = true
+			}
+		}
+	}
+
+	// Pass 2: each transcript's own findings, with "exonic" deciding -- as in
+	// Java -- whether a coding transcript reads the position as UTR or intron.
+	for _, gene := range genes {
+		isGene = true
+		anti := strand != bed.StrandNone && gene.Strand != strand
+		if anti {
+			isGeneRev = true
+		}
+		// Sorted only for determinism of iteration; with nothing carried
+		// between transcripts the order cannot change the answer.
+		for _, txpt := range gene.SortedTranscripts() {
+			if !txpt.HasCDS() {
+				if covers(txpt.Exons, gene.Ref) {
+					isExon = true
+					isExonRev = isExonRev || anti
+				}
+				continue
+			}
+
+			if covers(txpt.CDS, gene.Ref) {
+				isExon, isCoding = true, true
+				isCodingRev = isCodingRev || anti
+				continue // inside [CdsStart, CdsEnd): neither UTR nor intron
+			}
+			if covers(txpt.Exons, gene.Ref) {
+				isExon = true
+				isExonRev = isExonRev || anti
+			}
+
+			// 5' and 3' swap with the gene's strand.
+			before, after := &isUtr5, &isUtr3
+			beforeRev, afterRev := &isUtr5Rev, &isUtr3Rev
+			beforeIntron, afterIntron := &isUtr5Intron, &isUtr3Intron
+			if gene.Strand != bed.StrandPlus {
+				before, after = after, before
+				beforeRev, afterRev = afterRev, beforeRev
+				beforeIntron, afterIntron = afterIntron, beforeIntron
+			}
+
+			if exonic {
+				switch {
+				case pos < txpt.CdsStart:
+					*before = true
+					*beforeRev = *beforeRev || anti
+				case pos > txpt.CdsEnd:
+					*after = true
+					*afterRev = *afterRev || anti
+				}
+				continue
+			}
+			switch {
+			case pos < txpt.CdsStart:
+				*beforeIntron = true
+			case pos > txpt.CdsEnd:
+				*afterIntron = true
+			default:
+				isCodingIntron = true
+			}
+		}
+	}
+
+	pick := func(rev bool, anti, sense GenicRegion) GenicRegion {
+		if rev {
+			return anti
+		}
+		return sense
 	}
 
 	switch {
