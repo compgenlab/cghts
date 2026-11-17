@@ -25,11 +25,13 @@ type Chunk struct {
 type binIndex struct {
 	bins      map[uint32][]Chunk   // bin number → chunks
 	linearIdx []bgzf.VirtualOffset // one entry per 16kb window
+	stats     *RefStats            // the pseudo-bin, nil if the index has none
 }
 
 // BinIndex is a parsed BAI or TBI index.
 type BinIndex struct {
-	refs []binIndex
+	refs   []binIndex
+	noCoor *uint64 // trailing n_no_coor, nil if absent
 
 	// TBI-specific header fields (zero-valued for BAI).
 	Format    int32    // 0=generic, 1=SAM, 2=VCF
@@ -161,6 +163,11 @@ func parseTBIBody(r io.Reader) (*BinIndex, error) {
 		idx.refs = append(idx.refs, rb)
 	}
 
+	noCoor, err := readNoCoor(r)
+	if err != nil {
+		return nil, fmt.Errorf("tbi: reading n_no_coor: %w", err)
+	}
+	idx.noCoor = noCoor
 	return idx, nil
 }
 
@@ -185,6 +192,11 @@ func readBinIndex(r io.Reader) (*BinIndex, error) {
 		idx.refs = append(idx.refs, rb)
 	}
 
+	noCoor, err := readNoCoor(r)
+	if err != nil {
+		return nil, fmt.Errorf("reading n_no_coor: %w", err)
+	}
+	idx.noCoor = noCoor
 	return idx, nil
 }
 
@@ -229,6 +241,12 @@ func readRefBins(r io.Reader, ref *binIndex) error {
 				End:   bgzf.VirtualOffset(end),
 			})
 		}
+		if binNum == tbiPseudoBin {
+			if st, ok := parsePseudoBin(chunks); ok {
+				ref.stats = st
+				continue
+			}
+		}
 		ref.bins[binNum] = chunks
 	}
 
@@ -254,7 +272,18 @@ func readRefBins(r io.Reader, ref *binIndex) error {
 
 // reg2bins returns the list of bins that may overlap the region [beg, end)
 // using the standard BAI/TBI 6-level binning scheme.
+//
+// The region is clamped to [0, 2^29), the most the scheme covers, as htslib's
+// hts_reg2bins does. Whole-contig queries pass math.MaxInt32 as the end, and
+// unclamped, each level's loop ran on into the next level's bin numbers -- and
+// into bin 37450, the pseudo-bin, whose second "chunk" is a pair of counts.
 func reg2bins(beg, end int) []uint32 {
+	if beg < 0 {
+		beg = 0
+	}
+	if end > tbiMaxPos {
+		end = tbiMaxPos
+	}
 	end--
 	var bins []uint32
 	bins = append(bins, 0)

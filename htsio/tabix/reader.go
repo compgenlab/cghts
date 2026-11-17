@@ -18,6 +18,7 @@ type tabixIndex interface {
 	Query(refID int, start, end int) []Chunk
 	RefID(name string) int
 	RefNames() []string
+	RefStats(refID int) (RefStats, bool)
 }
 
 // tabixMeta holds the column definitions and coordinate metadata from
