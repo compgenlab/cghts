@@ -15,11 +15,17 @@ import "fmt"
 //     parts -- so it still bounds every base it covers. Bands are the store's
 //     own DepthBands, which is what makes a query gate answer blocks and
 //     catalog runs by the same rule.
-//   - Tolerate short gaps. Fragmentation comes from brief excursions -- a
-//     handful of bases below the gate, a block boundary -- not from real
-//     coverage structure. Merging across an uncovered stretch of at most
-//     MaxGap bases weakens the claim to "covered at MinDP, with no uncovered
-//     run longer than MaxGap", which is why MaxGap is recorded beside the data.
+//
+// WHAT IS NOT MERGED ACROSS: ANY GAP. Only blocks that abut merge. A gVCF covers
+// every position of its calling intervals with a block or a record, so a gap
+// between two kept blocks is one of two things: a block dropped for falling below
+// MinDP, or bases the caller reported nothing for. Both are NOT ASSAYED. A block
+// bridging either would answer 0/0 there, with a MinDP the source contradicted --
+// an observation nobody made, which is the one thing this store must not do.
+// Earlier versions tolerated gaps of up to MaxGap bases to save rows (measured
+// on confidence masks, 8.4x for 0.35% of bases over-claimed); that trade put
+// false reference calls at exactly the low-coverage dips a hidden variant sits
+// in, and was withdrawn. A block now bounds every base it covers.
 //
 // WHAT IS NEVER MERGED ACROSS: a barrier. A variant record -- any record with a
 // real alternate, filtered or not -- is a position where the sample was NOT
@@ -31,15 +37,12 @@ import "fmt"
 // Coarsener merges a sample's reference blocks, streamed in coordinate order,
 // into ref_blocks rows.
 type Coarsener struct {
-	// MinDP drops a block whose floor is below it. A dropped block is uncovered
-	// territory at the gate, so it counts toward a gap like any other.
+	// MinDP drops a block whose floor is below it. A dropped block leaves a gap,
+	// and nothing merges across a gap, so the spans either side stay apart.
 	MinDP int32
 	// Bands are the depth boundaries a merge may not cross. Empty puts every
 	// block in one band.
 	Bands []int32
-	// MaxGap is the longest uncovered stretch, in bases, a merge may span. Zero
-	// still merges blocks that abut.
-	MaxGap int32
 	// Passthrough emits every kept block as the source wrote it: no banding, no
 	// merging. For targeted and exome work, where blocks are few and fidelity is
 	// cheap.
@@ -64,7 +67,7 @@ func (c *Coarsener) Block(b RefBlock) error {
 			b.Chrom, b.Start, b.End, c.open.End)
 	}
 	if b.MinDP < c.MinDP {
-		return nil // uncovered at the gate; a later block may bridge it, a barrier may not
+		return nil // uncovered at the gate: the gap it leaves keeps its neighbours apart
 	}
 	band := DepthBand(c.Bands, b.MinDP)
 	if c.open != nil && c.mergeable(b, band) {
@@ -87,7 +90,7 @@ func (c *Coarsener) mergeable(b RefBlock, band int) bool {
 	return !c.Passthrough &&
 		SameChrom(c.open.Chrom, b.Chrom) &&
 		band == c.openBand &&
-		b.Start-c.open.End-1 <= c.MaxGap
+		b.Start == c.open.End+1 // abutting only; see "ANY GAP" above
 }
 
 // Barrier closes the open span at a position the sample may not be reference --

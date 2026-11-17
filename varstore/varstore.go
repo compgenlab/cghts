@@ -204,8 +204,8 @@ func (s *VarStore) FormatFields() []FormatField { return s.man.Params.Format }
 // whether it can answer about positions absent from the sites catalog.
 func (s *VarStore) HasRefBlocks() bool { return s.man.Params.RefBlocks }
 
-// MaxGap is the largest uncovered stretch this archive's reference blocks were
-// permitted to span.
+// MaxGap is non-zero only for an archive whose blocks were merged across gaps by
+// an older version, and so may claim bases never assayed. See ManifestParams.MaxGap.
 func (s *VarStore) MaxGap() int32 { return s.man.Params.MaxGap }
 
 // RefBlockSamples returns the samples whose gVCF fragments were attached, and

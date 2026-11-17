@@ -57,7 +57,7 @@ func TestRefBlocksRoundTrip(t *testing.T) {
 		{SampleID: "S2", Chrom: "chr1", Start: 1, End: 4200, MinDP: 12, GQ: 40},
 		{SampleID: "S2", Chrom: "chr1", Start: 4300, End: 9000, MinDP: 28, GQ: 55},
 	}
-	writeCoverageStore(t, base, WriterOpts{MinDP: 10, RefBlocks: true, MaxGap: 10}, want)
+	writeCoverageStore(t, base, WriterOpts{MinDP: 10, RefBlocks: true}, want)
 
 	s, err := OpenParquet(base)
 	if err != nil {
@@ -68,8 +68,8 @@ func TestRefBlocksRoundTrip(t *testing.T) {
 	if !s.HasRefBlocks() {
 		t.Fatal("a store written with coverage reports none")
 	}
-	if s.MaxGap() != 10 {
-		t.Errorf("MaxGap is %d, want 10; a reader cannot tell what covered meant here", s.MaxGap())
+	if s.MaxGap() != 0 {
+		t.Errorf("MaxGap is %d, want 0: blocks are never merged across gaps", s.MaxGap())
 	}
 
 	var got []RefBlock

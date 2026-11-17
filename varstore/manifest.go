@@ -111,15 +111,13 @@ type ManifestParams struct {
 	// -- a ratio carries a one-line guarantee that an arbitrary list does not.
 	DepthRatio float64 `json:"depth_ratio,omitempty"`
 
-	// MaxGap is the largest uncovered stretch a reference block was permitted to
-	// span, when this store carries one. Zero means the blocks are the source's
-	// own, unmerged -- or that there are none.
-	//
-	// A BLOCK'S CLAIM IS ONLY AS STRONG AS THIS. Merging across small gaps is
-	// what makes the table affordable, and it weakens "every base in this span
-	// was covered" to "no uncovered run longer than MaxGap". Two stores built
-	// with different tolerances do not mean the same thing by "covered", which
-	// a roll-up spanning both has no other way to see.
+	// MaxGap is non-zero only in a store whose reference blocks were attached by
+	// a version that merged them across gaps of up to this many bases. Such a
+	// block can cover bases its gVCF put below the gate or never reported, and
+	// answers 0/0 there -- an observation nobody made. Blocks are now merged only
+	// where they abut, so this is always zero when written; it is kept so a
+	// reader can warn about an older store, and so attach can refuse to carry
+	// its blocks into a --replace (a --rebuild from fresh fragments clears it).
 	MaxGap int32 `json:"max_gap,omitempty"`
 
 	// RefBlocks records whether this store carries genomic block spans, so a

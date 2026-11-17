@@ -202,14 +202,6 @@ type WriterOpts struct {
 	// one asserts "covered nowhere", where an absent one asserts nothing.
 	RefBlocks bool
 
-	// MaxGap is the largest uncovered stretch a reference block was permitted to
-	// span when it was built, recorded so a reader knows what "covered" meant
-	// here. Zero means the blocks are the source's own, unmerged.
-	//
-	// Recorded for the same reason MinDP is: two stores built with different
-	// tolerances do not mean the same thing by "covered", and a roll-up
-	// spanning both has to be able to see that they differ.
-	MaxGap  int32
 	Command string
 
 	// ShardSites splits each table every N sites, so a locus query reads one
@@ -728,7 +720,6 @@ func (w *Writer) manifest() (VolumeManifest, error) {
 			RowGroupSize: w.opts.RowGroupSize,
 			DepthBands:   w.opts.DepthBands,
 			DepthRatio:   w.opts.DepthRatio,
-			MaxGap:       w.opts.MaxGap,
 			RefBlocks:    w.opts.RefBlocks,
 			Info:         w.opts.Info,
 			Format:       w.opts.Format,
@@ -1291,8 +1282,8 @@ type ParquetVolume struct {
 // whether it can answer about positions absent from the sites catalog.
 func (s *ParquetVolume) HasRefBlocks() bool { return s.hasRefBlocks }
 
-// MaxGap is the largest uncovered stretch this store's reference blocks were
-// permitted to span. Zero when there are none, or when they are unmerged.
+// MaxGap is non-zero only for a store whose blocks were merged across gaps by an
+// older version, and so may claim bases never assayed. See ManifestParams.MaxGap.
 func (s *ParquetVolume) MaxGap() int32 {
 	if s.manifest == nil {
 		return 0
