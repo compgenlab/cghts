@@ -633,6 +633,62 @@ func (r *VcfRecord) Sample(i int) (*Attributes, error) {
 	return r.samples[i], nil
 }
 
+// FormatIndex returns the position of key in this record's FORMAT column, or
+// -1 when the record does not declare it. Resolve it once per record and pass it
+// to SampleField for every sample.
+//
+// A key the FORMAT column repeats resolves to its LAST occurrence, which is the
+// value Sample reports for it.
+func (r *VcfRecord) FormatIndex(key string) int {
+	r.ensureFormat()
+	for k := len(r.fmtKeys) - 1; k >= 0; k-- {
+		if r.fmtKeys[k] == key {
+			return k
+		}
+	}
+	return -1
+}
+
+// SampleField returns field k of sample i's column, as a substring of the
+// record line, without parsing the rest of the column. k comes from
+// FormatIndex. It reports exactly what Sample(i).Get(key).String() does: a
+// field the sample dropped from the end of its column reads as ".", and so
+// does k == -1, a key the record does not declare -- callers that must tell
+// "declared but missing" from "not declared" check FormatIndex themselves.
+//
+// It exists because Sample builds a map of every FORMAT key for every sample,
+// and a reader that wants two fields out of twelve, across tens of thousands
+// of samples and millions of records, spends most of its time allocating and
+// collecting those maps. A sample already parsed through Sample -- and so
+// possibly edited in place -- is read from the parsed copy instead, so the two
+// never disagree.
+func (r *VcfRecord) SampleField(i, k int) string {
+	r.ensureFormat()
+	if i < 0 || i >= len(r.sampleRaw) || k < 0 {
+		return missing
+	}
+	if a := r.samples[i]; a != nil {
+		if k < len(r.fmtKeys) {
+			if v, ok := a.Get(r.fmtKeys[k]); ok {
+				return v.String()
+			}
+		}
+		return missing
+	}
+	col := r.sampleRaw[i]
+	for ; k > 0; k-- {
+		j := strings.IndexByte(col, ':')
+		if j < 0 {
+			return missing
+		}
+		col = col[j+1:]
+	}
+	if j := strings.IndexByte(col, ':'); j >= 0 {
+		return col[:j]
+	}
+	return col
+}
+
 // SampleByName returns the parsed FORMAT attributes for the named sample.
 func (r *VcfRecord) SampleByName(name string) (*Attributes, error) {
 	if r.header == nil {
