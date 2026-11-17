@@ -349,6 +349,30 @@ func (idx *BinIndex) RefID(name string) int {
 }
 
 // RefNames returns the reference sequence names, in reference order.
+// tbiPseudoBin is the bin number htslib reserves, past the last real bin of
+// the 6-level scheme, for per-reference metadata rather than chunks.
+const tbiPseudoBin = 37450
+
+// RecordCount returns the number of records the index says reference refID
+// holds, read from htslib's pseudo-bin: its second "chunk" is (n_mapped,
+// n_unmapped), and for a tabix index n_mapped is the record count -- what
+// `bcftools index -n` reports. ok is false when the index carries no such bin
+// (indexes from older cghts, or other writers) or refID is out of range, so a
+// caller can fall back to something else rather than trusting a zero.
+func (idx *BinIndex) RecordCount(refID int) (n uint64, ok bool) {
+	if refID < 0 || refID >= len(idx.refs) {
+		return 0, false
+	}
+	return pseudoBinCount(idx.refs[refID].bins[tbiPseudoBin])
+}
+
+func pseudoBinCount(chunks []Chunk) (uint64, bool) {
+	if len(chunks) < 2 {
+		return 0, false
+	}
+	return uint64(chunks[1].Begin), true
+}
+
 func (idx *BinIndex) RefNames() []string { return idx.Names }
 
 // Reg2Bin calculates the BAM bin for a region [beg, end) using the BAM

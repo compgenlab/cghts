@@ -474,7 +474,9 @@ func (tw *Writer) mergeFiles() error {
 type tbiRefBuilder struct {
 	bins      map[uint32][]Chunk
 	linearIdx map[int]bgzf.VirtualOffset
+	firstVO   bgzf.VirtualOffset
 	lastVO    bgzf.VirtualOffset
+	nRecords  uint64
 }
 
 type tbiIndexBuilder struct {
@@ -544,6 +546,10 @@ func (ib *tbiIndexBuilder) addRecord(l tabixLine, begin, end bgzf.VirtualOffset)
 		chunks = append(chunks, Chunk{Begin: begin, End: end})
 	}
 	rb.bins[uint32(bin)] = chunks
+	if rb.nRecords == 0 {
+		rb.firstVO = begin
+	}
+	rb.nRecords++
 	rb.lastVO = end
 
 	startWindow := l.start >> 14
@@ -613,6 +619,16 @@ func (ib *tbiIndexBuilder) writeTBI(path string) error {
 				}
 			}
 			mergedBins[bin] = merged
+		}
+
+		// The pseudo-bin htslib writes for every reference with records: the
+		// virtual offsets spanning them, then the record count. Nothing reads
+		// it to answer a query (reg2bins never yields it), but it is how
+		// `bcftools index -n` -- and a progress report -- learn how many records
+		// a chromosome holds without reading them.
+		mergedBins[tbiPseudoBin] = []Chunk{
+			{Begin: rb.firstVO, End: rb.lastVO},
+			{Begin: bgzf.VirtualOffset(rb.nRecords), End: 0},
 		}
 
 		binary.Write(w, binary.LittleEndian, int32(len(mergedBins)))

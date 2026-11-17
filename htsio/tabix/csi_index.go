@@ -281,4 +281,18 @@ func (idx *CSIIndex) RefID(name string) int {
 }
 
 // RefNames returns the reference sequence names, in reference order.
+// RecordCount is BinIndex.RecordCount for a CSI index, whose pseudo-bin
+// number depends on its depth: one past the last real bin.
+func (idx *CSIIndex) RecordCount(refID int) (n uint64, ok bool) {
+	if refID < 0 || refID >= len(idx.refs) || idx.depth < 0 || idx.depth > 9 {
+		return 0, false
+	}
+	pseudo := uint32(((1<<(3*(uint(idx.depth)+1)))-1)/7 + 1)
+	b := idx.refs[refID].bins[pseudo]
+	if b == nil {
+		return 0, false
+	}
+	return pseudoBinCount(b.chunks)
+}
+
 func (idx *CSIIndex) RefNames() []string { return idx.Names }

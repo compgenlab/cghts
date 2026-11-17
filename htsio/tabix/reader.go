@@ -18,6 +18,7 @@ type tabixIndex interface {
 	Query(refID int, start, end int) []Chunk
 	RefID(name string) int
 	RefNames() []string
+	RecordCount(refID int) (uint64, bool)
 }
 
 // tabixMeta holds the column definitions and coordinate metadata from
@@ -242,6 +243,13 @@ func (tr *Reader) Meta() tabixMeta {
 // HasRef reports whether the index contains the given reference name.
 func (tr *Reader) HasRef(ref string) bool {
 	return tr.idx.RefID(ref) >= 0
+}
+
+// RecordCount returns how many records the index says ref holds, without
+// reading them; ok is false when the index does not record counts (see
+// BinIndex.RecordCount) or does not know ref. Names match verbatim, as HasRef.
+func (tr *Reader) RecordCount(ref string) (n uint64, ok bool) {
+	return tr.idx.RecordCount(tr.idx.RefID(ref))
 }
 
 // RefNames returns the reference sequence names present in the index, in
