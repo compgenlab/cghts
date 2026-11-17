@@ -34,7 +34,7 @@ func blk(chrom string, start, end, minDP int32) RefBlock {
 }
 
 func TestCoarsenerMergesWithinABandAndBreaksAcrossOne(t *testing.T) {
-	c := Coarsener{MinDP: 10, Bands: []int32{10, 20, 50}, MaxGap: 10}
+	c := Coarsener{MinDP: 10, Bands: []int32{10, 20, 50}}
 	got := coarsen(t, c, []any{
 		blk("chr1", 100, 199, 12), // band 10-19
 		blk("chr1", 200, 299, 18), // same band, abutting: merges
@@ -47,32 +47,34 @@ func TestCoarsenerMergesWithinABandAndBreaksAcrossOne(t *testing.T) {
 	}
 }
 
-// A gap of exactly MaxGap bases is bridged; one more is not. The gap counts the
-// uncovered bases strictly between two blocks.
-func TestCoarsenerGapToleranceIsInclusive(t *testing.T) {
-	c := Coarsener{MinDP: 10, Bands: []int32{10, 20, 50}, MaxGap: 10}
-	exact := coarsen(t, c, []any{blk("chr1", 100, 199, 30), blk("chr1", 210, 299, 30)}) // 200..209: 10 bases
-	if want := []RefBlock{blk("chr1", 100, 299, 30)}; !reflect.DeepEqual(exact, want) {
-		t.Errorf("a gap of exactly max-gap: got %+v, want one merged block", exact)
+// NOTHING MERGES ACROSS A GAP, HOWEVER SHORT. A gap is bases the gVCF reported
+// nothing for (or put below the gate); a block over it would answer 0/0 where
+// nobody looked. One base is enough to keep two blocks apart; abutting merges.
+func TestCoarsenerNeverBridgesAGap(t *testing.T) {
+	c := Coarsener{MinDP: 10, Bands: []int32{10, 20, 50}}
+	abut := coarsen(t, c, []any{blk("chr1", 100, 199, 30), blk("chr1", 200, 299, 30)})
+	if want := []RefBlock{blk("chr1", 100, 299, 30)}; !reflect.DeepEqual(abut, want) {
+		t.Errorf("abutting same-band blocks: got %+v, want one merged block", abut)
 	}
-	over := coarsen(t, c, []any{blk("chr1", 100, 199, 30), blk("chr1", 211, 299, 30)}) // 11 bases
-	if len(over) != 2 {
-		t.Errorf("a gap of max-gap+1 was bridged: %+v", over)
+	gap := coarsen(t, c, []any{blk("chr1", 100, 199, 30), blk("chr1", 201, 299, 30)}) // 200 unreported
+	if want := []RefBlock{blk("chr1", 100, 199, 30), blk("chr1", 201, 299, 30)}; !reflect.DeepEqual(gap, want) {
+		t.Errorf("a one-base gap was bridged: %+v", gap)
 	}
 }
 
-// A block below the gate is dropped and its bases count as uncovered: short ones
-// are bridged like any gap, long ones break the span.
+// A block below the gate is dropped, and the gap it leaves -- however short --
+// splits the span. Bridging the 5-base dip would claim min_dp 30 over bases the
+// gVCF itself put at 3x.
 func TestCoarsenerDropsSubGateBlocks(t *testing.T) {
-	c := Coarsener{MinDP: 10, Bands: []int32{10, 20, 50}, MaxGap: 10}
+	c := Coarsener{MinDP: 10, Bands: []int32{10, 20, 50}}
 	got := coarsen(t, c, []any{
 		blk("chr1", 100, 199, 30),
-		blk("chr1", 200, 204, 3), // 5 bases at 3x: dropped, gap of 5 bridged
+		blk("chr1", 200, 204, 3), // 5 bases at 3x: dropped, and the span splits
 		blk("chr1", 205, 299, 30),
-		blk("chr1", 300, 499, 4), // 200 bases at 4x: dropped, gap too long
+		blk("chr1", 300, 499, 4), // 200 bases at 4x: dropped
 		blk("chr1", 500, 599, 30),
 	})
-	want := []RefBlock{blk("chr1", 100, 299, 30), blk("chr1", 500, 599, 30)}
+	want := []RefBlock{blk("chr1", 100, 199, 30), blk("chr1", 205, 299, 30), blk("chr1", 500, 599, 30)}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v\nwant %+v", got, want)
 	}
@@ -80,23 +82,22 @@ func TestCoarsenerDropsSubGateBlocks(t *testing.T) {
 
 // THE RULE THAT MAKES COVERAGE SAFE. A variant record is where the sample may
 // carry something, and its gap is what keeps a block from claiming reference
-// there. A one-base SNV gap is well inside any tolerance, so this is exactly the
-// case a gap merge would get wrong if it were allowed to.
+// there -- even when the next block abuts the one before the record.
 func TestCoarsenerNeverBridgesAVariant(t *testing.T) {
-	c := Coarsener{MinDP: 10, Bands: []int32{10, 20, 50}, MaxGap: 10}
+	c := Coarsener{MinDP: 10, Bands: []int32{10, 20, 50}}
 	got := coarsen(t, c, []any{
 		blk("chr1", 100, 199, 30),
-		"barrier", // the sample's own SNV at 200
-		blk("chr1", 201, 299, 30),
+		"barrier", // the sample's own record, reported between two abutting blocks
+		blk("chr1", 200, 299, 30),
 	})
-	want := []RefBlock{blk("chr1", 100, 199, 30), blk("chr1", 201, 299, 30)}
+	want := []RefBlock{blk("chr1", 100, 199, 30), blk("chr1", 200, 299, 30)}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("a block was merged across the sample's own variant: %+v", got)
 	}
 }
 
 func TestCoarsenerBreaksAtChromosomesAndKeepsTheFloor(t *testing.T) {
-	c := Coarsener{MinDP: 10, MaxGap: 1000} // unbanded: depth never breaks a span
+	c := Coarsener{MinDP: 10} // unbanded: depth never breaks a span
 	a := blk("chr1", 100, 199, 40)
 	a.GQ = 60
 	b := blk("chr1", 200, 299, 15)
@@ -114,7 +115,7 @@ func TestCoarsenerBreaksAtChromosomesAndKeepsTheFloor(t *testing.T) {
 }
 
 func TestCoarsenerPassthroughKeepsSourceBlocks(t *testing.T) {
-	c := Coarsener{MinDP: 10, Bands: []int32{10, 20, 50}, MaxGap: 10, Passthrough: true}
+	c := Coarsener{MinDP: 10, Bands: []int32{10, 20, 50}, Passthrough: true}
 	in := []any{blk("chr1", 100, 199, 30), blk("chr1", 200, 299, 31), blk("chr1", 300, 399, 5)}
 	got := coarsen(t, c, in)
 	want := []RefBlock{blk("chr1", 100, 199, 30), blk("chr1", 200, 299, 31)}
@@ -124,7 +125,7 @@ func TestCoarsenerPassthroughKeepsSourceBlocks(t *testing.T) {
 }
 
 func TestCoarsenerRefusesOverlappingBlocks(t *testing.T) {
-	c := Coarsener{MinDP: 10, MaxGap: 10, Emit: func(RefBlock) error { return nil }}
+	c := Coarsener{MinDP: 10, Emit: func(RefBlock) error { return nil }}
 	if err := c.Block(blk("chr1", 100, 199, 30)); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func TestFragmentRoundTrip(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "S1.frag")
 	w, err := NewFragmentWriter(dir, FragmentMeta{
 		SampleID: "S1", Source: "s1.g.vcf.gz", MinDP: 10,
-		DepthBands: []int32{10, 15, 22}, DepthRatio: 1.5, MaxGap: 10,
+		DepthBands: []int32{10, 15, 22}, DepthRatio: 1.5,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -206,5 +207,14 @@ func TestFragmentWriterRefusesDisorder(t *testing.T) {
 	b.SampleID = "S2"
 	if err := w.Write(b); err == nil {
 		t.Error("another sample's block was accepted")
+	}
+}
+
+// A fragment can no longer be written claiming a gap tolerance: its blocks would
+// cover bases never assayed.
+func TestFragmentWriterRefusesAGapTolerance(t *testing.T) {
+	if _, err := NewFragmentWriter(filepath.Join(t.TempDir(), "f"),
+		FragmentMeta{SampleID: "S1", MinDP: 10, MaxGap: 10}); err == nil {
+		t.Error("a fragment with max_gap 10 was accepted")
 	}
 }
