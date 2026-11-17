@@ -2,12 +2,14 @@ package varstore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -43,10 +45,10 @@ func buildAttachVolume(t *testing.T) string {
 	return base
 }
 
-func buildFragment(t *testing.T, sample string, maxGap int32, blocks ...RefBlock) string {
+func buildFragment(t *testing.T, sample string, blocks ...RefBlock) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), sample)
-	w, err := NewFragmentWriter(dir, FragmentMeta{SampleID: sample, MinDP: 10, MaxGap: maxGap})
+	w, err := NewFragmentWriter(dir, FragmentMeta{SampleID: sample, MinDP: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,12 +104,12 @@ func refBlockRows(t *testing.T, base string) []string {
 func TestAttachBuildsRefBlocksFromFragments(t *testing.T) {
 	base := buildAttachVolume(t)
 	frags := loadFrags(t,
-		buildFragment(t, "S1", 10, blk("chr1", 900, 2500, 30), blk("chr2", 100, 200, 30)),
-		buildFragment(t, "S2", 10, blk("chr1", 1500, 3100, 40)),
+		buildFragment(t, "S1", blk("chr1", 900, 2500, 30), blk("chr2", 100, 200, 30)),
+		buildFragment(t, "S2", blk("chr1", 1500, 3100, 40)),
 	)
 	// A batch of 2 over 2 inputs is one level; force the tree anyway with
 	// three inputs by adding an empty-on-chr1 fragment.
-	frags = append(frags, loadFrags(t, buildFragment(t, "S3", 10, blk("chr2", 5, 9, 50)))...)
+	frags = append(frags, loadFrags(t, buildFragment(t, "S3", blk("chr2", 5, 9, 50)))...)
 	res, err := AttachRefBlocks(context.Background(), base, frags, AttachOpts{Batch: 2})
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +131,7 @@ func TestAttachBuildsRefBlocksFromFragments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !man.Params.RefBlocks || man.Params.MaxGap != 10 || man.Tables[RefBlocksTable].Rows != 3 {
+	if !man.Params.RefBlocks || man.Params.MaxGap != 0 || man.Tables[RefBlocksTable].Rows != 3 {
 		t.Errorf("manifest params %+v, ref_blocks %+v", man.Params, man.Tables[RefBlocksTable])
 	}
 
@@ -147,8 +149,8 @@ func TestAttachBuildsRefBlocksFromFragments(t *testing.T) {
 func TestAttachReplacesOneSampleAndKeepsTheRest(t *testing.T) {
 	base := buildAttachVolume(t)
 	if _, err := AttachRefBlocks(context.Background(), base, loadFrags(t,
-		buildFragment(t, "S1", 10, blk("chr1", 900, 2500, 30)),
-		buildFragment(t, "S2", 10, blk("chr1", 1500, 3100, 40)),
+		buildFragment(t, "S1", blk("chr1", 900, 2500, 30)),
+		buildFragment(t, "S2", blk("chr1", 1500, 3100, 40)),
 	), AttachOpts{}); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +158,7 @@ func TestAttachReplacesOneSampleAndKeepsTheRest(t *testing.T) {
 
 	// S2's gVCF was redone: its new blocks stop well short of 2000.
 	_, err := AttachRefBlocks(context.Background(), base, loadFrags(t,
-		buildFragment(t, "S2", 10, blk("chr1", 1500, 1600, 40)),
+		buildFragment(t, "S2", blk("chr1", 1500, 1600, 40)),
 	), AttachOpts{Replace: []string{"S2"}})
 	if err != nil {
 		t.Fatal(err)
@@ -187,7 +189,7 @@ func TestAttachReplacesOneSampleAndKeepsTheRest(t *testing.T) {
 func TestAttachRefusals(t *testing.T) {
 	ctx := context.Background()
 	base := buildAttachVolume(t)
-	s1 := loadFrags(t, buildFragment(t, "S1", 10, blk("chr1", 900, 2500, 30)))
+	s1 := loadFrags(t, buildFragment(t, "S1", blk("chr1", 900, 2500, 30)))
 
 	if _, err := AttachRefBlocks(ctx, base, s1, AttachOpts{Replace: []string{"S1"}}); err == nil {
 		t.Error("replace on a volume with no ref_blocks was accepted")
@@ -201,7 +203,7 @@ func TestAttachRefusals(t *testing.T) {
 	if _, err := AttachRefBlocks(ctx, base, s1, AttachOpts{Rebuild: true, Replace: []string{"S1"}}); err == nil {
 		t.Error("rebuild and replace together were accepted")
 	}
-	s2 := loadFrags(t, buildFragment(t, "S2", 10, blk("chr1", 1, 5, 30)))
+	s2 := loadFrags(t, buildFragment(t, "S2", blk("chr1", 1, 5, 30)))
 	if _, err := AttachRefBlocks(ctx, base, s2, AttachOpts{Replace: []string{"S1"}}); err == nil {
 		t.Error("a fragment for a sample not being replaced was accepted")
 	}
@@ -209,27 +211,84 @@ func TestAttachRefusals(t *testing.T) {
 		t.Errorf("rebuild: %v", err)
 	}
 
-	off := loadFrags(t, buildFragment(t, "S9", 10, blk("chr1", 1, 5, 30)))
+	off := loadFrags(t, buildFragment(t, "S9", blk("chr1", 1, 5, 30)))
 	if _, err := AttachRefBlocks(ctx, base, off, AttachOpts{Rebuild: true}); err == nil {
 		t.Error("a fragment for a sample off the roster was accepted")
 	}
 
 	dir := filepath.Join(t.TempDir(), "gated")
-	w, _ := NewFragmentWriter(dir, FragmentMeta{SampleID: "S1", MinDP: 20, MaxGap: 10})
+	w, _ := NewFragmentWriter(dir, FragmentMeta{SampleID: "S1", MinDP: 20})
 	_ = w.Finish()
 	if _, err := AttachRefBlocks(ctx, base, loadFrags(t, dir), AttachOpts{Rebuild: true}); err == nil {
 		t.Error("a fragment gated at a different --min-dp was accepted")
 	}
 
 	if _, err := LoadFragments(ctx, []string{
-		buildFragment(t, "S1", 10), buildFragment(t, "S1", 10),
+		buildFragment(t, "S1"), buildFragment(t, "S1"),
 	}); err == nil {
 		t.Error("two fragments for one sample were accepted")
 	}
-	if _, err := LoadFragments(ctx, []string{
-		buildFragment(t, "S1", 10), buildFragment(t, "S2", 50),
-	}); err == nil {
-		t.Error("fragments merged at different gap tolerances were accepted")
+
+	// A fragment from a version that bridged gaps may claim bases never
+	// assayed; attach refuses it rather than carry those claims into the store.
+	legacy := buildFragment(t, "S1", blk("chr1", 1, 5, 30))
+	setFragmentMaxGap(t, legacy, 10)
+	if _, err := AttachRefBlocks(ctx, base, loadFrags(t, legacy), AttachOpts{Rebuild: true}); err == nil ||
+		!strings.Contains(err.Error(), "never assayed") {
+		t.Errorf("a gap-bridging fragment was attached: %v", err)
+	}
+}
+
+// setFragmentMaxGap rewrites a finished fragment's metadata as an older version
+// that bridged gaps would have written it.
+func setFragmentMaxGap(t *testing.T, dir string, gap int32) {
+	t.Helper()
+	p := filepath.Join(dir, FragmentMetaFile)
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["max_gap"] = gap
+	out, _ := json.Marshal(m)
+	if err := os.WriteFile(p, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Replacing samples keeps the existing table, so a table built by a version that
+// bridged gaps cannot be replaced into -- only rebuilt from fresh fragments.
+func TestAttachRefusesToReplaceIntoAGapBridgedTable(t *testing.T) {
+	ctx := context.Background()
+	base := buildAttachVolume(t)
+	if _, err := AttachRefBlocks(ctx, base, loadFrags(t,
+		buildFragment(t, "S1", blk("chr1", 900, 2500, 30)),
+	), AttachOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	man, err := ReadVolumeManifestContext(ctx, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	man.Params.MaxGap = 10 // as an older attach recorded it
+	if err := WriteVolumeManifest(base, *man); err != nil {
+		t.Fatal(err)
+	}
+	_, err = AttachRefBlocks(ctx, base, loadFrags(t, buildFragment(t, "S2", blk("chr1", 1, 5, 30))),
+		AttachOpts{Replace: []string{"S2"}})
+	if err == nil || !strings.Contains(err.Error(), "rebuild") {
+		t.Errorf("replace into a gap-bridged table: %v", err)
+	}
+	// A rebuild clears it.
+	if _, err := AttachRefBlocks(ctx, base, loadFrags(t, buildFragment(t, "S2", blk("chr1", 1, 5, 30))),
+		AttachOpts{Rebuild: true}); err != nil {
+		t.Fatal(err)
+	}
+	if man, _ = ReadVolumeManifestContext(ctx, base); man.Params.MaxGap != 0 {
+		t.Errorf("a rebuild left max_gap %d", man.Params.MaxGap)
 	}
 }
 
@@ -250,7 +309,7 @@ func TestAttachToAnUnshardedVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := AttachRefBlocks(context.Background(), base, loadFrags(t,
-		buildFragment(t, "S1", 10, blk("chr1", 1, 999, 30), blk("chr1", 1001, 90000, 30)),
+		buildFragment(t, "S1", blk("chr1", 1, 999, 30), blk("chr1", 1001, 90000, 30)),
 	), AttachOpts{})
 	if err != nil {
 		t.Fatal(err)
@@ -297,7 +356,7 @@ func classifyStore(t *testing.T, s Store, chrom string, pos int32) map[string]St
 func TestAttachToAVolumeTakesChromosomesWithoutSites(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "vol")
 	buildVolumeOn(t, base, "chr1")
-	frags := loadFrags(t, buildFragment(t, "S1", 10, blk("chr1", 1, 900, 30), blk("chr2", 100, 200, 30)))
+	frags := loadFrags(t, buildFragment(t, "S1", blk("chr1", 1, 900, 30), blk("chr2", 100, 200, 30)))
 	if _, err := AttachRefBlocksToStore(context.Background(), base, frags, AttachOpts{}, "test", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -327,8 +386,8 @@ func TestAttachToAnArchiveCreatesBlocksOnlyVolumes(t *testing.T) {
 	}
 
 	frags := loadFrags(t,
-		buildFragment(t, "S1", 10, blk("chr1", 1, 900, 30), blk("chr2", 1, 900, 30), blk("chrM", 1, 16000, 200)),
-		buildFragment(t, "S2", 10, blk("chrM", 1, 500, 150)),
+		buildFragment(t, "S1", blk("chr1", 1, 900, 30), blk("chr2", 1, 900, 30), blk("chrM", 1, 16000, 200)),
+		buildFragment(t, "S2", blk("chrM", 1, 500, 150)),
 	)
 	res, err := AttachRefBlocksToStore(ctx, base, frags, AttachOpts{}, "test", "")
 	if err != nil {

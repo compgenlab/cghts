@@ -97,9 +97,6 @@ func sameBuild(a, b Fragment) error {
 		return fmt.Errorf("%s was built at --min-dp %d and %s at %d", a.Dir, a.Meta.MinDP, b.Dir, b.Meta.MinDP)
 	case !slices.Equal(a.Meta.DepthBands, b.Meta.DepthBands):
 		return fmt.Errorf("%s was banded %v and %s %v", a.Dir, a.Meta.DepthBands, b.Dir, b.Meta.DepthBands)
-	case a.Meta.MaxGap != b.Meta.MaxGap:
-		return fmt.Errorf("%s merged gaps up to %d and %s up to %d; their blocks claim different things",
-			a.Dir, a.Meta.MaxGap, b.Dir, b.Meta.MaxGap)
 	case a.Meta.Passthrough != b.Meta.Passthrough:
 		return fmt.Errorf("%s and %s disagree on --passthrough", a.Dir, b.Dir)
 	}
@@ -166,6 +163,13 @@ func AttachRefBlocks(ctx context.Context, base string, frags []Fragment, opts At
 			return nil, fmt.Errorf("fragment %s was banded %v but %s %v", f.Dir, f.Meta.DepthBands,
 				base, man.Params.DepthBands)
 		}
+		// A fragment from a version that bridged gaps may cover bases its gVCF
+		// put below the gate or never reported; attaching it would answer 0/0
+		// there. Refused rather than repaired: the gVCF is the only source.
+		if f.Meta.MaxGap > 0 {
+			return nil, fmt.Errorf("fragment %s merged blocks across gaps of up to %d bp, so it may "+
+				"claim bases that were never assayed; rebuild it with refblock-calc", f.Dir, f.Meta.MaxGap)
+		}
 	}
 	for i := 1; i < len(frags); i++ {
 		if err := sameBuild(frags[0], frags[i]); err != nil {
@@ -186,10 +190,6 @@ func AttachRefBlocks(ctx context.Context, base string, frags []Fragment, opts At
 	case len(opts.Replace) > 0:
 		keepExisting = true
 	}
-	maxGap := man.Params.MaxGap
-	if len(frags) > 0 {
-		maxGap = frags[0].Meta.MaxGap
-	}
 	replaced := map[string]bool{}
 	if keepExisting {
 		for _, s := range opts.Replace {
@@ -201,9 +201,12 @@ func AttachRefBlocks(ctx context.Context, base string, frags []Fragment, opts At
 					"existing blocks would be kept beside the new ones", f.Dir, f.Meta.SampleID)
 			}
 		}
-		if len(frags) > 0 && maxGap != man.Params.MaxGap {
-			return nil, fmt.Errorf("the fragments merged gaps up to %d but %s's blocks up to %d; "+
-				"rebuild to change it", maxGap, base, man.Params.MaxGap)
+		// Keeping blocks that bridged gaps would carry their false reference
+		// calls into the new table; only a rebuild from fresh fragments clears them.
+		if man.Params.MaxGap > 0 {
+			return nil, fmt.Errorf("%s's existing blocks were merged across gaps of up to %d bp and "+
+				"may claim bases that were never assayed; rebuild from fragments made by the "+
+				"current refblock-calc instead of replacing", base, man.Params.MaxGap)
 		}
 	}
 
@@ -317,7 +320,7 @@ func AttachRefBlocks(ctx context.Context, base string, frags []Fragment, opts At
 		}
 	}
 	man.Params.RefBlocks = true
-	man.Params.MaxGap = maxGap
+	man.Params.MaxGap = 0 // abutting merges only: every block bounds every base it covers
 	man.RefBlockSamples = attachedSamples(man, frags, replaced, keepExisting)
 	if err := WriteManifestTo(sink, *man); err != nil {
 		out.discard()

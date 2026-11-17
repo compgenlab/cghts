@@ -29,8 +29,8 @@ func TestAttachRecordsWhoseFragmentsWereAttached(t *testing.T) {
 	}
 
 	if _, err := AttachRefBlocks(ctx, base, loadFrags(t,
-		buildFragment(t, "S2", 10, blk("chr2", 1, 500, 30)),
-		buildFragment(t, "S1", 10, blk("chr1", 900, 2500, 30)),
+		buildFragment(t, "S2", blk("chr2", 1, 500, 30)),
+		buildFragment(t, "S1", blk("chr1", 900, 2500, 30)),
 	), AttachOpts{}); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestAttachRecordsWhoseFragmentsWereAttached(t *testing.T) {
 
 	// Replace adds a sample whose fragment is new, keeping the others.
 	if _, err := AttachRefBlocks(ctx, base, loadFrags(t,
-		buildFragment(t, "S3", 10, blk("chr1", 1500, 1600, 40)),
+		buildFragment(t, "S3", blk("chr1", 1500, 1600, 40)),
 	), AttachOpts{Replace: []string{"S3"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestAttachRecordsWhoseFragmentsWereAttached(t *testing.T) {
 
 	// A rebuild states exactly its fragments.
 	if _, err := AttachRefBlocks(ctx, base, loadFrags(t,
-		buildFragment(t, "S3", 10, blk("chr1", 1500, 1600, 40)),
+		buildFragment(t, "S3", blk("chr1", 1500, 1600, 40)),
 	), AttachOpts{Rebuild: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestReplaceOverAnUnrecordedTableStaysUnknown(t *testing.T) {
 	ctx := context.Background()
 	base := buildAttachVolume(t)
 	if _, err := AttachRefBlocks(ctx, base, loadFrags(t,
-		buildFragment(t, "S1", 10, blk("chr1", 900, 2500, 30)),
+		buildFragment(t, "S1", blk("chr1", 900, 2500, 30)),
 	), AttachOpts{}); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestReplaceOverAnUnrecordedTableStaysUnknown(t *testing.T) {
 	}
 
 	if _, err := AttachRefBlocks(ctx, base, loadFrags(t,
-		buildFragment(t, "S2", 10, blk("chr1", 1500, 1600, 40)),
+		buildFragment(t, "S2", blk("chr1", 1500, 1600, 40)),
 	), AttachOpts{Replace: []string{"S2"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestArchiveHoistsAnAgreedListAndKeepsADisagreement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := AttachRefBlocksToStore(ctx, base, loadFrags(t,
-		buildFragment(t, "S1", 10, blk("chr1", 1, 900, 30)),
+		buildFragment(t, "S1", blk("chr1", 1, 900, 30)),
 	), AttachOpts{}, "test", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestArchiveHoistsAnAgreedListAndKeepsADisagreement(t *testing.T) {
 
 	// Replace on one volume only, as a run dying partway would leave it.
 	if _, err := AttachRefBlocks(ctx, filepath.Join(base, "chr2"), loadFrags(t,
-		buildFragment(t, "S2", 10, blk("chr2", 1, 900, 30)),
+		buildFragment(t, "S2", blk("chr2", 1, 900, 30)),
 	), AttachOpts{Replace: []string{"S2"}}); err != nil {
 		t.Fatal(err)
 	}
