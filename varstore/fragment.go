@@ -57,12 +57,15 @@ type FragmentMeta struct {
 	Command       string    `json:"command,omitempty"`
 	Source        string    `json:"source"`
 
-	SampleID    string  `json:"sample_id"`
-	MinDP       int32   `json:"min_dp"`
-	DepthBands  []int32 `json:"depth_bands,omitempty"`
-	DepthRatio  float64 `json:"depth_ratio,omitempty"`
-	MaxGap      int32   `json:"max_gap"`
-	Passthrough bool    `json:"passthrough,omitempty"`
+	SampleID   string  `json:"sample_id"`
+	MinDP      int32   `json:"min_dp"`
+	DepthBands []int32 `json:"depth_bands,omitempty"`
+	DepthRatio float64 `json:"depth_ratio,omitempty"`
+	// MaxGap is always zero in a fragment written now. It is kept only so a
+	// fragment from a version that bridged gaps -- whose blocks may cover bases
+	// never assayed -- can be recognised and refused at attach.
+	MaxGap      int32 `json:"max_gap,omitempty"`
+	Passthrough bool  `json:"passthrough,omitempty"`
 
 	// Chroms are the per-chromosome files, in the order written -- the source's
 	// own contig order.
@@ -107,8 +110,9 @@ func NewFragmentWriter(dir string, meta FragmentMeta) (*FragmentWriter, error) {
 	if err := ValidateDepthBands(meta.DepthBands); err != nil {
 		return nil, err
 	}
-	if meta.MaxGap < 0 {
-		return nil, fmt.Errorf("max gap %d is negative", meta.MaxGap)
+	if meta.MaxGap != 0 {
+		return nil, fmt.Errorf("max gap %d: reference blocks are no longer merged across gaps, "+
+			"since a bridged gap claims bases nobody assayed", meta.MaxGap)
 	}
 	sink, err := OpenSink(dir)
 	if err != nil {

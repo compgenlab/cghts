@@ -232,6 +232,18 @@ the query path can see.
 `--coverage-passthrough` stays available for targeted and exome work, where block
 counts are small and fidelity is cheap.
 
+> **Superseded: there is no gap tolerance.** Blocks merge only where they abut.
+> The measurement below was taken on *confidence masks*, which have gaps of their
+> own; a gVCF covers every position of its calling intervals with a block or a
+> record, so on gVCF input a gap is only ever bases the source put **below the
+> gate** or **never reported** -- both *not assayed*. Bridging one made the store
+> answer `0/0` there with a `min_dp` the source contradicted, an observation
+> nobody made, at exactly the low-coverage dips a hidden variant sits in. The
+> 0.35% over-claim below is that error, quantified, and it was judged not worth
+> the rows saved. Depth banding of abutting blocks keeps most of the reduction.
+> `MaxGap` remains in the manifest only so data written with a tolerance can be
+> recognised and refused. The original reasoning follows for the record.
+
 **A gap tolerance is needed as well as depth bands, and it changes the claim.**
 Fragmentation comes from short excursions, not from real coverage structure —
 which is why 10 bp buys 8.4x. But merging across a gap asserts coverage where the

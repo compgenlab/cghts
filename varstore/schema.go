@@ -228,13 +228,11 @@ type CalledSiteRun struct {
 // capture one is at conversion from a source that still has it -- a gVCF, or a
 // per-sample callable BED.
 //
-// THE CLAIM IS BOUNDED BY MaxGap. A block built by merging across small
-// uncovered stretches does not mean "every base"; it means "covered at MinDP or
-// above, with no uncovered run longer than the manifest's MaxGap". That
-// tolerance is what makes the table affordable -- merging a real per-sample mask
-// across 10bp collapsed it 8.4x for 0.35% over-claim -- and it is recorded in
-// ManifestParams for the same reason MinDP is: two stores with different
-// tolerances do not mean the same thing by "covered".
+// A BLOCK CLAIMS EVERY BASE IT COVERS, at MinDP or above. Blocks are merged
+// only where they abut (see Coarsener), never across a gap: a gap is bases the
+// gVCF put below the gate or never reported, and a block over it would answer
+// 0/0 where nothing was assayed. Stores attached by older versions that bridged
+// gaps say so in ManifestParams.MaxGap.
 type RefBlock struct {
 	SampleID string `parquet:"sample_id,dict"`
 	Chrom    string `parquet:"chrom,dict"`
