@@ -146,7 +146,7 @@ Streaming and tabix-indexed readers, a writer, and a header/record model for VCF
   flag-present/absent, zygosity, chrom, indel), chained via `Chain`; a port of
   ngsutilsj's vcf/filter framework
 
-### varstore — sparse genotype store
+### gtstore — sparse genotype store
 
 Cohort genotypes in Parquet, plus a VCF-backed implementation of the same
 interface. A store is a directory, and all three members are required:
@@ -170,8 +170,8 @@ The manifest is what makes a store *readable*, not merely present. Close it with
 cannot answer one question about themselves — whether the run that produced them
 reached the end. Their footers prove each was *finished*, but a set of finished
 members says nothing about how much of the intended input went in, and the
-metadata in the calls file is actively misleading there: `cgkit.source` and
-`cgkit.contigs` are stamped before the first record is read, so a store holding
+metadata in the calls file is actively misleading there: `gtstore.source` and
+`gtstore.contigs` are stamped before the first record is read, so a store holding
 three chromosomes of a 22-input conversion names all 22 inputs and declares all
 22 contigs. The manifest records what was *written* — per-chromosome site and
 call counts, per-member row counts, the sample roster — so a reader can check
@@ -191,9 +191,9 @@ happened to be spelled in. `Sink` is that spelling made replaceable, and a
 remote one registers itself the way a read transport does:
 
 ```go
-import _ "github.com/compgenlab/cghts/varstore/sinks3"
+import _ "github.com/compgenlab/cghts/gtstore/sinks3"
 
-w, _ := varstore.NewWriter("s3://bucket/cohort", opts)   // or a local directory
+w, _ := gtstore.NewWriter("s3://bucket/cohort", opts)   // or a local directory
 ```
 
 Members are uploaded in parts and appear only when complete, which the format
@@ -208,13 +208,13 @@ One method queries either backend, and the two must agree — the same question
 against a VCF and against a store converted from it:
 
 ```go
-s, _ := varstore.OpenParquet("cohort")   // or OpenVcf, or a URL/s3:// prefix
+s, _ := gtstore.OpenParquet("cohort")   // or OpenVcf, or a URL/s3:// prefix
 defer s.Close()
 
-calls, err := s.Calls(varstore.Query{
-    Loci:    []varstore.Locus{{Chrom: "chr17", Pos: 43045703, Ref: "A", Alt: "G"}},
+calls, err := s.Calls(gtstore.Query{
+    Loci:    []gtstore.Locus{{Chrom: "chr17", Pos: 43045703, Ref: "A", Alt: "G"}},
     Samples: []string{"HG00096"},        // empty means every sample
-    Gate:    varstore.Gate{MinDP: 10},
+    Gate:    gtstore.Gate{MinDP: 10},
 })
 for c, err := range calls { … }
 ```
@@ -252,8 +252,8 @@ pass**: the Parquet side prunes row groups by the union of the selectors, so a
 - Stores keep the source's own contig spelling; compare through
   `CanonKey`/`SameChrom` so `chr17`, `17` and `NC_000017.11` all resolve
 
-`cgkit`'s `vcf-tovarstore` and `vcf-varquery` are the CLI over this package; see
-its [`docs/vcf-tovarstore.md`](https://github.com/compgenlab/cgkit/blob/main/docs/vcf-tovarstore.md)
+The `gtstore` command (`gtstore convert`, `gtstore query`, ...) is the CLI over this package; see
+[`docs/convert.md`](https://github.com/compgenlab/gtstore/blob/main/docs/convert.md)
 for the format walk-through and measurements.
 
 ### iosource — pluggable random-access I/O
@@ -308,7 +308,7 @@ downloading the file. For CRAM the reference is independent of where the data
 lives — `RefPath` takes any locator and `Ref` an already-open one,
 so a remote CRAM with a local reference (or the reverse) is fine.
 
-**varstore reads remotely too.** `OpenParquetContext(ctx, locator)` opens a
+**gtstore reads remotely too.** `OpenParquetContext(ctx, locator)` opens a
 Parquet store from a path, a URL or an `s3://` prefix. Parquet suits this
 unusually well: the footer carries per-row-group statistics and the package
 already prunes groups by them, so a locus query skips pruned groups without

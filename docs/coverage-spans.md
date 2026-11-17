@@ -5,7 +5,7 @@
 The target is 150,000 samples in batches of 10,000, each batch joint-called on
 its own.
 
-A varstore is built from a joint-called cohort VCF, and its `catalog_runs` table records
+A store is built from a joint-called cohort VCF, and its `catalog_runs` table records
 runs of **catalog sites** a sample was called at. The interval marks catalog sites, and *nothing is claimed about the bases in between*.
 
 That is the honest reading of a pVCF, and it has two consequences that only appear
@@ -273,7 +273,7 @@ is where the measured curve turns.
 
 ## Not in scope
 
-- Reconstructing a gVCF from a varstore. Coverage spans make reference calls
+- Reconstructing a gVCF from a store. Coverage spans make reference calls
   provable; they do not make the store lossless, and `gvcf_info` stays discarded.
 - Merging batches on the sample axis. Still the open architectural question, and
   still unaffected by this.
