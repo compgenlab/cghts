@@ -1,6 +1,7 @@
 package gtstore
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -19,55 +20,117 @@ import (
 // "0". A 1/2 sample genuinely carries both alt alleles, so it must appear as a
 // carrier in each split row; calling the other allele reference would invent a
 // reference observation that the data does not support.
-// gtAlleles splits a raw GT into its alleles, normalizing the phased separator
-// away. Seven places did this inline, in two files, character for character --
-// including the two in vcfstore.go that this file's header says it exists to
-// keep from drifting.
+// forEachAllele calls fn with each allele of a raw GT, in order, splitting on
+// either separator ("/" unphased, "|" phased) and stopping early when fn
+// returns false. It yields what splitting on both separators would -- an empty
+// GT is one empty allele, "0/" is "0" then "" -- as substrings of gt.
+//
+// It replaced gtAlleles, which built that list with ReplaceAll and Split. Every
+// genotype passes through here three or four times during a conversion, so at
+// tens of thousands of samples those two allocations per call were a large
+// share of what the garbage collector spent its time on.
+func forEachAllele(gt string, fn func(a string) bool) {
+	start := 0
+	for i := 0; i < len(gt); i++ {
+		if gt[i] == '/' || gt[i] == '|' {
+			if !fn(gt[start:i]) {
+				return
+			}
+			start = i + 1
+		}
+	}
+	fn(gt[start:])
+}
+
+// gtAlleles returns forEachAllele's alleles as a slice, for the callers that
+// need to count them first; the per-genotype paths use forEachAllele directly.
 func gtAlleles(gt string) []string {
-	return strings.Split(strings.ReplaceAll(gt, "|", "/"), "/")
+	var out []string
+	forEachAllele(gt, func(a string) bool { out = append(out, a); return true })
+	return out
+}
+
+// alleleIndex parses one allele as a non-negative integer without allocating;
+// ok is false for ".", "" and anything strconv.Atoi would reject.
+func alleleIndex(a string) (n int, ok bool) {
+	if a == "" {
+		return 0, false
+	}
+	if len(a) > 9 { // could overflow the loop below; rare enough to defer
+		v, err := strconv.Atoi(a)
+		return v, err == nil
+	}
+	for i := 0; i < len(a); i++ {
+		c := a[i]
+		if c < '0' || c > '9' {
+			v, err := strconv.Atoi(a) // signs and the like: defer to Atoi
+			return v, err == nil
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, true
+}
+
+// carriesAllele reports whether a raw GT carries ALT allele altIdx (1-based),
+// what SplitGT's second result says, without building the recoded genotype.
+func carriesAllele(gt string, altIdx int) bool {
+	found := false
+	forEachAllele(gt, func(a string) bool {
+		if a == "." || a == "" || a == "0" {
+			return true
+		}
+		if n, ok := alleleIndex(a); ok && n == altIdx {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func SplitGT(gt string, altIdx int) (recoded string, carrier bool) {
 	if gt == "" {
 		return ".", false
 	}
-	sep := "/"
-	if strings.Contains(gt, "|") {
-		sep = "|"
+	sep := byte('/')
+	if strings.IndexByte(gt, '|') >= 0 {
+		sep = '|'
 	}
-	parts := gtAlleles(gt)
-	out := make([]string, 0, len(parts))
-	for _, a := range parts {
+	var b strings.Builder
+	b.Grow(len(gt))
+	first := true
+	forEachAllele(gt, func(a string) bool {
+		if !first {
+			b.WriteByte(sep)
+		}
+		first = false
 		switch {
 		case a == "." || a == "":
-			out = append(out, ".")
+			b.WriteByte('.')
 		case a == "0":
-			out = append(out, "0")
+			b.WriteByte('0')
 		default:
-			n, err := strconv.Atoi(a)
-			if err != nil {
-				out = append(out, ".")
-				continue
-			}
-			if n == altIdx {
-				out = append(out, "1")
+			n, ok := alleleIndex(a)
+			if ok && n == altIdx {
+				b.WriteByte('1')
 				carrier = true
 			} else {
-				out = append(out, ".")
+				b.WriteByte('.')
 			}
 		}
-	}
-	return strings.Join(out, sep), carrier
+		return true
+	})
+	return b.String(), carrier
 }
 
 // IsAltCarrier reports whether a raw GT carries any non-reference allele.
 func IsAltCarrier(gt string) bool {
-	for _, a := range gtAlleles(gt) {
-		if a != "" && a != "." && a != "0" {
-			return true
-		}
-	}
-	return false
+	found := false
+	forEachAllele(gt, func(a string) bool {
+		found = a != "" && a != "." && a != "0"
+		return !found
+	})
+	return found
 }
 
 // HasCall reports whether a raw GT carries at least one called allele.
@@ -76,29 +139,31 @@ func IsAltCarrier(gt string) bool {
 // the caller saw reads and still declined to call, which is not the positive
 // observation a callable region is meant to assert.
 func HasCall(gt string) bool {
-	for _, a := range gtAlleles(gt) {
-		if a != "" && a != "." {
-			return true
-		}
-	}
-	return false
+	found := false
+	forEachAllele(gt, func(a string) bool {
+		found = a != "" && a != "."
+		return !found
+	})
+	return found
 }
 
 // IsHomRef reports whether a raw GT is an explicit all-reference call. This is
 // the positive observation that separates a non-carrier from a sample that was
 // simply never assayed, so "./." and an empty GT deliberately do not qualify.
 func IsHomRef(gt string) bool {
-	seen := false
-	for _, a := range gtAlleles(gt) {
+	seen, other := false, false
+	forEachAllele(gt, func(a string) bool {
 		if a == "" {
-			continue
+			return true
 		}
 		if a != "0" {
+			other = true
 			return false
 		}
 		seen = true
-	}
-	return seen
+		return true
+	})
+	return seen && !other
 }
 
 // SplitAD returns AD[0] and AD[altIdx] from a raw AD field, or Missing.
@@ -137,19 +202,20 @@ func atoi32(s string) int32 {
 // contribute to neither. acc is written in place so a whole cohort can be
 // tallied without allocating per sample.
 func AddAlleleCounts(gt string, acc []int32) (an int32) {
-	for _, a := range gtAlleles(gt) {
+	forEachAllele(gt, func(a string) bool {
 		if a == "" || a == "." {
-			continue
+			return true
 		}
 		an++
-		n, err := strconv.Atoi(a)
-		if err != nil || n <= 0 { // 0 is the reference allele
-			continue
+		n, ok := alleleIndex(a)
+		if !ok || n <= 0 { // 0 is the reference allele
+			return true
 		}
 		if n-1 < len(acc) {
 			acc[n-1]++
 		}
-	}
+		return true
+	})
 	return an
 }
 
@@ -163,25 +229,60 @@ type SampleFields struct {
 
 // ReadSample pulls the GT/DP/GQ/AD fields for one sample of a record. Absent
 // fields come back as Missing (or "" for GT/AD).
+//
+// It resolves the FORMAT positions on every call; a loop over a record's
+// samples should build one SampleReader and call Read instead.
 func ReadSample(rec *vcf.VcfRecord, i int) (SampleFields, error) {
+	if n := rec.NumSamples(); i < 0 || i >= n {
+		return SampleFields{DP: Missing, GQ: Missing},
+			fmt.Errorf("vcf: sample index %d out of range (%d samples)", i, n)
+	}
+	return NewSampleReader(rec).Read(i), nil
+}
+
+// SampleReader reads GT/DP/GQ/AD from one record's samples, resolving where
+// those keys sit in the FORMAT column once rather than per sample.
+//
+// It reads each field straight out of the record line (vcf.SampleField), never
+// building the per-sample map that vcf.Sample does. That map, built for every
+// one of tens of thousands of samples and holding every FORMAT key -- PL, GP,
+// F1R2 and the rest, of which this package reads four -- was most of the time a
+// wide conversion spent, much of it in the garbage collector.
+type SampleReader struct {
+	rec            *vcf.VcfRecord
+	gt, dp, gq, ad int
+}
+
+// NewSampleReader prepares to read rec's samples.
+func NewSampleReader(rec *vcf.VcfRecord) SampleReader {
+	return SampleReader{
+		rec: rec,
+		gt:  rec.FormatIndex("GT"),
+		dp:  rec.FormatIndex("DP"),
+		gq:  rec.FormatIndex("GQ"),
+		ad:  rec.FormatIndex("AD"),
+	}
+}
+
+// Read returns sample i's fields, as ReadSample would. A key the record's
+// FORMAT does not declare is Missing (DP/GQ) or "" (GT/AD); one it declares but
+// the sample dropped from the end of its column is ".", which DP/GQ read as
+// Missing.
+func (r SampleReader) Read(i int) SampleFields {
 	s := SampleFields{DP: Missing, GQ: Missing}
-	attrs, err := rec.Sample(i)
-	if err != nil {
-		return s, err
+	if r.gt >= 0 {
+		s.GT = r.rec.SampleField(i, r.gt)
 	}
-	if v, ok := attrs.Get("GT"); ok {
-		s.GT = v.String()
+	if r.dp >= 0 {
+		s.DP = atoi32(r.rec.SampleField(i, r.dp))
 	}
-	if v, ok := attrs.Get("DP"); ok {
-		s.DP = atoi32(v.String())
+	if r.gq >= 0 {
+		s.GQ = atoi32(r.rec.SampleField(i, r.gq))
 	}
-	if v, ok := attrs.Get("GQ"); ok {
-		s.GQ = atoi32(v.String())
+	if r.ad >= 0 {
+		s.AD = r.rec.SampleField(i, r.ad)
 	}
-	if v, ok := attrs.Get("AD"); ok {
-		s.AD = v.String()
-	}
-	return s, nil
+	return s
 }
 
 // RecordLoci returns one Locus per ALT allele of a record, in ALT order.
@@ -208,10 +309,12 @@ func RecordLoci(rec *vcf.VcfRecord) []Locus {
 // CallFor builds the Call for one sample at one ALT allele of a record, or
 // reports false when the sample does not carry that allele.
 func CallFor(rec *vcf.VcfRecord, sample string, sf SampleFields, altIdx int, alt string) (Call, bool) {
-	gt, carrier := SplitGT(sf.GT, altIdx)
-	if !carrier {
+	// Most genotypes in a wide cohort carry nothing; deciding that without
+	// building the recoded genotype keeps them from allocating.
+	if !carriesAllele(sf.GT, altIdx) {
 		return Call{}, false
 	}
+	gt, _ := SplitGT(sf.GT, altIdx)
 	adRef, adAlt := SplitAD(sf.AD, altIdx)
 	return Call{
 		SampleID: sample,
