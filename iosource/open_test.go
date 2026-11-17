@@ -113,7 +113,7 @@ func (s *stubSource) ReadAt(p []byte, off int64) (int, error) {
 func (s *stubSource) Size() (int64, error) { return int64(len(s.data)), nil }
 func (s *stubSource) Close() error         { return nil }
 
-// One rule, one implementation. This used to be copy-pasted into varstore,
+// One rule, one implementation. This used to be copy-pasted into gtstore,
 // htsio and seqio, and one copy had drifted: it scanned from index 1, so
 // "a://x" was remote there and local here. A caller that classifies a locator
 // differently from Open does not fail loudly -- it opens the wrong thing.
