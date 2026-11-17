@@ -474,7 +474,9 @@ func (tw *Writer) mergeFiles() error {
 type tbiRefBuilder struct {
 	bins      map[uint32][]Chunk
 	linearIdx map[int]bgzf.VirtualOffset
-	lastVO    bgzf.VirtualOffset
+	firstVO   bgzf.VirtualOffset // start of the reference's first record
+	lastVO    bgzf.VirtualOffset // just past its last record
+	n         uint64             // records indexed on it
 }
 
 type tbiIndexBuilder struct {
@@ -544,6 +546,10 @@ func (ib *tbiIndexBuilder) addRecord(l tabixLine, begin, end bgzf.VirtualOffset)
 		chunks = append(chunks, Chunk{Begin: begin, End: end})
 	}
 	rb.bins[uint32(bin)] = chunks
+	if rb.n == 0 {
+		rb.firstVO = begin
+	}
+	rb.n++
 	rb.lastVO = end
 
 	startWindow := l.start >> 14
@@ -615,7 +621,13 @@ func (ib *tbiIndexBuilder) writeTBI(path string) error {
 			mergedBins[bin] = merged
 		}
 
-		binary.Write(w, binary.LittleEndian, int32(len(mergedBins)))
+		// One more bin than the real ones: the pseudo-bin, written last. It
+		// records the reference's record count and extent, as htslib's does,
+		// so `bcftools index -n` and RefStats can count records without
+		// reading the data. It is not a bin -- its number is outside the
+		// scheme, and readers that do not know it never query it -- so an
+		// older cghts reader stores it and ignores it.
+		binary.Write(w, binary.LittleEndian, int32(len(mergedBins)+1))
 		for bin, chunks := range mergedBins {
 			binary.Write(w, binary.LittleEndian, bin)
 			binary.Write(w, binary.LittleEndian, int32(len(chunks)))
@@ -624,6 +636,12 @@ func (ib *tbiIndexBuilder) writeTBI(path string) error {
 				binary.Write(w, binary.LittleEndian, uint64(c.End))
 			}
 		}
+		binary.Write(w, binary.LittleEndian, uint32(tbiPseudoBin))
+		binary.Write(w, binary.LittleEndian, int32(2))
+		binary.Write(w, binary.LittleEndian, uint64(rb.firstVO))
+		binary.Write(w, binary.LittleEndian, uint64(rb.lastVO))
+		binary.Write(w, binary.LittleEndian, rb.n)
+		binary.Write(w, binary.LittleEndian, uint64(0)) // unmapped: always 0 for tabix
 
 		maxWindow := 0
 		for wnd := range rb.linearIdx {
@@ -641,6 +659,9 @@ func (ib *tbiIndexBuilder) writeTBI(path string) error {
 			}
 		}
 	}
+	// n_no_coor: records with no position. A tabix record always has one, so
+	// it is 0, but htslib writes the field and readers expect it.
+	binary.Write(w, binary.LittleEndian, uint64(0))
 
 	if err := w.Close(); err != nil {
 		tbiFile.Close()

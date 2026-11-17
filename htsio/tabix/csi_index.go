@@ -20,7 +20,8 @@ type csiBin struct {
 
 // csiRefIndex holds the bins for one reference sequence in a CSI index.
 type csiRefIndex struct {
-	bins map[uint32]*csiBin
+	bins  map[uint32]*csiBin
+	stats *RefStats // the pseudo-bin, nil if the index has none
 }
 
 // CSIIndex is a parsed CSI (coordinate-sorted index) file. CSI supports
@@ -30,6 +31,7 @@ type CSIIndex struct {
 	minShift int32
 	depth    int32
 	refs     []csiRefIndex
+	noCoor   *uint64 // trailing n_no_coor, nil if absent
 
 	// Tabix metadata from the auxiliary data block. These fields are
 	// zero-valued when the CSI is a plain coordinate index (e.g. a BAM
@@ -114,6 +116,11 @@ func parseCSIBody(r io.Reader) (*CSIIndex, error) {
 		idx.refs = append(idx.refs, rb)
 	}
 
+	noCoor, err := readNoCoor(r)
+	if err != nil {
+		return nil, fmt.Errorf("csi: reading n_no_coor: %w", err)
+	}
+	idx.noCoor = noCoor
 	return idx, nil
 }
 
@@ -155,6 +162,7 @@ func (idx *CSIIndex) readCSIRef(r io.Reader, ref *csiRefIndex) error {
 
 	// Counts are attacker-controlled; grow containers as elements are read.
 	ref.bins = make(map[uint32]*csiBin)
+	pseudo, hasPseudo := csiPseudoBin(idx.depth)
 	for i := int32(0); i < nBins; i++ {
 		var binNum uint32
 		if err := binary.Read(r, binary.LittleEndian, &binNum); err != nil {
@@ -189,6 +197,12 @@ func (idx *CSIIndex) readCSIRef(r io.Reader, ref *csiRefIndex) error {
 			})
 		}
 
+		if hasPseudo && binNum == pseudo {
+			if st, ok := parsePseudoBin(chunks); ok {
+				ref.stats = st
+				continue
+			}
+		}
 		ref.bins[binNum] = &csiBin{
 			bin:     binNum,
 			loffset: bgzf.VirtualOffset(loffset),
@@ -201,7 +215,17 @@ func (idx *CSIIndex) readCSIRef(r io.Reader, ref *csiRefIndex) error {
 
 // csiReg2bins returns the list of bins that may overlap the region [beg, end)
 // using the CSI variable binning scheme with the given minShift and depth.
+//
+// As in reg2bins, the region is clamped to what the scheme covers, 2^(minShift
+// + 3*depth), so a whole-contig query cannot run into the next level's bins or
+// the pseudo-bin.
 func csiReg2bins(beg, end int, minShift, depth int32) []uint32 {
+	if beg < 0 {
+		beg = 0
+	}
+	if shift := minShift + 3*depth; shift >= 0 && shift < 62 && end > 1<<shift {
+		end = 1 << shift
+	}
 	end--
 	var bins []uint32
 	bins = append(bins, 0)
