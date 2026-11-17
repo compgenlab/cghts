@@ -297,6 +297,8 @@ type Writer struct {
 	siteBuf       []Site
 	catalogRunBuf []CalledSiteRun
 	refBlockBuf   []RefBlock
+	// own detaches the strings buffered rows carry; see detach.go.
+	own owned
 
 	// Rows for the dynamic path, allocated once and refilled. A whole-genome
 	// catalog is tens of millions of sites and a map per row would be the
@@ -756,6 +758,7 @@ func (w *Writer) WriteCall(c Call) error {
 // columns are optional so that "this sample had no PID here" and "its PID is 0"
 // stay different claims. The map may be reused between calls.
 func (w *Writer) WriteCallFormat(c Call, values map[string]any) error {
+	w.own.call(&c)
 	w.shardRows[CallsTable]++
 	c.RefEnd = defaultRefEnd(c.Pos, c.Ref, c.RefEnd)
 	w.census(c.Chrom, c.Pos).Calls++
@@ -842,6 +845,7 @@ func (w *Writer) WriteSite(s Site) error {
 //
 // The map may be reused between calls -- values are converted on the spot.
 func (w *Writer) WriteSiteInfo(s Site, info map[string]any) error {
+	w.own.site(&s)
 	s.RefEnd = defaultRefEnd(s.Pos, s.Ref, s.RefEnd)
 	// Before anything is buffered, so a rotation lands between sites.
 	if err := w.noteSite(s.Chrom, s.Pos); err != nil {
@@ -1008,7 +1012,9 @@ func (s *infoSlots) store(f InfoField, slot int, raw any) (any, error) {
 		if !ok {
 			return nil, fmt.Errorf("info %s declared String, given %T", f.Name, raw)
 		}
-		s.str[slot] = v
+		// Cloned for the reason detach.go gives: a captured INFO or FORMAT value
+		// is a substring of its record's line, and the slot outlives the line.
+		s.str[slot] = strings.Clone(v)
 		return &s.str[slot], nil
 	}
 }
@@ -1061,6 +1067,7 @@ func (w *Writer) WriteRegion(r CalledSiteRun) error {
 			r.SampleID, r.Chrom, r.Start, r.End, w.shardChrom, w.shardFirst, w.shardLast)
 	}
 	w.shardRows[CatalogRunsTable]++
+	r.SampleID, r.Chrom = w.own.sample(r.SampleID), w.own.chrom(r.Chrom)
 	w.catalogRunBuf = append(w.catalogRunBuf, r)
 	w.NCatalogRuns++
 	if len(w.catalogRunBuf) >= batchSize {
@@ -1154,6 +1161,7 @@ func (w *Writer) WriteRefBlock(b RefBlock) error {
 		return fmt.Errorf("reference block for %s, who is not among this store's samples", b.SampleID)
 	}
 	w.shardRows[RefBlocksTable]++
+	b.SampleID, b.Chrom = w.own.sample(b.SampleID), w.own.chrom(b.Chrom)
 	w.refBlockBuf = append(w.refBlockBuf, b)
 	w.NRefBlocks++
 	if len(w.refBlockBuf) >= batchSize {
