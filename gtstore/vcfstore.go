@@ -34,7 +34,19 @@ type VcfStore struct {
 	// SiteKnown is called once per queried variant, so remotely that was one
 	// re-fetch of the index per lookup.
 	indexed bool
+
+	// The header's INFO and FORMAT fields in a store's terms, so a query's
+	// INFO filter and value requests resolve the way a store resolves them.
+	infoFields   []InfoField
+	formatFields []FormatField
 }
+
+// InfoFields reports the INFO fields the header declares, as a store would
+// describe captured ones; every declared field is available to a query.
+func (s *VcfStore) InfoFields() []InfoField { return s.infoFields }
+
+// FormatFields reports the FORMAT fields the header declares (GT excluded).
+func (s *VcfStore) FormatFields() []FormatField { return s.formatFields }
 
 // OpenVcf opens a VCF store. Region-scoped queries additionally require a
 // tabix index next to the file.
@@ -63,6 +75,9 @@ func OpenVcfContext(ctx context.Context, path string) (*VcfStore, error) {
 		samples: h.Samples(),
 		ctx:     ctx,
 		indexed: hasTabixIndex(ctx, path),
+
+		infoFields:   HeaderInfoFields(h),
+		formatFields: HeaderFormatFields(h),
 	}, nil
 }
 
@@ -173,6 +188,13 @@ func (s *VcfStore) spanFor(l Locus) *Span {
 func (s *VcfStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 	p := q.plan()
 	span, strict := s.seek(q)
+	sel := &siteSelect{}
+	if q.wantsExtras() {
+		var err error
+		if sel, err = resolveSelect(q, s.infoFields, s.formatFields); err != nil {
+			return nil, err
+		}
+	}
 
 	return func(yield func(Call, error) bool) {
 		stopped := false
@@ -225,6 +247,7 @@ func (s *VcfStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 				if !p.touchesSpan(rec.Chrom, int32(rec.Pos), refEnd) {
 					return true, nil
 				}
+				blockExtra := sel.extra(nil, nil)
 				for _, sf := range fields {
 					// The gate is inside blockRefCall, which downgrades the
 					// genotype to a no-call rather than dropping the row: the
@@ -234,6 +257,7 @@ func (s *VcfStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 					if !ok {
 						continue
 					}
+					c.Extra = blockExtra
 					if !emit(c) {
 						return false, nil
 					}
@@ -252,13 +276,29 @@ func (s *VcfStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 				if !p.wantsSite(loc, refEnd) {
 					continue
 				}
+				// The INFO filter acts per ALT, as the store's does per split
+				// site: a Number=A field can be present for one allele and not
+				// another. An excluded site yields nothing; a plain VCF has no
+				// block to answer it from instead.
+				altIdx := j
+				getInfo := func(f InfoField) (any, bool) { return InfoValue(rec, f, altIdx) }
+				if sel.filters() && sel.excluded(getInfo) {
+					continue
+				}
+				info := sel.infoText(getInfo)
+				withExtra := func(c Call, col int) Call {
+					c.Extra = sel.extra(info, sel.formatText(func(f FormatField) (any, bool) {
+						return FormatValue(rec, col, f, altIdx)
+					}))
+					return c
+				}
 				// One pass over the samples, emitting each one's ALT call or its
 				// reference call, so rows are ordered by sample within the locus.
 				for _, sf := range fields {
 					if c, ok := CallFor(rec, sf.name, sf.f, j+1, alt); ok {
 						// A carrier is never also a reference call, even when the gate
 						// rejects it: a below-gate ALT is an uncertain carrier.
-						if q.Gate.Admits(c) && !emit(c) {
+						if q.Gate.Admits(c) && !emit(withExtra(c, sf.col)) {
 							return false, nil
 						}
 						continue
@@ -267,7 +307,7 @@ func (s *VcfStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 						continue
 					}
 					if c, ok := homRefCallFor(rec, sf.name, sf.f, j+1, alt, q.Gate); ok {
-						if !emit(c) {
+						if !emit(withExtra(c, sf.col)) {
 							return false, nil
 						}
 					}
@@ -334,6 +374,8 @@ func homRefCallFor(rec *vcf.VcfRecord, sample string, sf SampleFields,
 		ADRef:    adRef,
 		ADAlt:    adAlt,
 		GQ:       sf.GQ,
+
+		RefSource: RefFromCatalog,
 	}, true
 }
 
@@ -652,6 +694,8 @@ func blockRefCall(rec *vcf.VcfRecord, col int, sample string, sf SampleFields,
 	}
 	if !blockVouchesReference(c, g) {
 		c.GT = NoCallGT
+	} else {
+		c.RefSource = RefFromBlock
 	}
 	return c, true
 }
