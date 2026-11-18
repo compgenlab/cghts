@@ -74,6 +74,18 @@ type Targets struct {
 	// ask about. Counted rather than dropped in silence: losing panel rows
 	// changes a score's denominator.
 	Skipped int
+	// Filtered counts VCF records left out by TargetOptions.Passing.
+	Filtered int
+
+	opts TargetOptions
+}
+
+// TargetOptions adjusts how target files are read.
+type TargetOptions struct {
+	// Passing reads only VCF records whose FILTER is PASS or '.', so a panel
+	// taken from a filtered callset asks only about the variants that survived.
+	// It applies to VCF target files alone: BED and site lists carry no FILTER.
+	Passing bool
 }
 
 // addLocus and addSpan are the only ways to add a target, so Order cannot drift
@@ -90,7 +102,12 @@ func (t *Targets) addSpan(sp Span) {
 
 // ParseTargets resolves selector values -- inline or files -- into query selectors.
 func ParseTargets(ctx context.Context, vals []string) (*Targets, error) {
-	t := &Targets{Counts: map[TargetFormat]int{}, Files: map[string]TargetFormat{}}
+	return ParseTargetsWith(ctx, vals, TargetOptions{})
+}
+
+// ParseTargetsWith is ParseTargets with options for reading target files.
+func ParseTargetsWith(ctx context.Context, vals []string, opts TargetOptions) (*Targets, error) {
+	t := &Targets{Counts: map[TargetFormat]int{}, Files: map[string]TargetFormat{}, opts: opts}
 	for _, v := range vals {
 		if IsTargetFile(v) {
 			if err := t.addFile(ctx, v); err != nil {
@@ -277,6 +294,10 @@ func (t *Targets) addVcfFile(ctx context.Context, path string) error {
 		}
 		if err != nil {
 			return err
+		}
+		if t.opts.Passing && rec.IsFiltered() {
+			t.Filtered++
+			continue
 		}
 		loci := RecordLoci(rec)
 		if len(loci) == 0 {

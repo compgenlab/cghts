@@ -231,6 +231,31 @@ type Query struct {
 	// the catalog and catalog_runs tables, so a store built with --no-callable refuses
 	// with ErrNotClassifiable rather than reporting unobserved samples as reference.
 	IncludeRef bool
+
+	// Site filter on captured INFO fields, by VCF key, on presence alone. A
+	// site where any ExcludeInfo field is present, or any RequireInfo field is
+	// absent, is treated as NOT IN THE CATALOG: it yields no ALT calls and no
+	// reconstructed reference calls -- but at an exact locus the query names,
+	// a store carrying ref_blocks may still answer 0/0 from a sample's gVCF
+	// block, as it does for any off-catalog position. A sample with an ALT call
+	// in the store at that record is never given one: the store and its gVCF
+	// would then disagree, and that is no reference observation.
+	//
+	// A field the source does not have is ErrNotCaptured, never "absent".
+	ExcludeInfo []string
+	RequireInfo []string
+
+	// WithInfo and WithFormat attach captured values to the calls returned, in
+	// Call.Extra. "*" means every captured field. Off by default, since FORMAT
+	// values live on the calls table, which is the large one.
+	WithInfo   []string
+	WithFormat []string
+}
+
+// wantsExtras reports whether a query needs captured INFO or FORMAT values at
+// all -- the only case that reads more than the fixed columns.
+func (q Query) wantsExtras() bool {
+	return len(q.ExcludeInfo)+len(q.RequireInfo)+len(q.WithInfo)+len(q.WithFormat) > 0
 }
 
 // plan indexes a Query's selectors for repeated matching during a scan.

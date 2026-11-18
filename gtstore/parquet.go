@@ -1737,15 +1737,31 @@ func (s *ParquetVolume) Calls(q Query) (iter.Seq2[Call, error], error) {
 	}
 	p := q.plan()
 	keep := callsFilter(q)
+	sel, err := s.selectFor(q)
+	if err != nil {
+		return nil, err
+	}
 
 	if !q.IncludeRef {
 		// The ALT-only case genuinely streams. calls.parquet is written in store
-		// order, so rows are yielded as they decode with nothing buffered.
+		// order, so rows are yielded as they decode with nothing buffered. An
+		// INFO filter or INFO values need the catalog first, read once and
+		// bounded by the query, so the calls can be judged as they stream.
 		return func(yield func(Call, error) bool) {
-			err := scanParquetPruned(s.calls, keep, func(c Call) bool {
+			metas, err := s.siteMetas(p, sel)
+			if err != nil {
+				yield(Call{}, err)
+				return
+			}
+			err = s.scanCalls(keep, sel, func(c Call, format map[string]string) bool {
 				if !p.wantsCall(c) {
 					return true
 				}
+				m := metas[canonLocus(c.Locus())]
+				if m.excluded {
+					return true
+				}
+				c.Extra = sel.extra(m.info, format)
 				return yield(c, nil)
 			})
 			if err != nil {
@@ -1763,7 +1779,7 @@ func (s *ParquetVolume) Calls(q Query) (iter.Seq2[Call, error], error) {
 	// what is held. An unrestricted IncludeRef query over a whole store is the case
 	// that still wants a streaming merge of the two scans.
 	return func(yield func(Call, error) bool) {
-		rows, err := s.callsWithRef(p, keep)
+		rows, err := s.callsWithRef(p, keep, sel)
 		if err != nil {
 			yield(Call{}, err)
 			return
@@ -1777,7 +1793,7 @@ func (s *ParquetVolume) Calls(q Query) (iter.Seq2[Call, error], error) {
 }
 
 // callsWithRef assembles ALT and reference calls for a query, in store order.
-func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
+func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter, sel *siteSelect) ([]Call, error) {
 	roster, err := s.Samples()
 	if err != nil {
 		return nil, err
@@ -1794,9 +1810,13 @@ func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
 	// UNGATED -- which samples carry some alternate. A below-gate ALT makes a
 	// sample an uncertain carrier, never a reference observation, and any alternate
 	// of a multiallelic record disqualifies every site split out of it.
+	metas, err := s.siteMetas(p, sel)
+	if err != nil {
+		return nil, err
+	}
 	altBySite := map[Locus][]Call{}
 	carries := map[string]map[RecordKey]bool{}
-	if err := scanParquetPruned(s.calls, keep, func(c Call) bool {
+	if err := s.scanCalls(keep, sel, func(c Call, format map[string]string) bool {
 		if !p.wantsSample(c.SampleID) {
 			return true
 		}
@@ -1811,8 +1831,11 @@ func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
 			carries[c.SampleID] = map[RecordKey]bool{}
 		}
 		carries[c.SampleID][loc.Record()] = true
-		if p.wantsSite(loc, c.RefEnd) && p.q.Gate.Admits(c) {
-			k := canonLocus(loc)
+		k := canonLocus(loc)
+		// An excluded site still counts above -- its carriers are carriers --
+		// but emits nothing: it is answered, if at all, as off the catalog.
+		if m := metas[k]; !m.excluded && p.wantsSite(loc, c.RefEnd) && p.q.Gate.Admits(c) {
+			c.Extra = sel.extra(m.info, format)
 			altBySite[k] = append(altBySite[k], c)
 		}
 		return true
@@ -1833,6 +1856,12 @@ func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
 			return true
 		}
 		k := canonLocus(loc)
+		m := metas[k]
+		if m.excluded {
+			// Treated as off the catalog: not marked, so a named exact locus
+			// falls through to the reference blocks below.
+			return true
+		}
 		inCatalog[k] = true
 		// One pass over the roster, emitting each sample's ALT call or its reference
 		// call. Interleaved rather than ALT-block-then-reference-block, so rows are
@@ -1856,7 +1885,9 @@ func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
 			if !ok {
 				continue // never called here at a depth the gate admits
 			}
-			out = append(out, HomRefCall(name, loc, run.MinDP))
+			ref := HomRefCall(name, loc, run.MinDP)
+			ref.Extra = sel.extra(m.info, nil)
+			out = append(out, ref)
 		}
 		return true
 	})
@@ -1898,7 +1929,7 @@ func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
 		}
 	}
 
-	extra, err := s.offCatalogRefs(p, wanted, inCatalog)
+	extra, err := s.offCatalogRefs(p, wanted, inCatalog, carries, metas, sel)
 	if err != nil {
 		return nil, err
 	}
@@ -1918,7 +1949,13 @@ func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter) ([]Call, error) {
 //
 // A requested locus here can have no ALT call (calls live only at catalog
 // sites), so a sample is either vouched for by a block or absent.
-func (s *ParquetVolume) offCatalogRefs(p *plan, wanted []string, inCatalog map[Locus]bool) ([]Call, error) {
+//
+// A locus the INFO filter excluded arrives here too, and may hold ALT calls: a
+// sample carrying one is given no reference call, since the store and its gVCF
+// would then disagree. (A true off-catalog locus has no calls, so this changes
+// nothing there.)
+func (s *ParquetVolume) offCatalogRefs(p *plan, wanted []string, inCatalog map[Locus]bool,
+	carries map[string]map[RecordKey]bool, metas map[Locus]siteMeta, sel *siteSelect) ([]Call, error) {
 	if !s.hasRefBlocks {
 		return nil, nil
 	}
@@ -1963,9 +2000,15 @@ func (s *ParquetVolume) offCatalogRefs(p *plan, wanted []string, inCatalog map[L
 	}
 	var out []Call
 	for _, l := range off {
+		info := metas[canonLocus(l)].info
 		for _, name := range wanted { // roster order, as at a catalog site
+			if carries[name][l.Record()] {
+				continue
+			}
 			if dp, ok := floor[l][name]; ok {
-				out = append(out, HomRefCall(name, l, dp))
+				c := HomRefCall(name, l, dp)
+				c.Extra = sel.extra(info, nil)
+				out = append(out, c)
 			}
 		}
 	}

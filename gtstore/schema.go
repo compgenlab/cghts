@@ -82,6 +82,11 @@ type Call struct {
 	// as 0, which is why unknown is 0 here rather than Missing -- the two conventions
 	// would otherwise disagree the moment the column appears.
 	MinDP int32 `parquet:"-"`
+
+	// Extra carries the captured INFO/FORMAT values a query asked for
+	// (Query.WithInfo/WithFormat); nil otherwise. Not a column: the values live
+	// in their own columns and are attached at query time.
+	Extra *CallExtra `parquet:"-"`
 }
 
 // Locus returns the site this call belongs to.
