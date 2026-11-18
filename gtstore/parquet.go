@@ -1886,6 +1886,7 @@ func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter, sel *siteSelect) 
 				continue // never called here at a depth the gate admits
 			}
 			ref := HomRefCall(name, loc, run.MinDP)
+			ref.RefSource = RefFromCatalog
 			ref.Extra = sel.extra(m.info, nil)
 			out = append(out, ref)
 		}
@@ -2007,6 +2008,7 @@ func (s *ParquetVolume) offCatalogRefs(p *plan, wanted []string, inCatalog map[L
 			}
 			if dp, ok := floor[l][name]; ok {
 				c := HomRefCall(name, l, dp)
+				c.RefSource = RefFromBlock
 				c.Extra = sel.extra(info, nil)
 				out = append(out, c)
 			}

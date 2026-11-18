@@ -374,6 +374,8 @@ func homRefCallFor(rec *vcf.VcfRecord, sample string, sf SampleFields,
 		ADRef:    adRef,
 		ADAlt:    adAlt,
 		GQ:       sf.GQ,
+
+		RefSource: RefFromCatalog,
 	}, true
 }
 
@@ -692,6 +694,8 @@ func blockRefCall(rec *vcf.VcfRecord, col int, sample string, sf SampleFields,
 	}
 	if !blockVouchesReference(c, g) {
 		c.GT = NoCallGT
+	} else {
+		c.RefSource = RefFromBlock
 	}
 	return c, true
 }

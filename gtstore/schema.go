@@ -87,6 +87,14 @@ type Call struct {
 	// (Query.WithInfo/WithFormat); nil otherwise. Not a column: the values live
 	// in their own columns and are attached at query time.
 	Extra *CallExtra `parquet:"-"`
+
+	// RefSource names what a reference (0/0) call rests on, as
+	// SampleState.RefSource does for Classify: a catalog run or a VCF record
+	// genotyped at the site (RefFromCatalog), or a gVCF reference block
+	// (RefFromBlock). Empty on an ALT call. Set by the backends when they emit
+	// the row, because the caller cannot recover it: a site the INFO filter
+	// excluded is in the catalog yet answered from blocks.
+	RefSource RefSource `parquet:"-"`
 }
 
 // Locus returns the site this call belongs to.

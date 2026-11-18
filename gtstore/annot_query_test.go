@@ -129,6 +129,9 @@ func convertForTest(t *testing.T, vcfPath string, blocks []RefBlock) string {
 // wrote down, an asymmetry that predates captured values.
 func rowText(c Call) string {
 	s := fmt.Sprintf("%s:%d:%s:%s %s %s", c.Chrom, c.Pos, c.Ref, c.Alt, c.SampleID, c.GT)
+	if c.RefSource != "" {
+		s += " [" + string(c.RefSource) + "]"
+	}
 	if c.Extra != nil {
 		s += " info{" + mapText(c.Extra.Info) + "}"
 		if c.GT != "0/0" {
@@ -248,9 +251,33 @@ func TestExcludedSiteAnsweredByRefBlocks(t *testing.T) {
 
 	got := queryRows(t, ps, Query{Loci: []Locus{locus}, IncludeRef: true, Gate: annotGate,
 		ExcludeInfo: []string{"IMPUTED"}, WithInfo: []string{"R2"}})
-	want := []string{"chr1:200:C:T S2 0/0 info{R2=0.5;}"}
+	want := []string{"chr1:200:C:T S2 0/0 [ref_block] info{R2=0.5;}"}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("excluded locus answered as\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+	}
+
+	// The row says what it rests on: the block, though the site is in the
+	// catalog -- which is why a caller cannot work this out for itself.
+	calls, err := CollectCalls(ps, Query{Loci: []Locus{locus}, IncludeRef: true, Gate: annotGate,
+		ExcludeInfo: []string{"IMPUTED"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0].RefSource != RefFromBlock {
+		t.Errorf("RefSource at an excluded locus: %+v, want one row from %s", calls, RefFromBlock)
+	}
+	calls, err = CollectCalls(ps, Query{Loci: []Locus{locus}, IncludeRef: true, Gate: annotGate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range calls {
+		want := RefSource("")
+		if c.GT == HomRefGT {
+			want = RefFromCatalog
+		}
+		if c.RefSource != want {
+			t.Errorf("%s %s: RefSource %q, want %q", c.SampleID, c.GT, c.RefSource, want)
+		}
 	}
 
 	// A span never enumerates off-catalog positions, so there it is simply gone.
