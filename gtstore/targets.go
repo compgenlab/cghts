@@ -412,5 +412,8 @@ func (t *Targets) Report(w io.Writer) {
 	if n := t.Skipped; n > 0 {
 		fmt.Fprintf(w, "targets  %d record(s) skipped: ALT is '.', no alternate to ask about\n", n)
 	}
+	if n := t.Filtered; n > 0 {
+		fmt.Fprintf(w, "targets  %d record(s) skipped: FILTER is not PASS\n", n)
+	}
 	fmt.Fprintf(w, "targets  %d locus/loci, %d span(s)\n", len(t.Loci), len(t.Spans))
 }
