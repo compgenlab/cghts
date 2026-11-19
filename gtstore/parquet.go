@@ -1389,7 +1389,7 @@ func OpenParquetContext(ctx context.Context, base string) (*ParquetVolume, error
 	// once rather than repeating it, and every shard of one store agrees about
 	// what the store is.
 	first := calls.single()
-	pf, err := parquet.OpenFile(first.ra, first.size)
+	pf, err := openFooter(first.ra, first.size)
 	if err != nil {
 		calls.Close()
 		return nil, fmt.Errorf("reading %s: %w", first.name, err)
@@ -1573,7 +1573,7 @@ func verifyAgainstManifest(man *VolumeManifest, callsFile *parquet.File, calls, 
 			c.file = nil
 			var total int64
 			for _, sh := range c.set.shards {
-				f, err := parquet.OpenFile(sh.m.ra, sh.m.size)
+				f, err := openFooter(sh.m.ra, sh.m.size)
 				if err != nil {
 					return fmt.Errorf("reading %s: %w", sh.info.Name, err)
 				}
@@ -1601,7 +1601,7 @@ func verifyAgainstManifest(man *VolumeManifest, callsFile *parquet.File, calls, 
 				return fmt.Errorf("%s.parquet is missing, but the manifest records %d rows in it",
 					c.name, want.Rows)
 			}
-			f, err := parquet.OpenFile(m.ra, m.size)
+			f, err := openFooter(m.ra, m.size)
 			if err != nil {
 				return fmt.Errorf("reading %s.parquet: %w", c.name, err)
 			}
@@ -1650,7 +1650,7 @@ func openOptionalTable(ctx context.Context, locator string) (*table, bool, error
 		}
 		return nil, false, fmt.Errorf("opening %s: %w", locator, err)
 	}
-	if _, err := parquet.OpenFile(m.ra, m.size); err != nil {
+	if _, err := openFooter(m.ra, m.size); err != nil {
 		m.Close()
 		return nil, false, fmt.Errorf("reading %s: %w", locator, err)
 	}

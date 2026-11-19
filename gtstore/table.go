@@ -55,9 +55,38 @@ type table struct {
 // pay for the footer, which over object storage is a request each.
 func (m *table) parsed() (*parquet.File, error) {
 	m.once.Do(func() {
-		m.file, m.parseErr = parquet.OpenFile(m.ra, m.size)
+		m.file, m.parseErr = openForScan(m.ra, m.size)
 	})
 	return m.file, m.parseErr
+}
+
+// HOW A TABLE FILE IS OPENED, which turned out to dominate opening a store.
+//
+// parquet-go's default open reads two optional sections eagerly: the page index,
+// and the header of EVERY ROW GROUP'S BLOOM FILTER -- one small random read per
+// row group per filtered column, scattered through the file. On a 30,000-sample
+// cohort a calls shard has thousands of row groups, and on cluster or network
+// storage each of those reads waits on latency: gtstore create sat for over
+// fifteen minutes at near-zero CPU opening volumes it never queried.
+//
+// Neither section is needed to open a store: verifying a member against the
+// manifest reads only the footer's row count, and the metadata lives in the
+// footer too. Both load lazily on first use (FileColumnChunk.ColumnIndex,
+// BloomFilter), so skipping the eager pass changes what is read, never what
+// is answered.
+
+// openFooter parses a table's footer and nothing else: for verification and
+// metadata, which is every open that is not about to scan.
+func openFooter(ra io.ReaderAt, size int64) (*parquet.File, error) {
+	return parquet.OpenFile(ra, size, parquet.SkipPageIndex(true), parquet.SkipBloomFilters(true))
+}
+
+// openForScan is the open a query uses. The page index stays eager -- pruning
+// reads a column index for every row group, and one contiguous read of the
+// whole index beats one per group -- but bloom filters load only if a scan
+// asks for one.
+func openForScan(ra io.ReaderAt, size int64) (*parquet.File, error) {
+	return parquet.OpenFile(ra, size, parquet.SkipBloomFilters(true))
 }
 
 // openTable opens a store table from any locator: a filesystem path, an
@@ -124,7 +153,7 @@ func TableShape(ctx context.Context, locator string) (rows, size int64, err erro
 		return 0, 0, err
 	}
 	defer m.Close()
-	f, err := parquet.OpenFile(m.ra, m.size)
+	f, err := openFooter(m.ra, m.size)
 	if err != nil {
 		return -1, m.size, nil
 	}
