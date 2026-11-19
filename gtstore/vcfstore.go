@@ -241,7 +241,7 @@ func (s *VcfStore) Calls(q Query) (iter.Seq2[Call, error], error) {
 			// and exactly one reference row per sample -- never one per base, however
 			// wide the block.
 			if rec.IsRefBlock() {
-				if !q.IncludeRef {
+				if !q.IncludeRef || q.IgnoreRefBlocks {
 					return true, nil
 				}
 				if !p.touchesSpan(rec.Chrom, int32(rec.Pos), refEnd) {

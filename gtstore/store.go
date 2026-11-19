@@ -250,6 +250,13 @@ type Query struct {
 	// values live on the calls table, which is the large one.
 	WithInfo   []string
 	WithFormat []string
+
+	// IgnoreRefBlocks answers as though the source carried no reference
+	// blocks: a store's ref_blocks table is not read, and a gVCF's block
+	// records are skipped. Every position off the catalog -- and every site the
+	// INFO filter excluded -- is then not assayed. For comparing a store with
+	// and without its attached gVCF blocks, without keeping two stores.
+	IgnoreRefBlocks bool
 }
 
 // wantsExtras reports whether a query needs captured INFO or FORMAT values at

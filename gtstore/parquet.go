@@ -1957,7 +1957,7 @@ func (s *ParquetVolume) callsWithRef(p *plan, keep scanFilter, sel *siteSelect) 
 // nothing there.)
 func (s *ParquetVolume) offCatalogRefs(p *plan, wanted []string, inCatalog map[Locus]bool,
 	carries map[string]map[RecordKey]bool, metas map[Locus]siteMeta, sel *siteSelect) ([]Call, error) {
-	if !s.hasRefBlocks {
+	if !s.hasRefBlocks || p.q.IgnoreRefBlocks {
 		return nil, nil
 	}
 	var off []Locus
