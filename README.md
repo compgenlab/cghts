@@ -252,9 +252,12 @@ pass**: the Parquet side prunes row groups by the union of the selectors, so a
 - Stores keep the source's own contig spelling; compare through
   `CanonKey`/`SameChrom` so `chr17`, `17` and `NC_000017.11` all resolve
 
-The `gtstore` command (`gtstore convert`, `gtstore query`, ...) is the CLI over this package; see
-[`docs/convert.md`](https://github.com/compgenlab/gtstore/blob/main/docs/convert.md)
-for the format walk-through and measurements.
+The `pendium-gt` command (`pendium-gt convert`, `pendium-gt query`, ...), from
+[Pendium](https://github.com/compgenlab/pendium), is the CLI over this package; see
+[`docs/convert.md`](https://github.com/compgenlab/pendium/blob/main/docs/convert.md)
+for the format walk-through and measurements. Pendium calls the top level of a
+store a *pendium*; this package keeps the name `gtstore`, as do its on-disk names
+(`gtstore.json.gz`, `gtstore.*` metadata keys).
 
 ### iosource — pluggable random-access I/O
 
