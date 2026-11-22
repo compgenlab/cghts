@@ -54,11 +54,24 @@ import (
 // locus so that all but one could answer "not mine".
 
 // StoreManifestFile is the marker that makes a directory an archive.
-const StoreManifestFile = "gtstore.json.gz"
+//
+// It is named for the CLI that writes it (gtset), and was gtstore.json.gz
+// until that rename. Only the file name changed -- its contents and
+// StoreManifestVersion did not -- so the old name is still read; see
+// PreviousStoreManifestFile.
+const StoreManifestFile = "gtset.json.gz"
+
+// PreviousStoreManifestFile is the archive marker's name before the gtset
+// rename. It is read when StoreManifestFile is absent and never written, and
+// WriteStoreManifest removes it once the current marker is in place, so an
+// archive is moved to the new name by the next bind or attach and no store has
+// to be converted again for a file name. When both exist the current one wins.
+const PreviousStoreManifestFile = "gtstore.json.gz"
 
 // StoreManifestVersion is the format version this package writes.
 //
-// 2 is the gtstore rename: the marker became gtstore.json.gz and the Parquet
+// 2 is the gtstore rename: the marker became gtstore.json.gz (since renamed
+// gtset.json.gz, same contents, see PreviousStoreManifestFile) and the Parquet
 // metadata keys moved from cgkit.* to gtstore.*. Nothing older is read; a
 // store from before it is reconverted (see LegacyStoreMarker).
 const StoreManifestVersion = 2
@@ -75,7 +88,8 @@ var ErrLegacyStore = errors.New("written before the varstore -> gtstore rename; 
 // archive marker and not the current one.
 func checkLegacyStore(ctx context.Context, base string) error {
 	base = TrimStoreSuffix(base)
-	if tableExists(ctx, joinStore(base, LegacyStoreMarker)) && !tableExists(ctx, StoreManifestPath(base)) {
+	if tableExists(ctx, joinStore(base, LegacyStoreMarker)) && !tableExists(ctx, StoreManifestPath(base)) &&
+		!tableExists(ctx, joinStore(base, PreviousStoreManifestFile)) {
 		return fmt.Errorf("%s: %w", base, ErrLegacyStore)
 	}
 	return nil
@@ -425,7 +439,15 @@ func readStoreManifest(ctx context.Context, base string) (*StoreManifest, error)
 	locator := StoreManifestPath(base)
 	src, err := iosource.Open(ctx, locator)
 	if err != nil {
-		return nil, err
+		// An archive bound before the gtset rename carries the same manifest
+		// under its former name. Only tried when the current one is absent, so
+		// a current archive costs no extra request.
+		prev := joinStore(base, PreviousStoreManifestFile)
+		psrc, perr := iosource.Open(ctx, prev)
+		if perr != nil {
+			return nil, err
+		}
+		src, locator = psrc, prev
 	}
 	defer src.Close()
 	size, err := src.Size()
@@ -469,7 +491,15 @@ func WriteStoreManifest(base string, m StoreManifest) error {
 		f.Close()
 		return fmt.Errorf("compressing store manifest: %w", err)
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// The current marker is in place, so the archive's manifest under its
+	// former name is now only a stale copy. Removing it is tidiness, not
+	// correctness -- the current name always wins on read -- so a failure
+	// here does not fail a write that succeeded.
+	_ = sink.Remove(PreviousStoreManifestFile)
+	return nil
 }
 
 // BuildStore describes an archive over volumes that already exist, verifying that they
