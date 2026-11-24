@@ -168,7 +168,7 @@ func AttachRefBlocks(ctx context.Context, base string, frags []Fragment, opts At
 		// there. Refused rather than repaired: the gVCF is the only source.
 		if f.Meta.MaxGap > 0 {
 			return nil, fmt.Errorf("fragment %s merged blocks across gaps of up to %d bp, so it may "+
-				"claim bases that were never assayed; rebuild it with refblock-calc", f.Dir, f.Meta.MaxGap)
+				"claim bases that were never assayed; rebuild it with gtset gvcf-extract", f.Dir, f.Meta.MaxGap)
 		}
 	}
 	for i := 1; i < len(frags); i++ {
@@ -206,7 +206,7 @@ func AttachRefBlocks(ctx context.Context, base string, frags []Fragment, opts At
 		if man.Params.MaxGap > 0 {
 			return nil, fmt.Errorf("%s's existing blocks were merged across gaps of up to %d bp and "+
 				"may claim bases that were never assayed; rebuild from fragments made by the "+
-				"current refblock-calc instead of replacing", base, man.Params.MaxGap)
+				"current gtset gvcf-extract instead of replacing", base, man.Params.MaxGap)
 		}
 	}
 

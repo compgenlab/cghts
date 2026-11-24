@@ -305,7 +305,7 @@ func ReadFragmentMeta(ctx context.Context, dir string) (*FragmentMeta, error) {
 		return nil, fmt.Errorf("%s is marked incomplete; rebuild the fragment", locator)
 	}
 	if m.FormatVersion < FragmentFormatVersion {
-		return nil, fmt.Errorf("%s (fragment format %d): %w; rebuild it with gtstore refblock-calc",
+		return nil, fmt.Errorf("%s (fragment format %d): %w; rebuild it with gtset gvcf-extract",
 			locator, m.FormatVersion, ErrLegacyStore)
 	}
 	if m.FormatVersion > FragmentFormatVersion {

@@ -1492,7 +1492,7 @@ func requireManifest(ctx context.Context, base string) (*VolumeManifest, error) 
 	if err != nil {
 		return nil, fmt.Errorf("%s has no readable %s, so it cannot be shown to be "+
 			"a complete store: %w\n\tit is from an interrupted conversion, or predates "+
-			"manifests; re-convert it, or inspect it with gtstore summary",
+			"manifests; re-convert it, or inspect it with gtset summary",
 			base, VolumeManifestFile, err)
 	}
 	if !man.Complete {
