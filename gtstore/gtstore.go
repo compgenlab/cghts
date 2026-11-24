@@ -82,7 +82,7 @@ const StoreManifestVersion = 2
 const LegacyStoreMarker = "varstore.json.gz"
 
 // ErrLegacyStore reports data written before the gtstore rename.
-var ErrLegacyStore = errors.New("written before the varstore -> gtstore rename; reconvert it with gtstore")
+var ErrLegacyStore = errors.New("written before the varstore -> gtstore rename; reconvert it with gtset")
 
 // checkLegacyStore returns ErrLegacyStore when base holds the pre-rename
 // archive marker and not the current one.
